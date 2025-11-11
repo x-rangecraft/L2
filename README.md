@@ -32,12 +32,27 @@
 |  | `rviz2` | RViz2 实例节点，用于调试、场景复现与演示。 |
 
 ## 工作区结构
-- `src/`：ROS 2 工作空间源码，按模块拆分为 `bringup/`（统一 launch）、`description/`（URDF/Mesh 与 `robot_desc_node`）、`driver/`（`robot_driver_node`）、`move_controller/`（轨迹与逆解控制）、`skill/`（常用动作/技能封装）、`perception/`（2D 感知节点）、`vision/`（3D 映射与相机接入）、`tf_tools/`（静态 TF 配置发布）、`app/`（局域网服务端）、`web/`（Web/foxglove 可视化桥）、`viz/`（RViz2 配置）、`msgs/`（自定义消息/服务）。
-- `build/`：`colcon build` 的中间产物，按包生成 `CMake` 与对象缓存。
-- `install/`：`colcon` 安装结果，包含可执行体、资源与环境脚本。
-- `log/`：`ros2 launch/run` 与 `colcon` 的日志输出，便于定位编译与运行问题。
-- `start_robot.sh`：实机部署一键启动脚本（后续填入 bringup 组合 launch）。
-- `start_sim.sh`：仿真环境入口脚本（预留用于 Gazebo/RViz 仿真流程）。
+```
+L2/
+├── src/                         # ROS 2 源码
+│   ├── bringup/                 # 统一启动（launch-only）
+│   ├── description/             # robot_desc_node + URDF/Mesh
+│   ├── driver/                  # robot_driver_node
+│   ├── move_controller/         # move_controller_group_node
+│   ├── skill/                   # robot_skill_node
+│   ├── perception/              # object_perception_2d_node
+│   ├── vision/                  # vision_3d_mapper_node + 相机整合
+│   ├── tf_tools/                # static_tf_config / static_tf_publisher
+│   ├── app/                     # robot_server
+│   ├── web/                     # robot_web + foxglove_bridge
+│   ├── viz/                     # RViz2 启动配置
+│   └── msgs/                    # 自定义消息/服务
+├── build/                       # colcon 编译缓存
+├── install/                     # colcon 安装产物
+├── log/                         # colcon / ROS 2 运行日志
+├── start_robot.sh               # 实机一键启动入口
+└── start_sim.sh                 # 仿真环境入口
+```
 
 ## 传感器与执行器详情
 
