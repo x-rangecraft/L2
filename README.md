@@ -17,7 +17,7 @@
 ## Node 拆分
 | 模块 | Node | 描述 |
 | --- | --- | --- |
-| 相机 | `realsense2_camera` | RealSense 官方驱动节点，管理相机硬件、内参发布与话题输出。 |
+| 相机 | `realsense2_camera` | RealSense 官方驱动节点（由 `camera` 包统一 launch），管理硬件、内参与话题输出。 |
 | 视觉 | `object_perception_2d_node` | 负责 2D Mask 与物体识别/记忆，输出语义分割或检测结果。 |
 |  | `vision_3d_mapper_node` | 将 2D Mask 投影到 3D 点云，生成世界/相机坐标系下的目标姿态。 |
 | 机械臂 | `robot_driver_node` | 读写机械臂控制器：实时采集关节位置/速度/力矩，并对目标关节位姿做插值、限速与安全检查后下发。 |
@@ -34,24 +34,25 @@
 ## 工作区结构
 ```
 L2/
-├── src/                         # ROS 2 源码
-│   ├── bringup/                 # 统一启动（launch-only）
-│   ├── description/             # robot_desc_node + URDF/Mesh
-│   ├── driver/                  # robot_driver_node
-│   ├── move_controller/         # move_controller_group_node
-│   ├── skill/                   # robot_skill_node
-│   ├── perception/              # object_perception_2d_node
-│   ├── vision/                  # vision_3d_mapper_node + 相机整合
-│   ├── tf_tools/                # static_tf_config / static_tf_publisher
-│   ├── app/                     # robot_server
-│   ├── web/                     # robot_web + foxglove_bridge
-│   ├── viz/                     # RViz2 启动配置
-│   └── msgs/                    # 自定义消息/服务
-├── build/                       # colcon 编译缓存
-├── install/                     # colcon 安装产物
-├── log/                         # colcon / ROS 2 运行日志，ros2 run tf2_tools view_frames 等诊断生成的 frames_*.{gv,pdf} 也统一写入此处
-├── start_robot.sh               # 实机一键启动入口
-└── start_sim.sh                 # 仿真环境入口
+├── src/                         # 所有 ROS 2 包源码的根目录，涵盖感知/控制/应用等
+│   ├── bringup/                 # 统一的 launch 入口，编排节点启动顺序
+│   ├── camera/                  # RealSense 等相机节点的带参启动、调优与多机位管理
+│   ├── description/             # 机器人描述包，含 URDF/Mesh 供 robot_desc_node 发布
+│   ├── driver/                  # 机械臂底层驱动 robot_driver_node 的实现
+│   ├── move_controller/         # 轨迹规划与运动控制逻辑 move_controller_group_node
+│   ├── skill/                   # 上层动作/技能封装，提供抓取等复合指令
+│   ├── perception/              # 2D 视觉感知 object_perception_2d_node 及其资源
+│   ├── vision/                  # 3D 映射与高阶视觉推理（消费 camera 包输出的话题）
+│   ├── tf_tools/                # 静态 TF 配置/发布脚本（static_tf_config & publisher）
+│   ├── app/                     # 面向外部的服务端 robot_server 与 API 实现
+│   ├── web/                     # Web 可视化与 foxglove_bridge 相关代码
+│   ├── viz/                     # RViz2 场景与可视化启动配置
+│   └── msgs/                    # 自定义消息/服务/动作定义供各包复用
+├── build/                       # colcon 编译生成的中间缓存
+├── install/                     # colcon 安装产物，可直接 source 使用
+├── log/                         # ROS 2 / colcon 运行日志与 TF 诊断输出
+├── start_robot.sh               # 实机一键启动脚本，按顺序拉起所需节点
+└── start_sim.sh                 # 仿真环境一键启动脚本（Gazebo/Fake Driver）
 ```
 
 ## 传感器与执行器详情
