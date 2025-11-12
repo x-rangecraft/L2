@@ -1,0 +1,7 @@
+
+[2025-11-12T14:33:04+08:00] Starting robot_desc_node via start_robot_desc.sh
+
+[2025-11-12T14:35:19+08:00] Starting robot_desc_node via start_robot_desc.sh
+[2025-11-12T14:35:19+08:00] Running asset validation...
+Package 'description' not found
+Asset validation failed. Aborting node launch.

@@ -32,6 +32,7 @@ setup(
     entry_points={
         "console_scripts": [
             "robot_desc_node = description.robot_desc_node:main",
+            "robot_desc_check = description.asset_check:main",
         ],
     },
 )

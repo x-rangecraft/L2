@@ -109,7 +109,15 @@ class RobotDescNode(Node):
         return doc.toxml()
 
     def _parse_xacro_args(self) -> Dict[str, str]:
-        args = list(self.get_parameter("xacro_args").value)
+        raw_args = self.get_parameter("xacro_args").value
+        if isinstance(raw_args, str):
+            args = [segment.strip() for segment in raw_args.split(",") if segment.strip()]
+        elif isinstance(raw_args, (list, tuple, set)):
+            args = [str(item) for item in raw_args if str(item).strip()]
+        elif raw_args is None:
+            args = []
+        else:
+            args = [str(raw_args).strip()]
         mappings: Dict[str, str] = {}
         for arg in args:
             if ":=" not in arg:

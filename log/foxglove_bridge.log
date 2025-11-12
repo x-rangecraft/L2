@@ -69,3 +69,8 @@
 [INFO] [1762850641.144437946] [foxglove_bridge]: received subscribe request for channel 31 from client 1 (sink 1)
 [INFO] [1762850641.147205098] [foxglove_bridge]: created ROS subscription on /robot_description (std_msgs/msg/String) successfully for channel 31 (client 1, sink 1)
 [INFO] [1762850641.624527571] [foxglove_bridge]: publishing connection graph
+[INFO] [1762915581.506251629] [foxglove_bridge]: publishing connection graph
+[INFO] [1762915582.010815738] [foxglove_bridge]: publishing connection graph
+[INFO] [1762915582.515484820] [foxglove_bridge]: publishing connection graph
+[INFO] [1762919007.246083352] [foxglove_bridge]: publishing connection graph
+[INFO] [1762919007.750737549] [foxglove_bridge]: publishing connection graph
