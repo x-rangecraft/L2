@@ -146,37 +146,104 @@
       </geometry>
     </collision>
   </link>
-  <!-- Link link_6 -->
-  <link name="link_6">
+  <!-- Link gripper_base -->
+  <link name="gripper_base">
     <inertial>
       <origin xyz="-5.10177e-05 -0.00269952 0.0481778" rpy="0 0 0"/>
-      <mass value="0.60366"/>
-      <inertia ixx="0.000955866" ixy="1.47274e-05" ixz="-5.44088e-06" iyy="0.000761363" iyz="0.000106418" izz="0.000508596"/>
+      <mass value="0.30366"/>
+      <inertia ixx="0.000475866" ixy="7.474e-06" ixz="-2.72044e-06" iyy="0.000380363" iyz="0.000053209" izz="0.000254298"/>
     </inertial>
-    <!-- Part link_6_parts -->
     <visual>
       <origin xyz="-5.10177e-05 -0.00269952 0.0481778" rpy="-3.1416 -1.5708 0"/>
       <geometry>
-        <mesh filename="http://192.168.1.184:9091/meshes/assets/link_6_visual.stl"/>
+        <mesh filename="http://192.168.1.184:9091/meshes/assets/gripper_base_visual.stl"/>
       </geometry>
-      <material name="link_6_parts_material">
-        <color rgba="1 0.6 0 1.0"/>
+      <material name="gripper_base_material">
+        <color rgba="0.8 0.8 0.8 1.0"/>
       </material>
     </visual>
     <collision>
       <origin xyz="-5.10177e-05 -0.00269952 0.0481778" rpy="-3.1416 -1.5708 0"/>
       <geometry>
-        <mesh filename="http://192.168.1.184:9091/meshes/assets/link_6_collision.stl"/>
+        <mesh filename="http://192.168.1.184:9091/meshes/assets/gripper_base_collision.stl"/>
       </geometry>
     </collision>
   </link>
-  <!-- Joint from link_5 to link_6 -->
+
+  <!-- Link left_finger -->
+  <link name="left_finger">
+    <inertial>
+      <origin xyz="0.02 0.0 0.02" rpy="0 0 0"/>
+      <mass value="0.150"/>
+      <inertia ixx="0.00024" ixy="0.00001" ixz="0.00001" iyy="0.00019" iyz="0.00001" izz="0.000127"/>
+    </inertial>
+    <visual>
+      <origin xyz="0.02 0.0 0.02" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="http://192.168.1.184:9091/meshes/assets/left_finger_visual.stl"/>
+      </geometry>
+      <material name="left_finger_material">
+        <color rgba="0.7 0.7 0.7 1.0"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0.02 0.0 0.02" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="http://192.168.1.184:9091/meshes/assets/left_finger_collision.stl"/>
+      </geometry>
+    </collision>
+  </link>
+
+  <!-- Link right_finger -->
+  <link name="right_finger">
+    <inertial>
+      <origin xyz="0.02 0.0 0.02" rpy="0 0 0"/>
+      <mass value="0.150"/>
+      <inertia ixx="0.00024" ixy="0.00001" ixz="0.00001" iyy="0.00019" iyz="0.00001" izz="0.000127"/>
+    </inertial>
+    <visual>
+      <origin xyz="0.02 0.0 0.02" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="http://192.168.1.184:9091/meshes/assets/right_finger_visual.stl"/>
+      </geometry>
+      <material name="right_finger_material">
+        <color rgba="0.7 0.7 0.7 1.0"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0.02 0.0 0.02" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="http://192.168.1.184:9091/meshes/assets/right_finger_collision.stl"/>
+      </geometry>
+    </collision>
+  </link>
+  <!-- Joint from link_5 to gripper_base -->
   <joint name="joint6" type="revolute">
     <origin xyz="-4.0742e-16 0.0353 0.0395" rpy="-1.5708 3.81639e-16 4.68582e-15"/>
     <parent link="link_5"/>
-    <child link="link_6"/>
+    <child link="gripper_base"/>
     <axis xyz="0 0 1"/>
     <limit effort="10" velocity="10" lower="-2.0944" upper="2.0944"/>
+  </joint>
+
+  <!-- Joint from gripper_base to left_finger -->
+  <joint name="left_finger_joint" type="revolute">
+    <origin xyz="0.05 0.02 0.08" rpy="0 0 0"/>
+    <parent link="gripper_base"/>
+    <child link="left_finger"/>
+    <axis xyz="0 1 0"/>
+    <limit effort="5" velocity="5" lower="0" upper="0.05"/>
+    <mimic joint="gripper_joint" multiplier="0.05" offset="0"/>
+  </joint>
+
+  <!-- Joint from gripper_base to right_finger -->
+  <joint name="right_finger_joint" type="revolute">
+    <origin xyz="0.05 -0.02 0.08" rpy="0 0 0"/>
+    <parent link="gripper_base"/>
+    <child link="right_finger"/>
+    <axis xyz="0 1 0"/>
+    <limit effort="5" velocity="5" lower="-0.05" upper="0"/>
+    <mimic joint="gripper_joint" multiplier="-0.05" offset="0"/>
   </joint>
   <!-- Joint from link_4 to link_5 -->
   <joint name="joint5" type="revolute">
