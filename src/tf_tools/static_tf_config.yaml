@@ -1,6 +1,6 @@
 {
   "metadata": {
-    "generated_at": "2025-11-12T10:27:29.347413+00:00",
+    "generated_at": "2025-11-12T10:58:47.695574+00:00",
     "generator": "static_tf_config_build.sh",
     "translation_units": "m",
     "rotation_units": "deg",
@@ -15,7 +15,8 @@
         "Y",
         "Z"
       ]
-    }
+    },
+    "urdf_source": "../description/urdf/yam.urdf"
   },
   "tf_tree": [
     {
@@ -174,5 +175,100 @@
         "z": -0.7938286023411368
       }
     }
+  },
+  "urdf_chain": {
+    "source_file": "../description/urdf/yam.urdf",
+    "links": [
+      {
+        "joint": "joint6",
+        "parent": "link_5",
+        "child": "link_6",
+        "origin_xyz": {
+          "x": -4.0742e-16,
+          "y": 0.0353,
+          "z": 0.0395
+        },
+        "origin_rpy": {
+          "roll": -1.5708,
+          "pitch": 3.81639e-16,
+          "yaw": 4.68582e-15
+        }
+      },
+      {
+        "joint": "joint5",
+        "parent": "link_4",
+        "child": "link_5",
+        "origin_xyz": {
+          "x": -0.0739968,
+          "y": -0.0395003,
+          "z": 2.44738e-05
+        },
+        "origin_rpy": {
+          "roll": -1.5708,
+          "pitch": 1.5708,
+          "yaw": 0.0
+        }
+      },
+      {
+        "joint": "joint4",
+        "parent": "link_3",
+        "child": "link_4",
+        "origin_xyz": {
+          "x": -0.245,
+          "y": -0.0600003,
+          "z": -1.9984e-15
+        },
+        "origin_rpy": {
+          "roll": -5.65471e-31,
+          "pitch": -1.1507e-13,
+          "yaw": 2.94252e-43
+        }
+      },
+      {
+        "joint": "joint3",
+        "parent": "link_2",
+        "child": "link_3",
+        "origin_xyz": {
+          "x": 0.264,
+          "y": 0.0,
+          "z": 6.77626e-21
+        },
+        "origin_rpy": {
+          "roll": -3.14159,
+          "pitch": 1.26218e-29,
+          "yaw": 7.88861e-31
+        }
+      },
+      {
+        "joint": "joint2",
+        "parent": "link_1",
+        "child": "link_2",
+        "origin_xyz": {
+          "x": 2.5e-05,
+          "y": -0.02,
+          "z": 0.0409
+        },
+        "origin_rpy": {
+          "roll": 1.5708,
+          "pitch": -1.98004e-28,
+          "yaw": 1.5708
+        }
+      },
+      {
+        "joint": "joint1",
+        "parent": "base_link",
+        "child": "link_1",
+        "origin_xyz": {
+          "x": -3.55271e-18,
+          "y": -1.05495e-18,
+          "z": 0.0631
+        },
+        "origin_rpy": {
+          "roll": 0.0,
+          "pitch": -0.0,
+          "yaw": 1.5708
+        }
+      }
+    ]
   }
 }

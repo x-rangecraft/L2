@@ -14,7 +14,7 @@ if ! command -v ros2 >/dev/null 2>&1; then
 fi
 
 readarray -t TRANSFORM_LINES < <(python3 - "$CONFIG_FILE" <<'PY')
-import json, sys
+import json, math, sys
 from pathlib import Path
 path = Path(sys.argv[1])
 with path.open() as f:
@@ -43,6 +43,37 @@ for name, t in order:
         f"{parent} {child} {tr['x']} {tr['y']} {tr['z']} "
         f"{quat['x']} {quat['y']} {quat['z']} {quat['w']} {name}"
     )
+chain = data.get('urdf_chain', {})
+links = chain.get('links', [])
+def rpy_to_quat(roll, pitch, yaw):
+    cy = math.cos(yaw * 0.5)
+    sy = math.sin(yaw * 0.5)
+    cp = math.cos(pitch * 0.5)
+    sp = math.sin(pitch * 0.5)
+    cr = math.cos(roll * 0.5)
+    sr = math.sin(roll * 0.5)
+    return (
+        sr * cp * cy - cr * sp * sy,
+        cr * sp * cy + sr * cp * sy,
+        cr * cp * sy - sr * sp * cy,
+        cr * cp * cy + sr * sp * sy,
+    )
+for link in links:
+    parent = link.get('parent')
+    child = link.get('child')
+    if not parent or not child:
+        continue
+    origin_xyz = link.get('origin_xyz', {})
+    origin_rpy = link.get('origin_rpy', {})
+    tx = origin_xyz.get('x', 0.0)
+    ty = origin_xyz.get('y', 0.0)
+    tz = origin_xyz.get('z', 0.0)
+    roll = origin_rpy.get('roll', 0.0)
+    pitch = origin_rpy.get('pitch', 0.0)
+    yaw = origin_rpy.get('yaw', 0.0)
+    qx, qy, qz, qw = rpy_to_quat(roll, pitch, yaw)
+    name = f"urdf_{link.get('joint', f'{parent}_to_{child}')}"
+    print(f"{parent} {child} {tx} {ty} {tz} {qx} {qy} {qz} {qw} {name}")
 PY
 )
 

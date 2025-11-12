@@ -49,7 +49,7 @@ L2/
 │   └── msgs/                    # 自定义消息/服务
 ├── build/                       # colcon 编译缓存
 ├── install/                     # colcon 安装产物
-├── log/                         # colcon / ROS 2 运行日志
+├── log/                         # colcon / ROS 2 运行日志，ros2 run tf2_tools view_frames 等诊断生成的 frames_*.{gv,pdf} 也统一写入此处
 ├── start_robot.sh               # 实机一键启动入口
 └── start_sim.sh                 # 仿真环境入口
 ```

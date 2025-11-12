@@ -10,6 +10,7 @@ BASE_BRX_DEFAULT="0.0"; BASE_BRY_DEFAULT="0.0"; BASE_BRZ_DEFAULT="0.0"
 CAM_TX_DEFAULT="0.0"; CAM_TY_DEFAULT="0.0"; CAM_TZ_DEFAULT="0.0"
 CAM_WRX_DEFAULT="0.0"; CAM_WRY_DEFAULT="0.0"; CAM_WRZ_DEFAULT="0.0"
 CAM_BRX_DEFAULT="0.0"; CAM_BRY_DEFAULT="0.0"; CAM_BRZ_DEFAULT="0.0"
+URDF_FILE_PATH="../description/urdf/yam.urdf"
 
 load_defaults() {
   if [[ ! -f "${CONFIG_FILE}" ]]; then
@@ -54,6 +55,16 @@ PY
 
 is_number() {
   [[ $1 =~ ^-?[0-9]*\.?[0-9]+([eE]-?[0-9]+)?$ ]]
+}
+
+ensure_urdf_file() {
+  if [[ -f "${URDF_FILE_PATH}" ]]; then
+    echo "使用固定 URDF：${URDF_FILE_PATH}"
+    return
+  fi
+  echo "[ERROR] 固定 URDF 文件不存在：${URDF_FILE_PATH}" >&2
+  echo "请确认 description/urdf 中已包含 yam.urdf" >&2
+  exit 1
 }
 
 prompt_numeric() {
@@ -105,14 +116,18 @@ TABLE
     "(${CAM_WRX}, ${CAM_WRY}, ${CAM_WRZ})" \
     "(${CAM_BRX}, ${CAM_BRY}, ${CAM_BRZ})"
   echo "==========================================="
+  echo "URDF 源文件：${URDF_FILE_PATH}"
 }
 
 generate_config() {
   export BASE_TX BASE_TY BASE_TZ BASE_WRX BASE_WRY BASE_WRZ BASE_BRX BASE_BRY BASE_BRZ
   export CAM_TX CAM_TY CAM_TZ CAM_WRX CAM_WRY CAM_WRZ CAM_BRX CAM_BRY CAM_BRZ
+  export URDF_FILE_PATH
   python3 - "$CONFIG_FILE" <<'PY'
 import json, math, os, sys
 from datetime import datetime, timezone
+from pathlib import Path
+from xml.etree import ElementTree as ET
 
 config_path = sys.argv[1]
 
@@ -228,6 +243,7 @@ data = {
             "world_axes": order,
             "body_axes": order,
         },
+        "urdf_source": os.environ.get("URDF_FILE_PATH") or "",
     },
     "tf_tree": [
         {"parent": "world", "child": "base_link"},
@@ -239,6 +255,58 @@ data = {
     },
 }
 
+def parse_urdf_chain(urdf_path):
+    chain = {
+        "source_file": urdf_path or "",
+        "links": [],
+    }
+    if not urdf_path:
+        chain["note"] = "urdf_path_not_provided"
+        return chain
+    path = Path(urdf_path)
+    if not path.exists():
+        chain["note"] = "urdf_not_found"
+        return chain
+    try:
+        root = ET.parse(path).getroot()
+    except Exception as exc:
+        chain["note"] = f"parse_error: {exc}"
+        return chain
+    entries = []
+    def parse_vector(text, count=3):
+        values = [0.0] * count
+        if not text:
+            return values
+        try:
+            parts = [float(p) for p in text.split()
+                     if p.strip()]
+        except ValueError:
+            return values
+        for i in range(min(count, len(parts))):
+            values[i] = parts[i]
+        return values
+    for joint in root.findall("joint"):
+        parent_el = joint.find("parent")
+        child_el = joint.find("child")
+        if parent_el is None or child_el is None:
+            continue
+        origin_el = joint.find("origin")
+        xyz = parse_vector(origin_el.attrib.get("xyz", "0 0 0") if origin_el is not None else None)
+        rpy = parse_vector(origin_el.attrib.get("rpy", "0 0 0") if origin_el is not None else None)
+        entries.append({
+            "joint": joint.attrib.get("name", ""),
+            "parent": parent_el.attrib.get("link", ""),
+            "child": child_el.attrib.get("link", ""),
+            "origin_xyz": {"x": xyz[0], "y": xyz[1], "z": xyz[2]},
+            "origin_rpy": {"roll": rpy[0], "pitch": rpy[1], "yaw": rpy[2]},
+        })
+    chain["links"] = entries
+    if not entries:
+        chain["note"] = "no_joint_entries_found"
+    return chain
+
+data["urdf_chain"] = parse_urdf_chain(os.environ.get("URDF_FILE_PATH"))
+
 with open(config_path, 'w', encoding='utf-8') as f:
     json.dump(data, f, indent=2)
     f.write('\n')
@@ -247,6 +315,7 @@ PY
 
 main() {
   load_defaults
+  ensure_urdf_file
   echo "== 配置 world → base_link 参数 =="
   collect_transform "BASE" "base_link"
   printf "\\n== 配置 world → camera_link 参数 ==\\n"
