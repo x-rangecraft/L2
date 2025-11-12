@@ -1,10 +1,9 @@
 # robot_desc_node 技术方案
 
 ## 1. 目标与约束
-- 在 ROS 2（rclcpp）环境中实现 `robot_desc_node`，以字符串形式发布 `/robot_description` 话题，供 `robot_state_publisher`、`rviz2` 等消费。
+- 在 ROS 2 Humble（rclpy）环境中实现纯 Python 的 `robot_desc_node`，以字符串形式发布 `/robot_description` 话题，供 `robot_state_publisher`、`rviz2`、`Foxglove` 等工具消费。
 - 支持加载单一 URDF 文件或由 xacro 生成的 URDF，解析过程中自动解析 mesh 资源。
 - 节点启动时间不超过 1 s；发布频率保持在参数化（默认 1 Hz）以兼容热加载。
-- Mesh 资源与 URDF 保持包内相对路径，避免硬编码绝对路径。
 
 ## 2. 输入与输出
 - **参数输入**：
@@ -17,38 +16,42 @@
 
 ## 3. 节点架构
 1. **资源解析层**
-   - 依赖 `ament_index_cpp::get_package_share_directory` 或 `ament_index_python` 查找包路径。
-   - 对 `package://` URI 做正则拆解，转为绝对路径；同时校验 mesh 文件存在性，缺失则抛出可诊断异常。
+   - 使用 `ament_index_python.get_package_share_directory` 查找包路径，统一解析 `package://` URI 并校验 mesh/URDF 存在性。
+   - 支持在工作空间内相对路径与安装后 share 目录下的绝对路径无缝切换。
 2. **URDF 生成层**
-   - 若 `urdf_path` 后缀为 `.xacro`，通过 `xacro` CLI 或 `libxacro` 运行生成临时 URDF 字符串；生成过程缓存于内存，避免磁盘中间文件。
-   - 解析结果经 `urdfdom` 验证结构，必要时写入 `rclcpp::Logger`。
-   - `frame_prefix` 通过 DOM 遍历批量更新 link/joint 名称。
+   - `.xacro` 文件通过 Python `xacro` API 解析为字符串，必要时配置 `xacro_args` 动态替换参数。
+   - URDF 文本可选追加 `frame_prefix`，并在加载后缓存至内存，避免重复 IO。
 3. **发布层**
-   - 使用定时器按照 `publish_rate` 发布；额外提供 `std_srvs/Trigger` 服务 `reload_description` 触发重新加载（便于在 mesh/URDF 更新后热替换）。
-   - 节点自检通过参数事件通知（`on_parameter_event`），便于 launch 文件检测加载是否成功。
+   - 使用 `rclpy` 定时器按照 `publish_rate` 发布 `std_msgs/String`；提供 `std_srvs/Trigger` 服务 `reload_description` 触发热加载。
+   - 启动时立即发布一次；加载失败以 `rclpy.logging` 输出可诊断信息。
 4. **监控与容错**
-   - 启动时打印摘要（link/joint 数）；mesh 丢失或解析失败进入 `lifecycle` `errorprocessing` 状态，等待外部管理器 reset。
+   - 通过参数事件或 service 反馈加载状态，必要时在 launch/监控节点中重试。
+   - 预留后续与 ROS 2 Lifecycle 节点集成的接口，以便在更严格场景下管理状态机。
 
 ## 4. 项目目录布局
 ```
 description/
-├── CMakeLists.txt     # ROS 构建配置（可执行与安装规则）
-├── package.xml        # 包元数据，声明依赖/版本/维护者
-├── urdf/              # 主 URDF 或 xacro 模型及宏库
-├── meshes/            # STL/DAE/GLB 等网格文件，按 link 分类
-├── config/            # YAML 等参数文件（publish_rate、frame_prefix 等）
-├── launch/            # Python/XML launch，组合 robot_desc_node 与 rsp/rviz
-├── src/               # C++/Python 源码；robot_desc_node、工具脚本
+├── package.xml          # ament_python 元数据（依赖 rclpy、xacro 等）
+├── setup.cfg / setup.py # Python 构建入口，注册 console_scripts
+├── resource/description # ament 索引用，占位即可
+├── config/              # YAML/说明文档（如 robot_description.txt, yam.xml）
+├── urdf/                # 主 URDF/xacro 文件（yam.urdf 等）
+├── meshes/              # STL/DAE/GLB 等网格文件
+├── launch/              # Python launch，声明参数并启动节点
+├── src/description/
+│   ├── __init__.py
+│   └── robot_desc_node.py # 纯 Python 实现的发布节点
+└── description.md       # 技术方案文档（可选安装到 share/description）
 ```
-- 该布局与 ROS 2 ament/colcon 约定兼容，可直接 `colcon build`。
-- `launch/` 中通过 `DeclareLaunchArgument` 显式暴露 `urdf_path`、`xacro_args`、`frame_prefix`，并把 `config/` 下的参数 YAML 加载进节点。
-- mesh、URDF 使用包内相对路径，可在 `install` 后通过 `ament_index` 正确查找。
-- 如需扩展额外资源（如 `rviz/` 配置、`tests/`），可在同级追加目录但保持核心结构不变。
+- `setup.py` 将 `config/`、`urdf/`、`meshes/`、`launch/` 安装到 `share/description`，方便运行期查找。
+- `robot_desc_node.py` 通过 `console_scripts` 暴露，在 launch 中以 `description` 包直接引用。
+- `config/` 除参数 YAML 外也可存放 Mujoco XML、硬件速查（`robot_description.txt`），launch 里根据需要加载。
+- `src/description` 可继续扩展辅助脚本（如 mesh 校验器），保持纯 Python 架构。
 
 ## 5. 测试与验证
-- **静态检查**：CI 中运行 `xacro --inorder`、`check_urdf` 校验拓扑。
-- **单元测试**：利用 `rclcpp::Test` 检查节点在参数变化时是否重新发布；mock mesh 缺失场景验证错误路径。
-- **集成测试**：Launch test 启动 `robot_desc_node + robot_state_publisher + rviz2 --validate-config`，确保 TF 树完整。
+- **静态检查**：CI 中运行 `xacro --inorder`、`check_urdf` 或 `urdf_to_graphiz` 校验拓扑。
+- **单元测试**：使用 `pytest` + `rclpy` 的测试基类，注入假参数/文件并验证 `/robot_description` 发布内容；mock mesh 缺失场景应返回错误。
+- **集成测试**：`launch_testing` 启动 `robot_desc_node + robot_state_publisher + rviz2 --validate-config`，确保 TF 树完整并可在 Foxglove 中可视化。
 - **可视化验证**：`rviz2` 中加载 `/robot_description`，确认 mesh 贴图与原始 CAD 一致。
 
 ## 6. 后续扩展
