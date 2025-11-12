@@ -109,7 +109,10 @@ else
     printf '[%s] Asset validation skipped via --skip-check\n' "$(date --iso-8601=seconds)" | tee -a "${LOG_FILE}"
 fi
 
-ROS_PARAMS=(-p "urdf_path:=${URDF_PATH}" -p "publish_rate:=${PUBLISH_RATE}" -p "frame_prefix:=${FRAME_PREFIX}")
+ROS_PARAMS=(-p "urdf_path:=${URDF_PATH}" -p "publish_rate:=${PUBLISH_RATE}")
+if [[ -n "${FRAME_PREFIX}" ]]; then
+    ROS_PARAMS+=(-p "frame_prefix:=${FRAME_PREFIX}")
+fi
 if [[ ${#XACRO_ARGS[@]} -gt 0 ]]; then
     XACRO_PARAM_VALUE="$(IFS=','; printf '%s' "${XACRO_ARGS[*]}")"
     ROS_PARAMS+=(-p "xacro_args:=${XACRO_PARAM_VALUE}")
