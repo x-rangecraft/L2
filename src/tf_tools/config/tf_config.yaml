@@ -1,0 +1,277 @@
+# TF Tools 配置文件
+# 用于管理 ROS 2 系统中的坐标变换关系
+
+# ============================================
+# 全局配置
+# ============================================
+tf_config:
+  # 坐标系前缀（多机器人场景使用）
+  # 示例：设置为 "arm1_" 后，所有坐标系名称将添加此前缀
+  # base_link -> arm1_base_link
+  frame_prefix: ""
+
+  # 是否启用配置验证
+  # true: 启动时验证配置文件格式和内容
+  # false: 跳过验证（不推荐）
+  enable_validation: true
+
+  # ============================================
+  # 静态变换配置
+  # ============================================
+  # 静态变换在系统运行期间保持不变，如传感器安装位置
+  static_transforms:
+    # ----------------------------------------
+    # 机器人基座在世界坐标系中的位置
+    # ----------------------------------------
+    - parent_frame: world
+      child_frame: base_link
+      # 平移 [x, y, z] 单位：米
+      translation: [0.0, 0.0, 0.0]
+      # 旋转 [roll, pitch, yaw] 单位：弧度
+      # roll: 绕X轴旋转, pitch: 绕Y轴旋转, yaw: 绕Z轴旋转
+      rotation: [0.0, 0.0, 0.0]
+      # 注：也可以使用四元数表示旋转
+      # rotation_quaternion: [x, y, z, w]
+
+    # ----------------------------------------
+    # 示例：相机坐标系（相对于机器人基座）
+    # ----------------------------------------
+    # - parent_frame: base_link
+    #   child_frame: camera_link
+    #   translation: [0.1, 0.0, 0.3]    # 相机在基座前方10cm，上方30cm
+    #   rotation: [0.0, 0.0, 0.0]        # 无旋转
+
+    # ----------------------------------------
+    # 示例：激光雷达坐标系
+    # ----------------------------------------
+    # - parent_frame: base_link
+    #   child_frame: lidar_link
+    #   translation: [0.0, 0.0, 0.25]
+    #   rotation: [0.0, 0.0, 0.0]
+
+    # ----------------------------------------
+    # 示例：工具坐标系（相对于末端执行器）
+    # ----------------------------------------
+    # - parent_frame: gripper_base
+    #   child_frame: tool_link
+    #   translation: [0.0, 0.0, 0.1]
+    #   rotation: [0.0, 0.0, 0.0]
+
+  # ============================================
+  # 动态变换配置（可选）
+  # ============================================
+  # 动态变换需要根据外部数据源实时更新，如定位系统输出
+  dynamic_transforms:
+    # ----------------------------------------
+    # 示例：地图到里程计的变换（定位系统输出）
+    # ----------------------------------------
+    # - name: "map_to_odom"
+    #   parent_frame: map
+    #   child_frame: odom
+    #   # 订阅的话题名称
+    #   source_topic: "/localization/pose"
+    #   # 话题消息类型
+    #   # 支持：geometry_msgs/PoseStamped, geometry_msgs/TransformStamped
+    #   source_type: "geometry_msgs/PoseStamped"
+    #   # 发布频率 (Hz)
+    #   update_rate: 50.0
+
+    # ----------------------------------------
+    # 示例：里程计到基座的变换
+    # ----------------------------------------
+    # - name: "odom_to_base"
+    #   parent_frame: odom
+    #   child_frame: base_link
+    #   source_topic: "/odometry/filtered"
+    #   source_type: "nav_msgs/Odometry"
+    #   update_rate: 100.0
+
+  # ============================================
+  # 发布器配置
+  # ============================================
+  publisher:
+    # 静态变换发布频率 (Hz)
+    # 0: 使用 static_transform_publisher（推荐，仅发布一次）
+    # >0: 以指定频率持续发布（用于调试）
+    static_publish_rate: 0.0
+
+    # QoS 队列深度
+    # 建议值：1（仅保留最新消息）
+    qos_depth: 1
+
+    # QoS 可靠性（reliability）
+    # "reliable": 可靠传输（保证送达）
+    # "best_effort": 尽力传输（不保证送达，延迟更低）
+    qos_reliability: "reliable"
+
+    # QoS 持久性（durability）
+    # "transient_local": 保留最后一条消息（新订阅者可收到）
+    # "volatile": 不保留历史消息
+    qos_durability: "transient_local"
+
+  # ============================================
+  # 验证配置
+  # ============================================
+  validation:
+    # 是否启用健康检查
+    enable_health_check: true
+
+    # 健康检查间隔（秒）
+    check_interval: 5.0
+
+    # 最大变换延迟（秒）
+    # 超过此时间的变换将被标记为过期
+    max_transform_age: 1.0
+
+    # 最小变换发布频率（Hz）
+    # 低于此频率的变换将触发警告
+    min_publish_rate: 1.0
+
+    # 必需的变换链（可选）
+    # 启动时验证这些变换链是否可达
+    required_transforms:
+      # 示例：验证从 world 到 gripper_base 的变换链
+      # - from: world
+      #   to: gripper_base
+      #   timeout: 5.0  # 超时时间（秒）
+
+    # 禁止的坐标系名称（避免与系统保留名称冲突）
+    forbidden_frame_names:
+      - ""
+      - "none"
+      - "null"
+
+    # 检测坐标系孤立
+    # true: 检测没有父节点的坐标系（除了根节点）
+    detect_orphan_frames: true
+
+    # 检测坐标系命名冲突
+    # true: 检测相同父子关系被多个发布者发布的情况
+    detect_frame_conflicts: true
+
+  # ============================================
+  # 日志配置
+  # ============================================
+  logging:
+    # 日志级别
+    # DEBUG, INFO, WARN, ERROR, FATAL
+    level: "INFO"
+
+    # 日志输出文件
+    # 空字符串表示只输出到终端
+    log_file: "log/tf_tools.log"
+
+    # 是否记录所有变换发布
+    # 注意：频繁的变换发布会产生大量日志
+    log_all_transforms: false
+
+    # 是否在终端输出彩色日志
+    colored_output: true
+
+# ============================================
+# 多机器人配置示例
+# ============================================
+# 对于多机器人场景，可以使用变量替换
+
+# 示例1：使用环境变量
+# frame_prefix: "${ROBOT_NAME}_"
+# 然后在启动时设置：export ROBOT_NAME=arm1
+
+# 示例2：使用 launch 参数
+# frame_prefix: "${frame_prefix}"
+# 在 launch 文件中传入：frame_prefix:=arm1_
+
+# 示例3：完整的多机器人配置
+# tf_config_robot1:
+#   frame_prefix: "robot1_"
+#   static_transforms:
+#     - parent_frame: world
+#       child_frame: "${frame_prefix}base_link"
+#       translation: [0.0, 0.0, 0.0]
+#       rotation: [0.0, 0.0, 0.0]
+#
+# tf_config_robot2:
+#   frame_prefix: "robot2_"
+#   static_transforms:
+#     - parent_frame: world
+#       child_frame: "${frame_prefix}base_link"
+#       translation: [1.0, 0.0, 0.0]  # 在 robot1 旁边 1米
+#       rotation: [0.0, 0.0, 0.0]
+
+# ============================================
+# 坐标系命名规范（遵循 REP-105）
+# ============================================
+# world     - 世界坐标系（全局固定参考系）
+# map       - 地图坐标系（SLAM/定位输出）
+# odom      - 里程计坐标系（连续但有漂移）
+# base_link - 机器人基座坐标系
+# base_footprint - 机器人在地面的投影
+#
+# 传感器命名示例：
+# camera_link, camera_optical_frame
+# lidar_link, laser_link
+# imu_link
+#
+# 机械臂链（由 robot_state_publisher 管理）：
+# link_1, link_2, ..., link_n
+# gripper_base, left_finger, right_finger
+
+# ============================================
+# 旋转表示方法说明
+# ============================================
+# 方法1：欧拉角（ZYX顺序，外旋）
+# rotation: [roll, pitch, yaw]  # 单位：弧度
+# - roll:  绕X轴旋转（侧倾）
+# - pitch: 绕Y轴旋转（俯仰）
+# - yaw:   绕Z轴旋转（偏航）
+#
+# 方法2：四元数（推荐用于大角度旋转）
+# rotation_quaternion: [x, y, z, w]
+# 归一化四元数：x² + y² + z² + w² = 1
+#
+# 常用角度转弧度：
+# 0°   = 0.0
+# 45°  = 0.7854 (π/4)
+# 90°  = 1.5708 (π/2)
+# 180° = 3.1416 (π)
+
+# ============================================
+# 常见配置场景
+# ============================================
+
+# 场景1：固定机械臂
+# static_transforms:
+#   - parent_frame: world
+#     child_frame: base_link
+#     translation: [0.0, 0.0, 0.0]
+#     rotation: [0.0, 0.0, 0.0]
+
+# 场景2：机械臂 + 相机
+# static_transforms:
+#   - parent_frame: world
+#     child_frame: base_link
+#     translation: [0.0, 0.0, 0.0]
+#     rotation: [0.0, 0.0, 0.0]
+#   - parent_frame: base_link
+#     child_frame: camera_link
+#     translation: [0.0, 0.0, 0.5]
+#     rotation: [0.0, 0.0, 0.0]
+
+# 场景3：移动机器人 + SLAM
+# static_transforms:
+#   - parent_frame: base_link
+#     child_frame: laser
+#     translation: [0.1, 0.0, 0.2]
+#     rotation: [0.0, 0.0, 0.0]
+# dynamic_transforms:
+#   - name: "localization"
+#     parent_frame: map
+#     child_frame: odom
+#     source_topic: "/amcl_pose"
+#     source_type: "geometry_msgs/PoseStamped"
+#     update_rate: 50.0
+
+# 场景4：双机械臂
+# 使用两个配置文件或变量替换
+# arm1: frame_prefix: "arm1_", translation: [0.0, 0.5, 0.0]
+# arm2: frame_prefix: "arm2_", translation: [0.0, -0.5, 0.0]
