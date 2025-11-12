@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-CONFIG_FILE="static_tf_config.yaml"
+SCRIPT_DIR="$(cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CONFIG_FILE="${SCRIPT_DIR}/static_tf_config.yaml"
 
 # Initialize defaults
 BASE_TX_DEFAULT="0.0"; BASE_TY_DEFAULT="0.0"; BASE_TZ_DEFAULT="0.0"
@@ -10,7 +11,7 @@ BASE_BRX_DEFAULT="0.0"; BASE_BRY_DEFAULT="0.0"; BASE_BRZ_DEFAULT="0.0"
 CAM_TX_DEFAULT="0.0"; CAM_TY_DEFAULT="0.0"; CAM_TZ_DEFAULT="0.0"
 CAM_WRX_DEFAULT="0.0"; CAM_WRY_DEFAULT="0.0"; CAM_WRZ_DEFAULT="0.0"
 CAM_BRX_DEFAULT="0.0"; CAM_BRY_DEFAULT="0.0"; CAM_BRZ_DEFAULT="0.0"
-URDF_FILE_PATH="../description/urdf/yam.urdf"
+URDF_FILE_PATH="${SCRIPT_DIR}/../description/urdf/yam.urdf"
 
 load_defaults() {
   if [[ ! -f "${CONFIG_FILE}" ]]; then

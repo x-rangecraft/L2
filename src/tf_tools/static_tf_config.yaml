@@ -1,6 +1,6 @@
 {
   "metadata": {
-    "generated_at": "2025-11-12T10:58:47.695574+00:00",
+    "generated_at": "2025-11-12T11:23:22.307451+00:00",
     "generator": "static_tf_config_build.sh",
     "translation_units": "m",
     "rotation_units": "deg",
@@ -16,7 +16,7 @@
         "Z"
       ]
     },
-    "urdf_source": "../description/urdf/yam.urdf"
+    "urdf_source": "/home/jetson/L2/src/tf_tools/../description/urdf/yam.urdf"
   },
   "tf_tree": [
     {
@@ -177,7 +177,7 @@
     }
   },
   "urdf_chain": {
-    "source_file": "../description/urdf/yam.urdf",
+    "source_file": "/home/jetson/L2/src/tf_tools/../description/urdf/yam.urdf",
     "links": [
       {
         "joint": "joint6",

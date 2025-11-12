@@ -169,3 +169,61 @@
 [INFO] [1762943727.009514110] [foxglove_bridge]: publishing connection graph
 [INFO] [1762943728.103550216] [foxglove_bridge]: publishing connection graph
 [INFO] [1762943728.608577902] [foxglove_bridge]: publishing connection graph
+[INFO] [1762946932.270331840] [foxglove_bridge]: publishing connection graph
+[INFO] [1762946933.161568681] [foxglove_bridge]: publishing connection graph
+[INFO] [1762946933.824711684] [foxglove_bridge]: publishing connection graph
+[INFO] [1762946934.330749710] [foxglove_bridge]: publishing connection graph
+[INFO] [1762946939.474575309] [foxglove_bridge]: publishing connection graph
+[INFO] [1762946939.983317322] [foxglove_bridge]: publishing connection graph
+[INFO] [1762946961.985626549] [foxglove_bridge]: received unsubscribe request for channel 30
+[INFO] [1762946961.985902366] [foxglove_bridge]: Cleaned up subscription to topic /joint_states for client 1 on channel 30
+[INFO] [1762946961.986035554] [foxglove_bridge]: received unsubscribe request for channel 26
+[INFO] [1762946961.986089220] [foxglove_bridge]: Cleaned up subscription to topic /camera/color/camera_info for client 1 on channel 26
+[INFO] [1762946961.986141669] [foxglove_bridge]: received unsubscribe request for channel 31
+[INFO] [1762946961.986184679] [foxglove_bridge]: Cleaned up subscription to topic /robot_description for client 1 on channel 31
+[INFO] [1762946961.986232200] [foxglove_bridge]: received unsubscribe request for channel 24
+[INFO] [1762946961.986273386] [foxglove_bridge]: Cleaned up subscription to topic /camera/color/image_raw for client 1 on channel 24
+[INFO] [1762946961.986661750] [foxglove_bridge]: received unsubscribe request for channel 2
+[INFO] [1762946961.986726328] [foxglove_bridge]: Cleaned up subscription to topic /tf for client 1 on channel 2
+[INFO] [1762946961.986783289] [foxglove_bridge]: received unsubscribe request for channel 1
+[INFO] [1762946961.986828891] [foxglove_bridge]: Cleaned up subscription to topic /tf_static for client 1 on channel 1
+[INFO] [1762946961.986883645] [foxglove_bridge]: received unsubscribe request for channel 6
+[INFO] [1762946961.986928830] [foxglove_bridge]: Cleaned up subscription to topic /control/camera_target_tf_arm_publisher/test for client 1 on channel 6
+[INFO] [1762946962.291486097] [foxglove_bridge]: publishing connection graph
+[INFO] [1762946962.800525972] [foxglove_bridge]: publishing connection graph
+[INFO] [1762946966.960282403] [foxglove_bridge]: received connection graph subscribe request
+[INFO] [1762946967.029650478] [foxglove_bridge]: publishing connection graph
+[INFO] [1762946967.055325707] [foxglove_bridge]: received subscribe request for channel 30 from client 2 (sink 2)
+[INFO] [1762946967.059625841] [foxglove_bridge]: created ROS subscription on /joint_states (sensor_msgs/msg/JointState) successfully for channel 30 (client 2, sink 2)
+[INFO] [1762946967.059895193] [foxglove_bridge]: received subscribe request for channel 6 from client 2 (sink 2)
+[INFO] [1762946967.063663086] [foxglove_bridge]: created ROS subscription on /control/camera_target_tf_arm_publisher/test (std_msgs/msg/String) successfully for channel 6 (client 2, sink 2)
+[INFO] [1762946967.067367457] [foxglove_bridge]: Client ID 2 is advertising "/move_base_simple/goal" (geometry_msgs/PoseStamped) on channel 1 with encoding "cdr"
+[INFO] [1762946967.070637799] [foxglove_bridge]: Client ID 2 is advertising "/clicked_point" (geometry_msgs/PointStamped) on channel 2 with encoding "cdr"
+[INFO] [1762946967.074335834] [foxglove_bridge]: Client ID 2 is advertising "/initialpose" (geometry_msgs/PoseWithCovarianceStamped) on channel 3 with encoding "cdr"
+[INFO] [1762946967.120013028] [foxglove_bridge]: received subscribe request for channel 2 from client 2 (sink 2)
+[INFO] [1762946967.123992960] [foxglove_bridge]: created ROS subscription on /tf (tf2_msgs/msg/TFMessage) successfully for channel 2 (client 2, sink 2)
+[INFO] [1762946967.124521136] [foxglove_bridge]: received subscribe request for channel 1 from client 2 (sink 2)
+[INFO] [1762946967.128324263] [foxglove_bridge]: created ROS subscription on /tf_static (tf2_msgs/msg/TFMessage) successfully for channel 1 (client 2, sink 2)
+[INFO] [1762946967.128694194] [foxglove_bridge]: received subscribe request for channel 26 from client 2 (sink 2)
+[INFO] [1762946967.132783025] [foxglove_bridge]: created ROS subscription on /camera/color/camera_info (sensor_msgs/msg/CameraInfo) successfully for channel 26 (client 2, sink 2)
+[INFO] [1762946967.133025913] [foxglove_bridge]: received subscribe request for channel 24 from client 2 (sink 2)
+[INFO] [1762946967.136071703] [foxglove_bridge]: created ROS subscription on /camera/color/image_raw (sensor_msgs/msg/Image) successfully for channel 24 (client 2, sink 2)
+[INFO] [1762946967.136272061] [foxglove_bridge]: received subscribe request for channel 31 from client 2 (sink 2)
+[INFO] [1762946967.139077941] [foxglove_bridge]: created ROS subscription on /robot_description (std_msgs/msg/String) successfully for channel 31 (client 2, sink 2)
+[INFO] [1762946967.538987257] [foxglove_bridge]: publishing connection graph
+[INFO] [1762947007.223158831] [foxglove_bridge]: publishing connection graph
+[INFO] [1762947007.728951814] [foxglove_bridge]: publishing connection graph
+[INFO] [1762947901.832519086] [foxglove_bridge]: publishing connection graph
+[INFO] [1762947902.816634997] [foxglove_bridge]: publishing connection graph
+[INFO] [1762947903.545906252] [foxglove_bridge]: publishing connection graph
+[INFO] [1762947904.052508409] [foxglove_bridge]: publishing connection graph
+[INFO] [1762947905.800065895] [foxglove_bridge]: publishing connection graph
+[INFO] [1762947906.308376490] [foxglove_bridge]: publishing connection graph
+[INFO] [1762947910.979541612] [foxglove_bridge]: publishing connection graph
+[INFO] [1762947911.956825443] [foxglove_bridge]: publishing connection graph
+[ERROR] [1762947912.298807200] [foxglove_bridge]: Failed to retrieve parameters from node '/static_transform_publisher_kyAsjWQpbkl0sQT5': Parameter service for node '/static_transform_publisher_kyAsjWQpbkl0sQT5' is not ready
+[WARN] [1762947912.298970472] [foxglove_bridge]: Adding node /static_transform_publisher_kyAsjWQpbkl0sQT5 to the ignore list to prevent repeated timeouts or failures in future parameter requests.
+[INFO] [1762947912.696801128] [foxglove_bridge]: publishing connection graph
+[INFO] [1762947913.203143849] [foxglove_bridge]: publishing connection graph
+[INFO] [1762947926.989085548] [foxglove_bridge]: publishing connection graph
+[INFO] [1762947927.501618405] [foxglove_bridge]: publishing connection graph
