@@ -1,0 +1,53 @@
+# ROS 2 构建产物
+build/
+install/
+log/build_*/
+log/latest
+log/latest_build
+log/latest_test
+
+# ROS 2 运行日志
+*.log
+
+# Python 缓存
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# 虚拟环境
+venv/
+ENV/
+env/
+
+# IDE 配置
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# 备份文件
+*.backup
+*.bak
+*~
+
+# 编译产物
+*.o
+*.a
+*.so
+*.dylib
+*.exe
+*.out
+
+# 测试覆盖率
+.coverage
+htmlcov/
+.pytest_cache/
+
+# 临时文件
+*.tmp
+*.temp
+.DS_Store
+Thumbs.db

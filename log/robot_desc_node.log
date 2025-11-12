@@ -5,3 +5,91 @@
 [2025-11-12T14:35:19+08:00] Running asset validation...
 Package 'description' not found
 Asset validation failed. Aborting node launch.
+
+[2025-11-12T15:47:03+08:00] Starting robot_desc_node via start_robot_desc.sh
+[2025-11-12T15:47:04+08:00] Running asset validation...
+[robot_desc_check] Asset check passed for /home/jetson/L2/src/description/urdf/yam.urdf
+[2025-11-12T15:47:04+08:00] Executing: ros2 run description robot_desc_node --ros-args -p urdf_path:=package://description/urdf/yam.urdf -p publish_rate:=1.0 -p frame_prefix:=
+[ERROR] [1762933625.153056300] [rcl]: Failed to parse global arguments
+Traceback (most recent call last):
+  File "/home/jetson/L2/install/description/lib/description/robot_desc_node", line 33, in <module>
+    sys.exit(load_entry_point('description', 'console_scripts', 'robot_desc_node')())
+  File "/home/jetson/L2/build/description/src/description/robot_desc_node.py", line 131, in main
+    rclpy.init(args=args)
+  File "/opt/ros/humble/local/lib/python3.10/dist-packages/rclpy/__init__.py", line 88, in init
+    context.init(args, domain_id=domain_id)
+  File "/opt/ros/humble/local/lib/python3.10/dist-packages/rclpy/context.py", line 72, in init
+    self.__context = _rclpy.Context(
+rclpy._rclpy_pybind11.RCLError: failed to initialize rcl: Couldn't parse parameter override rule: '-p frame_prefix:='. Error: error not set, at ./src/rcl/arguments.c:343
+[ros2run]: Process exited with failure 1
+
+[2025-11-12T15:47:49+08:00] Starting robot_desc_node via start_robot_desc.sh
+[2025-11-12T15:47:50+08:00] Running asset validation...
+[robot_desc_check] Asset check passed for /home/jetson/L2/src/description/urdf/yam.urdf
+[2025-11-12T15:47:50+08:00] Executing: ros2 run description robot_desc_node --ros-args -p urdf_path:=package://description/urdf/yam.urdf -p publish_rate:=1.0
+[INFO] [1762933671.018393436] [robot_desc_node]: Loaded robot description from /home/jetson/L2/src/description/urdf/yam.urdf
+
+[2025-11-12T16:04:17+08:00] Starting robot_desc_node via start_robot_desc.sh
+[2025-11-12T16:04:18+08:00] Running asset validation...
+[robot_desc_check] Asset check passed for /home/jetson/L2/src/description/urdf/yam.urdf
+[2025-11-12T16:04:18+08:00] Executing: ros2 run description robot_desc_node --ros-args -p urdf_path:=package://description/urdf/yam.urdf -p publish_rate:=1.0
+[INFO] [1762934659.071385735] [robot_desc_node]: Loaded robot description from /home/jetson/L2/src/description/urdf/yam.urdf
+
+[2025-11-12T16:16:33+08:00] Starting robot_desc_node via start_robot_desc.sh
+[2025-11-12T16:16:33+08:00] Running asset validation...
+[robot_desc_check] Asset check passed for /home/jetson/L2/install/description/share/description/urdf/yam.urdf
+[2025-11-12T16:16:33+08:00] Executing: ros2 run description robot_desc_node --ros-args -p urdf_path:=package://description/urdf/yam.urdf -p publish_rate:=1.0
+[INFO] [1762935394.515774949] [robot_desc_node]: Loaded robot description from /home/jetson/L2/install/description/share/description/urdf/yam.urdf
+
+[2025-11-12T17:56:40+08:00] Starting robot_desc_node via start_robot_desc.sh
+[2025-11-12T17:56:41+08:00] Checking mesh HTTP resources at http://192.168.1.184:9091/meshes/
+[2025-11-12T17:56:41+08:00] Mesh HTTP server already available; skipping restart
+[2025-11-12T17:56:41+08:00] Running asset validation...
+[robot_desc_check] Asset check passed for /home/jetson/L2/install/description/share/description/urdf/yam.urdf
+[2025-11-12T17:56:41+08:00] Executing: ros2 run description robot_desc_node --ros-args -p urdf_path:=package://description/urdf/yam.urdf -p publish_rate:=1.0
+[INFO] [1762941402.011360790] [robot_desc_node]: Loaded robot description from /home/jetson/L2/install/description/share/description/urdf/yam.urdf
+
+[2025-11-12T17:58:06+08:00] Starting robot_desc_node via start_robot_desc.sh
+[2025-11-12T17:58:07+08:00] Checking mesh HTTP resources at http://192.168.1.184:9091/meshes/
+[2025-11-12T17:58:07+08:00] Starting mesh HTTP server on 0.0.0.0:9091 (serving /tmp/robot_desc_mesh_http/meshes/assets)
+[2025-11-12T17:58:09+08:00] Mesh HTTP server ready at http://192.168.1.184:9091/meshes/
+[2025-11-12T17:58:09+08:00] Running asset validation...
+[robot_desc_check] Asset check passed for /home/jetson/L2/install/description/share/description/urdf/yam.urdf
+[2025-11-12T17:58:09+08:00] Executing: ros2 run description robot_desc_node --ros-args -p urdf_path:=package://description/urdf/yam.urdf -p publish_rate:=1.0
+[INFO] [1762941490.183011033] [robot_desc_node]: Loaded robot description from /home/jetson/L2/install/description/share/description/urdf/yam.urdf
+
+[2025-11-12T18:05:52+08:00] Starting robot_desc_node via start_robot_desc.sh
+[2025-11-12T18:05:53+08:00] Checking mesh HTTP resources at http://192.168.1.184:9091/meshes/
+[2025-11-12T18:05:53+08:00] Starting mesh HTTP server on 0.0.0.0:9091 (serving /tmp/robot_desc_mesh_http/meshes/assets)
+[2025-11-12T18:05:55+08:00] Mesh HTTP server ready at http://192.168.1.184:9091/meshes/
+[2025-11-12T18:05:55+08:00] Running asset validation...
+[robot_desc_check] Asset check passed for /home/jetson/L2/install/description/share/description/urdf/yam.urdf
+[2025-11-12T18:05:55+08:00] Executing: ros2 run description robot_desc_node --ros-args -p urdf_path:=package://description/urdf/yam.urdf -p publish_rate:=1.0
+[INFO] [1762941956.241174122] [robot_desc_node]: Loaded robot description from /home/jetson/L2/install/description/share/description/urdf/yam.urdf
+
+[2025-11-12T18:11:07+08:00] Starting robot_desc_node via start_robot_desc.sh
+[2025-11-12T18:11:08+08:00] Checking mesh HTTP resources at http://192.168.1.184:9091/meshes/
+[2025-11-12T18:11:08+08:00] Starting mesh HTTP server on 0.0.0.0:9091 (serving /tmp/robot_desc_mesh_http/meshes/assets)
+[2025-11-12T18:11:10+08:00] Mesh HTTP server ready at http://192.168.1.184:9091/meshes/
+[2025-11-12T18:11:10+08:00] Running asset validation...
+[robot_desc_check] Asset check passed for /home/jetson/L2/install/description/share/description/urdf/yam.urdf
+[2025-11-12T18:11:10+08:00] Executing: ros2 run description robot_desc_node --ros-args -p urdf_path:=package://description/urdf/yam.urdf -p publish_rate:=1.0
+[INFO] [1762942271.337456010] [robot_desc_node]: Loaded robot description from /home/jetson/L2/install/description/share/description/urdf/yam.urdf
+
+[2025-11-12T18:21:46+08:00] Starting robot_desc_node via start_robot_desc.sh
+[2025-11-12T18:21:46+08:00] Checking mesh HTTP resources at http://192.168.1.184:9091/meshes/
+[2025-11-12T18:21:46+08:00] Starting mesh HTTP server on 0.0.0.0:9091 (serving /tmp/robot_desc_mesh_http/meshes)
+[2025-11-12T18:21:48+08:00] Mesh HTTP server ready at http://192.168.1.184:9091/meshes/
+[2025-11-12T18:21:48+08:00] Running asset validation...
+[robot_desc_check] Asset check passed for /home/jetson/L2/install/description/share/description/urdf/yam.urdf
+[2025-11-12T18:21:49+08:00] Executing: ros2 run description robot_desc_node --ros-args -p urdf_path:=package://description/urdf/yam.urdf -p publish_rate:=1.0
+[INFO] [1762942909.813902209] [robot_desc_node]: Loaded robot description from /home/jetson/L2/install/description/share/description/urdf/yam.urdf
+
+[2025-11-12T18:26:32+08:00] Starting robot_desc_node via start_robot_desc.sh
+[2025-11-12T18:26:33+08:00] Checking mesh HTTP resources at http://192.168.1.184:9091/meshes/
+[2025-11-12T18:26:33+08:00] Starting mesh HTTP server on 0.0.0.0:9091 (serving /tmp/robot_desc_mesh_http/meshes)
+[2025-11-12T18:26:35+08:00] Mesh HTTP server ready at http://192.168.1.184:9091/meshes/
+[2025-11-12T18:26:35+08:00] Running asset validation...
+[robot_desc_check] Asset check passed for /home/jetson/L2/install/description/share/description/urdf/yam.urdf
+[2025-11-12T18:26:35+08:00] Executing: ros2 run description robot_desc_node --ros-args -p urdf_path:=package://description/urdf/yam.urdf -p publish_rate:=1.0
+[INFO] [1762943196.300635220] [robot_desc_node]: Loaded robot description from /home/jetson/L2/install/description/share/description/urdf/yam.urdf

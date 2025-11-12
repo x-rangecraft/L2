@@ -7,6 +7,18 @@ LOG_DIR="${REPO_ROOT}/log"
 LOG_FILE="${LOG_DIR}/robot_desc_node.log"
 ASSET_LOG_FILE="${LOG_DIR}/robot_desc_check.log"
 
+# Mesh HTTP server configuration
+HTTP_MESH_BIND_HOST="${HTTP_MESH_BIND_HOST:-0.0.0.0}"
+HTTP_MESH_ADVERTISE_HOST="${HTTP_MESH_ADVERTISE_HOST:-192.168.1.184}"
+HTTP_MESH_CHECK_HOST="${HTTP_MESH_CHECK_HOST:-127.0.0.1}"
+HTTP_MESH_PORT="${HTTP_MESH_PORT:-9091}"
+HTTP_MESH_SOURCE_DIR="${SCRIPT_DIR}/meshes"
+HTTP_MESH_STAGING_ROOT="${HTTP_MESH_STAGING_ROOT:-/tmp/robot_desc_mesh_http}"
+HTTP_MESH_SERVE_DIR="${HTTP_MESH_STAGING_ROOT}/meshes"
+HTTP_MESH_LOG_FILE="${LOG_DIR}/mesh_http_server.log"
+HTTP_MESH_PID_FILE="${LOG_DIR}/mesh_http_server.pid"
+HTTP_MESH_PROBE_FILE="${HTTP_MESH_PROBE_FILE:-base_link_visual.stl}"
+
 mkdir -p "${LOG_DIR}"
 
 print_usage() {
@@ -23,6 +35,91 @@ Options:
 
 Anything after '--' is passed verbatim to the underlying ros2 run command.
 USAGE
+}
+
+mesh_http_probe() {
+    local url="$1"
+    if command -v curl >/dev/null 2>&1; then
+        if curl -fsS --max-time 3 -o /dev/null "${url}"; then
+            return 0
+        fi
+    elif command -v wget >/dev/null 2>&1; then
+        if wget -q --timeout=3 -O - "${url}" >/dev/null; then
+            return 0
+        fi
+    else
+        if python3 - "${url}" <<'PY'
+import sys
+import urllib.request
+import urllib.error
+
+url = sys.argv[1]
+try:
+    with urllib.request.urlopen(url, timeout=3):
+        sys.exit(0)
+except Exception:
+    sys.exit(1)
+PY
+        then
+            return 0
+        fi
+    fi
+    return 1
+}
+
+check_mesh_http_server() {
+    local probe_url="http://${HTTP_MESH_CHECK_HOST}:${HTTP_MESH_PORT}/meshes/${HTTP_MESH_PROBE_FILE}"
+    mesh_http_probe "${probe_url}"
+}
+
+prepare_mesh_http_payload() {
+    if [[ ! -d "${HTTP_MESH_SOURCE_DIR}" ]]; then
+        printf '[%s] Mesh directory not found at %s\n' "$(date --iso-8601=seconds)" "${HTTP_MESH_SOURCE_DIR}" | tee -a "${LOG_FILE}"
+        return 1
+    fi
+    rm -rf "${HTTP_MESH_STAGING_ROOT}"
+    mkdir -p "${HTTP_MESH_STAGING_ROOT}"
+    if ! ln -s "${HTTP_MESH_SOURCE_DIR}" "${HTTP_MESH_SERVE_DIR}"; then
+        printf '[%s] Failed to link mesh assets into %s\n' "$(date --iso-8601=seconds)" "${HTTP_MESH_SERVE_DIR}" | tee -a "${LOG_FILE}"
+        return 1
+    fi
+    return 0
+}
+
+start_mesh_http_server() {
+    if ! prepare_mesh_http_payload; then
+        return 1
+    fi
+    printf '[%s] Starting mesh HTTP server on %s:%s (serving %s)\n' \
+        "$(date --iso-8601=seconds)" "${HTTP_MESH_BIND_HOST}" "${HTTP_MESH_PORT}" "${HTTP_MESH_SERVE_DIR}" | tee -a "${LOG_FILE}"
+    (
+        cd "${HTTP_MESH_STAGING_ROOT}" &&
+        nohup python3 -m http.server "${HTTP_MESH_PORT}" --bind "${HTTP_MESH_BIND_HOST}" \
+            > "${HTTP_MESH_LOG_FILE}" 2>&1 & echo $! > "${HTTP_MESH_PID_FILE}"
+    )
+    local server_pid
+    server_pid=$(cat "${HTTP_MESH_PID_FILE}" 2>/dev/null || true)
+    sleep 2
+    if check_mesh_http_server; then
+        printf '[%s] Mesh HTTP server ready at http://%s:%s/meshes/\n' \
+            "$(date --iso-8601=seconds)" "${HTTP_MESH_ADVERTISE_HOST}" "${HTTP_MESH_PORT}" | tee -a "${LOG_FILE}"
+        return 0
+    fi
+    if [[ -n "${server_pid}" ]]; then
+        kill "${server_pid}" 2>/dev/null || true
+    fi
+    printf '[%s] Mesh HTTP server failed to start (see %s)\n' "$(date --iso-8601=seconds)" "${HTTP_MESH_LOG_FILE}" | tee -a "${LOG_FILE}"
+    return 1
+}
+
+ensure_mesh_http_server() {
+    local public_url="http://${HTTP_MESH_ADVERTISE_HOST}:${HTTP_MESH_PORT}/meshes/"
+    printf '[%s] Checking mesh HTTP resources at %s\n' "$(date --iso-8601=seconds)" "${public_url}" | tee -a "${LOG_FILE}"
+    if check_mesh_http_server; then
+        printf '[%s] Mesh HTTP server already available; skipping restart\n' "$(date --iso-8601=seconds)" | tee -a "${LOG_FILE}"
+        return 0
+    fi
+    start_mesh_http_server
 }
 
 source_ros_setup() {
@@ -92,6 +189,11 @@ elif source_ros_setup "/opt/ros/humble/setup.bash"; then
     :
 else
     echo "ROS 2 environment not found (install/setup.bash or /opt/ros/humble/setup.bash)" | tee -a "${LOG_FILE}"
+    exit 1
+fi
+
+if ! ensure_mesh_http_server; then
+    echo "Mesh HTTP server is not ready; aborting launch." | tee -a "${LOG_FILE}"
     exit 1
 fi
 
