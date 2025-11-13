@@ -15,7 +15,7 @@
    - 支持关节空间与笛卡尔空间的目标位姿/姿态指令，负责插值、限速与安全联锁后再写入 CAN。
 4. 安全态归位
    - 监控指令心跳：超过 60 s 未收到上游指令即执行安全归位（`SAFE_POSE`），归位完成后默认切换至零重力模式，方便人工干预。
-   - 订阅 `/safety_stop` 或等效控制口，收到后立即执行安全回归流程并同样进入零重力模式。
+   - 订阅 `/robot_driver/safety_stop`，收到后立即执行安全回归流程但不自动切换零重力（留给人工决定）。
 5. 零重力模式开关
    - 暴露接口（service/action）以启用或关闭零重力模式，并同步更新状态上报与安全限制。
    - 若节点处于零重力模式且收到新的运动指令，需先自动退出零重力模式，再恢复常规控制链路。
@@ -44,24 +44,16 @@
      4. 设定 `PYTHONPATH`（挂载 I2RT SDK）、ROS 环境、`l2/log/robot_driver/robot_driver.log` 输出，并以 `ros2 launch driver robot_driver.launch.py` 方式拉起节点；
      5. 统一杀掉旧进程 `robot_driver_node`，保证脚本幂等。
 
-3. ROS 接口设计
-   - 话题：
-     - `/joint_states` (`sensor_msgs/JointState`)：30 Hz 发布关节/速度/电流（若 SDK 支持），供 MoveIt/RViz 使用；
-     - `/robot_driver/diagnostics` (`diagnostic_msgs/DiagnosticArray`)：1 Hz 汇报命令执行状态、CAN 健康、零重力模式、最近告警；
-     - `/robot_driver/cartesian_cmd` (`geometry_msgs/PoseStamped`)：机械臂坐标系的笛卡尔目标；
-     - `/safety_stop` (`std_msgs/Empty`)：收到即触发安全归位逻辑；
-   - 行动/服务：
-     - `control_msgs/action/FollowJointTrajectory`（命名 `/robot_driver/follow_joint_trajectory`）承载“标准控制”——MoveIt 或上层可直接投喂关节轨迹；
-     - `std_srvs/SetBool /robot_driver/zero_gravity`：打开/关闭零重力模式，内部切换 SDK 状态并返回实际结果；
-     - `std_srvs/Trigger /robot_driver/reset_can`：手动触发 CAN 复位 + 重新初始化。
+3. ROS 接口
+   - 详见本文后续“ROS 接口设计”章节，统一定义话题、服务、动作及示例。
 
 4. 指令调度与安全
    - 命令队列：沿用 Stage1 的“单工作线程+可抢占”模型，使用 `queue.Queue` 存储笛卡尔/关节指令，任何新区指令会清空旧队列并打断当前插值；
    - 插值策略：
      - 笛卡尔目标：通过 IK 求解后在关节空间作线性插值（同 Stage1 `_interpolate_to_goal`）；
-     - 关节轨迹：遵循 `FollowJointTrajectory` action 的 `time_from_start`，逐点执行并校验速度/加速度；
+     - 关节轨迹：遵循 `FollowJointTrajectory` action（`/robot_driver/action/follow_joint_trajectory`）的 `time_from_start`，逐点执行并校验速度/加速度；
    - 心跳/超时：维护 `last_command_stamp`，若在 `timeout_s`（固定 60 s）内未收到任何控制指令，则触发安全归位（进入 `SAFE_POSE` 并启用零重力模式）；重新收到命令时即刻退出零重力并恢复常规控制。
-   - `/safety_stop`：节点订阅后立即抢占当前运动并调用 `hardware_commander.move_to_safe_pose()`。
+   - `/robot_driver/safety_stop`：节点订阅后立即抢占当前运动并调用 `hardware_commander.move_to_safe_pose()`，但保持当前零重力模式不变。
 
 5. 零重力模式钩子
    - 在 Commander 初始化时读取参数 `zero_gravity_default`，并提供 `set_zero_gravity(bool)` API，内部调用 I2RT SDK 的零重力接口（若缺失则通过写寄存器实现），状态变更同步到 `/robot_driver/diagnostics`。
@@ -69,7 +61,7 @@
 
 6. 日志与诊断
    - 日志滚动策略：`start_robot_driver.sh` 创建 `l2/log/robot_driver/robot_driver_<date>.log`，ROS 节点内部使用 `logging` 模块写同一路径；
-   - 关键信息（CAN 重连、零重力切换、`safety_stop` 触发、心跳超时）必须双写：一份进入 `/robot_driver/diagnostics`，一份落地日志文件，便于离线排查；
+   - 关键信息（CAN 重连、零重力切换、`/robot_driver/safety_stop` 触发、心跳超时）必须双写：一份进入 `/robot_driver/diagnostics`，一份落地日志文件，便于离线排查；
    - 发生异常时自动收集最近一次指令上下文（命令源 topic/action、目标值、IK 耗时）并写入日志。
 
 7. 状态广播与调试
@@ -81,6 +73,57 @@
      - `joint_state_timer`：以 30 Hz 读取 I2RT SDK 缓存里的关节角、速度、电流，构造 `JointState` 并发布；读取使用轻量读锁，仅在写命令时短暂加写锁，确保运动与状态采集可并行。
      - `tf_timer`：保持 30 Hz（或配置值）读取末端位姿并广播 TF。
    - 若 SDK 提供 `get_joint_state_cached()` 之类非阻塞 API，则驱动优先使用缓存；否则在 commander 层维护 ring buffer，写命令时顺便更新最新状态，供 JointState 发布线程读取。
+
+## ROS 接口设计
+
+### 发布的 Topic
+| 话题 | 类型 | 频率 | 说明 |
+| --- | --- | --- | --- |
+| `/joint_states` | `sensor_msgs/JointState` | 30 Hz（可配置） | 仅包含标准位置/速度/力矩（或电流）字段，确保与 MoveIt、RViz、Foxglove 兼容。 |
+| `/robot_driver/diagnostics` | `diagnostic_msgs/DiagnosticArray` | 1 Hz | 汇报命令执行状态、心跳/安全态、零重力模式、CAN 健康、温度/电流/自检等扩展信息，集中展示机械臂健康数据。 |
+
+### 订阅的 Topic
+| 话题 | 类型 | 说明 |
+| --- | --- | --- |
+| `/robot_driver/robot_command` | `geometry_msgs/PoseStamped` | 机械臂基坐标系（默认 `base_link`）下的笛卡尔目标，`Pose.position` 为 XYZ，`orientation` 提供单位四元数；驱动执行 IK → 关节插值。 |
+| `/robot_driver/safety_stop` | `std_msgs/Empty` | 收到立即抢占当前运动、执行安全归位，但不切换零重力模式。 |
+
+`/robot_driver/robot_command` 示例：
+
+```yaml
+header:
+  frame_id: base_link
+  stamp: {sec: 0, nanosec: 0}
+pose:
+  position: {x: 0.35, y: 0.0, z: 0.32}
+  orientation: {x: 0.0, y: 0.707, z: 0.0, w: 0.707}
+```
+
+- `frame_id` 默认 `base_link`，若使用其他坐标系需在 TF 中可解析；
+- orientation 需是规范化四元数，若只关注 XYZ 可启用 `xyz_only_mode`，节点将沿用当前姿态；
+- 上层以 10–30 Hz 推送命令即可触发连续插值，最新命令会抢占旧命令。
+
+### 服务与动作
+| 名称 | 类型 | 用途 | 调用示例 |
+| --- | --- | --- | --- |
+| `/robot_driver/service/zero_gravity` | Service (`std_srvs/SetBool`) | 打开/关闭零重力模式。 | `ros2 service call /robot_driver/service/zero_gravity std_srvs/srv/SetBool "{data: true}"` |
+| `/robot_driver/service/reset_can` | Service (`std_srvs/Trigger`) | 手动触发 CAN 复位并重新初始化 commander。 | `ros2 service call /robot_driver/service/reset_can std_srvs/srv/Trigger {}` |
+| `/robot_driver/action/follow_joint_trajectory` | Action (`control_msgs/action/FollowJointTrajectory`) | 承载标准关节轨迹控制，供 MoveIt/controller_manager 直接发送轨迹。 | `ros2 action send_goal /robot_driver/action/follow_joint_trajectory control_msgs/action/FollowJointTrajectory "{goal: {trajectory: ...}}"` |
+
+**Action 使用方法**
+1. 规划器根据 `/joint_states` 的关节命名生成 `trajectory_msgs/JointTrajectory`；
+2. 调用 `/robot_driver/action/follow_joint_trajectory` 发送目标（可使用 `ros2 action send_goal` 或 controller_manager）；
+3. 驱动节点按 `time_from_start` 执行，并在结果里返回 `SUCCESS/ABORTED` 与失败原因；若过程中触发 `/robot_driver/safety_stop`、心跳超时或零重力切换，action 会立刻 `ABORTED` 并记录日志。
+
+## 配置与动态更新
+- 默认参数文件：`src/driver/config/robot_driver_params.yaml`（后续创建），通过 `ros2 launch driver robot_driver.launch.py params:=...` 注入；
+- 关键参数：`can_channel`、`zero_gravity_default`、`joint_state_rate`、`diagnostics_rate`、`command_timeout_s`（60 s 默认）、`safe_pose` 数组、`log_dir`（默认 `l2/log/robot_driver/`）。
+- `start_robot_driver.sh` 提供 CLI 覆盖：`--can canX`、`--zero-gravity`、`--xyz-only`、`--params <file>`，脚本会把结果传入 ROS 参数；
+- 运行期允许通过 `ros2 param set` 更新白名单参数：
+  - `can_channel`：触发内部回调 → 暂停命令 → 调用 `/robot_driver/service/reset_can` 逻辑 → 切换 gs_usb 接口；
+  - `joint_state_rate`、`diagnostics_rate`、`command_timeout_s`：实时更新定时器和安全心跳；
+  - 其他参数需通过 YAML 修改后重启节点。
+- 该机制支持在调试阶段快速在 `can0/can1/can2` 之间切换，后续可扩展自动枚举逻辑以适配更多硬件组合。
 
 ## 待讨论要点
 1. 通信接口
