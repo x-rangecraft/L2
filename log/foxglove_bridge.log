@@ -229,3 +229,96 @@
 [INFO] [1762947927.501618405] [foxglove_bridge]: publishing connection graph
 [INFO] [1762950926.086706428] [foxglove_bridge]: publishing connection graph
 [INFO] [1762950926.599191167] [foxglove_bridge]: publishing connection graph
+[INFO] [1763020177.725063201] [foxglove_bridge]: publishing connection graph
+[INFO] [1763020178.229230856] [foxglove_bridge]: Removing channel 28 for topic "/camera/realsense2_camera/aligned_depth_to_color/image_raw/compressed" (sensor_msgs/msg/CompressedImage)
+[INFO] [1763020178.238787054] [foxglove_bridge]: publishing connection graph
+[INFO] [1763020178.740406094] [foxglove_bridge]: Removing channel 13 for topic "/camera/realsense2_camera/depth/image_rect_raw/compressedDepth" (sensor_msgs/msg/CompressedImage)
+[INFO] [1763020178.740720183] [foxglove_bridge]: Removing channel 12 for topic "/camera/realsense2_camera/depth/metadata" (realsense2_camera_msgs/msg/Metadata)
+[INFO] [1763020178.740815161] [foxglove_bridge]: Removing channel 11 for topic "/camera/realsense2_camera/extrinsics/depth_to_color" (realsense2_camera_msgs/msg/Extrinsics)
+[INFO] [1763020178.740921244] [foxglove_bridge]: Removing channel 14 for topic "/camera/realsense2_camera/depth/image_rect_raw/compressed" (sensor_msgs/msg/CompressedImage)
+[INFO] [1763020178.741005022] [foxglove_bridge]: Removing channel 15 for topic "/camera/realsense2_camera/color/metadata" (realsense2_camera_msgs/msg/Metadata)
+[INFO] [1763020178.741093953] [foxglove_bridge]: Removing channel 16 for topic "/camera/realsense2_camera/color/image_raw/theora" (theora_image_transport/msg/Packet)
+[INFO] [1763020178.741185059] [foxglove_bridge]: Removing channel 17 for topic "/camera/realsense2_camera/color/image_raw/compressedDepth" (sensor_msgs/msg/CompressedImage)
+[INFO] [1763020178.741402857] [foxglove_bridge]: Removing channel 18 for topic "/camera/realsense2_camera/color/image_raw/compressed" (sensor_msgs/msg/CompressedImage)
+[INFO] [1763020178.741499020] [foxglove_bridge]: Removing channel 19 for topic "/camera/realsense2_camera/aligned_depth_to_color/image_raw/theora" (theora_image_transport/msg/Packet)
+[INFO] [1763020178.741596367] [foxglove_bridge]: Removing channel 21 for topic "/camera/realsense2_camera/aligned_depth_to_color/image_raw/compressedDepth" (sensor_msgs/msg/CompressedImage)
+[INFO] [1763020178.741691953] [foxglove_bridge]: Removing channel 22 for topic "/camera/depth/image_rect_raw" (sensor_msgs/msg/Image)
+[INFO] [1763020178.741785876] [foxglove_bridge]: Removing channel 23 for topic "/camera/depth/camera_info" (sensor_msgs/msg/CameraInfo)
+[INFO] [1763020178.741880150] [foxglove_bridge]: Removing channel 25 for topic "/camera/realsense2_camera/depth/image_rect_raw/theora" (theora_image_transport/msg/Packet)
+[INFO] [1763020178.742021242] [foxglove_bridge]: Removing channel 27 for topic "/camera/aligned_depth_to_color/image_raw" (sensor_msgs/msg/Image)
+[INFO] [1763020178.742120989] [foxglove_bridge]: Removing channel 29 for topic "/camera/aligned_depth_to_color/camera_info" (sensor_msgs/msg/CameraInfo)
+[INFO] [1763020178.749846448] [foxglove_bridge]: publishing connection graph
+[INFO] [1763020179.260945395] [foxglove_bridge]: publishing connection graph
+[INFO] [1763020203.050146975] [foxglove_bridge]: publishing connection graph
+[INFO] [1763020203.554800235] [foxglove_bridge]: publishing connection graph
+[INFO] [1763020204.066256593] [foxglove_bridge]: publishing connection graph
+[INFO] [1763020205.266696133] [foxglove_bridge]: publishing connection graph
+[INFO] [1763020205.775760102] [foxglove_bridge]: publishing connection graph
+[INFO] [1763020207.991602183] [foxglove_bridge]: publishing connection graph
+[INFO] [1763020208.493154615] [foxglove_bridge]: Advertising new channel 33 for topic "/camera/camera/depth/metadata"
+[INFO] [1763020208.493371613] [foxglove_bridge]: Advertising new channel 34 for topic "/camera/camera/depth/image_rect_raw/compressedDepth"
+[INFO] [1763020208.493421407] [foxglove_bridge]: Advertising new channel 35 for topic "/camera/camera/depth/image_rect_raw/compressed"
+[INFO] [1763020208.493461760] [foxglove_bridge]: Advertising new channel 36 for topic "/camera/camera/depth/image_rect_raw"
+[INFO] [1763020208.493511809] [foxglove_bridge]: Advertising new channel 37 for topic "/camera/camera/depth/camera_info"
+[INFO] [1763020208.493550402] [foxglove_bridge]: Advertising new channel 38 for topic "/camera/camera/color/metadata"
+[INFO] [1763020208.493589891] [foxglove_bridge]: Advertising new channel 39 for topic "/camera/camera/depth/image_rect_raw/theora"
+[INFO] [1763020208.493623620] [foxglove_bridge]: Advertising new channel 40 for topic "/camera/camera/color/image_raw/theora"
+[INFO] [1763020208.493659653] [foxglove_bridge]: Advertising new channel 41 for topic "/camera/camera/color/image_raw/compressedDepth"
+[INFO] [1763020208.493696582] [foxglove_bridge]: Advertising new channel 42 for topic "/camera/camera/color/image_raw/compressed"
+[INFO] [1763020208.493730119] [foxglove_bridge]: Advertising new channel 43 for topic "/camera/camera/extrinsics/depth_to_color"
+[INFO] [1763020208.493770312] [foxglove_bridge]: Advertising new channel 44 for topic "/camera/camera/color/image_raw"
+[INFO] [1763020208.493816873] [foxglove_bridge]: Advertising new channel 45 for topic "/camera/camera/color/camera_info"
+[INFO] [1763020208.493852746] [foxglove_bridge]: Advertising new channel 46 for topic "/camera/camera/aligned_depth_to_color/image_raw/theora"
+[INFO] [1763020208.493899948] [foxglove_bridge]: Advertising new channel 47 for topic "/camera/camera/aligned_depth_to_color/image_raw/compressedDepth"
+[INFO] [1763020208.493982926] [foxglove_bridge]: Advertising new channel 48 for topic "/camera/camera/aligned_depth_to_color/image_raw/compressed"
+[INFO] [1763020208.494039568] [foxglove_bridge]: Advertising new channel 49 for topic "/camera/camera/aligned_depth_to_color/image_raw"
+[INFO] [1763020208.494166803] [foxglove_bridge]: Advertising new channel 50 for topic "/camera/camera/aligned_depth_to_color/camera_info"
+[INFO] [1763020208.568494174] [foxglove_bridge]: publishing connection graph
+[INFO] [1763020209.075980208] [foxglove_bridge]: publishing connection graph
+[INFO] [1763020211.737050630] [foxglove_bridge]: publishing connection graph
+[INFO] [1763020212.243042922] [foxglove_bridge]: publishing connection graph
+[INFO] [1763020707.405788752] [foxglove_bridge]: publishing connection graph
+[INFO] [1763020707.917895606] [foxglove_bridge]: publishing connection graph
+[INFO] [1763020708.419625482] [foxglove_bridge]: Removing channel 50 for topic "/camera/camera/aligned_depth_to_color/camera_info" (sensor_msgs/msg/CameraInfo)
+[INFO] [1763020708.419904561] [foxglove_bridge]: Removing channel 49 for topic "/camera/camera/aligned_depth_to_color/image_raw" (sensor_msgs/msg/Image)
+[INFO] [1763020708.419976915] [foxglove_bridge]: Removing channel 48 for topic "/camera/camera/aligned_depth_to_color/image_raw/compressed" (sensor_msgs/msg/CompressedImage)
+[INFO] [1763020708.420029748] [foxglove_bridge]: Removing channel 47 for topic "/camera/camera/aligned_depth_to_color/image_raw/compressedDepth" (sensor_msgs/msg/CompressedImage)
+[INFO] [1763020708.420080118] [foxglove_bridge]: Removing channel 46 for topic "/camera/camera/aligned_depth_to_color/image_raw/theora" (theora_image_transport/msg/Packet)
+[INFO] [1763020708.420130455] [foxglove_bridge]: Removing channel 45 for topic "/camera/camera/color/camera_info" (sensor_msgs/msg/CameraInfo)
+[INFO] [1763020708.420186521] [foxglove_bridge]: Removing channel 44 for topic "/camera/camera/color/image_raw" (sensor_msgs/msg/Image)
+[INFO] [1763020708.420243514] [foxglove_bridge]: Removing channel 43 for topic "/camera/camera/extrinsics/depth_to_color" (realsense2_camera_msgs/msg/Extrinsics)
+[INFO] [1763020708.420304124] [foxglove_bridge]: Removing channel 42 for topic "/camera/camera/color/image_raw/compressed" (sensor_msgs/msg/CompressedImage)
+[INFO] [1763020708.420360733] [foxglove_bridge]: Removing channel 41 for topic "/camera/camera/color/image_raw/compressedDepth" (sensor_msgs/msg/CompressedImage)
+[INFO] [1763020708.420417471] [foxglove_bridge]: Removing channel 40 for topic "/camera/camera/color/image_raw/theora" (theora_image_transport/msg/Packet)
+[INFO] [1763020708.420473440] [foxglove_bridge]: Removing channel 39 for topic "/camera/camera/depth/image_rect_raw/theora" (theora_image_transport/msg/Packet)
+[INFO] [1763020708.420528290] [foxglove_bridge]: Removing channel 38 for topic "/camera/camera/color/metadata" (realsense2_camera_msgs/msg/Metadata)
+[INFO] [1763020708.420582691] [foxglove_bridge]: Removing channel 37 for topic "/camera/camera/depth/camera_info" (sensor_msgs/msg/CameraInfo)
+[INFO] [1763020708.420635716] [foxglove_bridge]: Removing channel 36 for topic "/camera/camera/depth/image_rect_raw" (sensor_msgs/msg/Image)
+[INFO] [1763020708.420689958] [foxglove_bridge]: Removing channel 35 for topic "/camera/camera/depth/image_rect_raw/compressed" (sensor_msgs/msg/CompressedImage)
+[INFO] [1763020708.420747303] [foxglove_bridge]: Removing channel 34 for topic "/camera/camera/depth/image_rect_raw/compressedDepth" (sensor_msgs/msg/CompressedImage)
+[INFO] [1763020708.420802793] [foxglove_bridge]: Removing channel 33 for topic "/camera/camera/depth/metadata" (realsense2_camera_msgs/msg/Metadata)
+[INFO] [1763020708.426528095] [foxglove_bridge]: publishing connection graph
+[INFO] [1763020708.935924189] [foxglove_bridge]: publishing connection graph
+[INFO] [1763020709.445018067] [foxglove_bridge]: publishing connection graph
+[INFO] [1763021158.305812454] [foxglove_bridge]: publishing connection graph
+[INFO] [1763021159.380014921] [foxglove_bridge]: publishing connection graph
+[INFO] [1763021159.882083804] [foxglove_bridge]: Advertising new channel 51 for topic "/camera/realsense2_camera/depth/image_rect_raw/theora"
+[INFO] [1763021159.882255456] [foxglove_bridge]: Advertising new channel 52 for topic "/camera/realsense2_camera/depth/image_rect_raw/compressed"
+[INFO] [1763021159.882371491] [foxglove_bridge]: Advertising new channel 53 for topic "/camera/realsense2_camera/depth/metadata"
+[INFO] [1763021159.882412612] [foxglove_bridge]: Advertising new channel 54 for topic "/camera/realsense2_camera/color/metadata"
+[INFO] [1763021159.882454469] [foxglove_bridge]: Advertising new channel 55 for topic "/camera/realsense2_camera/depth/image_rect_raw/compressedDepth"
+[INFO] [1763021159.882495878] [foxglove_bridge]: Advertising new channel 56 for topic "/camera/realsense2_camera/color/image_raw/theora"
+[INFO] [1763021159.882535303] [foxglove_bridge]: Advertising new channel 57 for topic "/camera/realsense2_camera/color/image_raw/compressedDepth"
+[INFO] [1763021159.882576616] [foxglove_bridge]: Advertising new channel 58 for topic "/camera/realsense2_camera/color/image_raw/compressed"
+[INFO] [1763021159.882615145] [foxglove_bridge]: Advertising new channel 59 for topic "/camera/realsense2_camera/aligned_depth_to_color/image_raw/compressed"
+[INFO] [1763021159.882661579] [foxglove_bridge]: Advertising new channel 60 for topic "/camera/depth/image_rect_raw"
+[INFO] [1763021159.882697964] [foxglove_bridge]: Advertising new channel 61 for topic "/camera/realsense2_camera/extrinsics/depth_to_color"
+[INFO] [1763021159.882734797] [foxglove_bridge]: Advertising new channel 62 for topic "/camera/realsense2_camera/aligned_depth_to_color/image_raw/theora"
+[INFO] [1763021159.882789390] [foxglove_bridge]: Advertising new channel 63 for topic "/camera/depth/camera_info"
+[INFO] [1763021159.882840399] [foxglove_bridge]: Advertising new channel 64 for topic "/camera/aligned_depth_to_color/image_raw"
+[INFO] [1763021159.882888112] [foxglove_bridge]: Advertising new channel 65 for topic "/camera/realsense2_camera/aligned_depth_to_color/image_raw/compressedDepth"
+[INFO] [1763021159.882943698] [foxglove_bridge]: Advertising new channel 66 for topic "/camera/aligned_depth_to_color/camera_info"
+[INFO] [1763021159.887193024] [foxglove_bridge]: publishing connection graph
+[INFO] [1763021160.398899149] [foxglove_bridge]: publishing connection graph
+[INFO] [1763021171.733201659] [foxglove_bridge]: publishing connection graph
+[INFO] [1763021172.245219661] [foxglove_bridge]: publishing connection graph

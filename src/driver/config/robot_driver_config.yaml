@@ -1,0 +1,44 @@
+robot_driver:
+  ros__parameters:
+    can_channel: can0
+    joint_state_rate: 30.0
+    diagnostics_rate: 1.0
+    command_timeout_s: 60.0
+    zero_gravity_default: false
+    xyz_only_mode: false
+    log_dir: l2/log/robot_driver
+    safe_pose_file: config/safe_pose_default.yaml
+    publish_tf: true
+    tf_base_frame: base_link
+    tf_tool_frame: tool0
+    diag_hardware_id: robot_driver_node
+    diagnostic_latch_sec: 5.0
+    cartesian_command_rate_limit: 0.15
+    joint_state_topic: /joint_states
+    diagnostics_topic: /robot_driver/diagnostics
+    robot_command_topic: /robot_driver/robot_command
+    joint_command_topic: /robot_driver/joint_command
+    safety_stop_topic: /robot_driver/safety_stop
+    follow_joint_trajectory_action: /robot_driver/action/follow_joint_trajectory
+    zero_gravity_service: /robot_driver/service/zero_gravity
+    reset_can_service: /robot_driver/service/reset_can
+    can_reset_script: ""
+    enable_joint_direct_ctrl: false
+    joint_command_mode: position
+    joint_command_rate_limit: 0.5
+    enable_joint_velocity_fuse: false
+    safe_pose_fallback:
+      joint_names:
+        - joint_1
+        - joint_2
+        - joint_3
+        - joint_4
+        - joint_5
+        - joint_6
+      positions:
+        - 0.0
+        - -0.3
+        - 0.6
+        - -1.2
+        - 0.8
+        - 0.0
