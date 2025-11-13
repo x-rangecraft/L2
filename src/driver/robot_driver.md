@@ -3,7 +3,7 @@
 该文档用于梳理 `robot_driver_node`（设备下发/上报驱动）的需求、边界与验收标准。
 
 ## 背景
-- `robot_driver_node` 位于 `L2/src/driver/`，承担机械臂/夹爪等执行器的底层通信、状态采集与命令下发。
+- `robot_driver_node` 位于 `driver/src/robot_driver_node.py`（仓库路径 `L2/src/driver/src/`），承担机械臂/夹爪等执行器的底层通信、状态采集与命令下发。
 - 上层模块（move_controller、skill、app 等）依赖该节点提供稳定的实时接口。
 
 ## 节点职责（目标）
@@ -20,7 +20,7 @@
    - 暴露接口（service/action）以启用或关闭零重力模式，并同步更新状态上报与安全限制。
    - 若节点处于零重力模式且收到新的运动指令，需先自动退出零重力模式，再恢复常规控制链路。
 6. 生命周期管理
-   - 节点启动由 `src/driver/start_robot_driver.sh` 负责触发，脚本需拉起驱动、完成初始化并开始发布话题；关闭时安全停车、断开总线，保证流程幂等。
+- 节点启动由 `driver/start_robot_driver.sh` 负责触发，脚本需拉起驱动、完成初始化并开始发布话题；关闭时安全停车、断开总线，保证流程幂等。
 7. 诊断与告警
    - 通过 `diagnostic_msgs/DiagnosticArray` 或自定义话题上报 CAN 状态、力矩/温度/电流异常、模式切换结果。
 8. 故障恢复
@@ -88,7 +88,7 @@ effort: []
 
 ## 实现技术方案（对标 l1_stage1_device）
 1. 启动链路（方案稳定，暂不调整）
-   - `src/driver/start_robot_driver.sh`：仿照 `L1/start_stage1.sh`，完成以下步骤：
+   - `driver/start_robot_driver.sh`：仿照 `L1/start_stage1.sh`，完成以下步骤：
      1. 解析 `--can canX`、`--xyz-only`、`--zero-gravity` 等参数；
      2. 调用 `I2RT/i2rt/scripts/reset_all_can.sh` 强制清总线；
      3. 执行 `python3 -m driver.can_interface_manager --ensure --interface canX` 以确认 gs_usb 接口、比特率；
@@ -110,14 +110,14 @@ effort: []
      - 关节轨迹：遵循 `FollowJointTrajectory` action（`/robot_driver/action/follow_joint_trajectory`）的 `time_from_start`，逐点执行并校验速度/加速度；
      - 关节直控：当启用 `/robot_driver/joint_command` 时，节点根据消息中的关节名替换当前姿态中对应分量，再应用限速/限幅并写入硬件，逻辑复用 Commander 的 `command_joint_pos/vel` 能力。
    - 心跳/超时：由 `command_watchdog` 维护 `last_command_stamp`，若在 `timeout_s`（固定 60 s）内未收到任何控制指令，则触发安全归位；当确认机械臂到达 `SAFE_POSE` 后再启用零重力模式，重新收到命令时即刻退出零重力并恢复常规控制。
-   - `/robot_driver/safety_stop`：节点订阅后立即抢占当前运动并调用 `hardware_commander.move_to_safe_pose()`，但保持当前零重力模式不变。
+   - `/robot_driver/safety_stop`：节点订阅后立即抢占当前运动；若当前已处于零重力模式，先调用 `hardware_commander.set_zero_gravity(false)` 以恢复常规控制，再执行 `move_to_safe_pose()`，待确认 SAFE_POSE 落位成功后再次启用零重力；若原本不在零重力模式，则直接回到安全位并在完成后开启零重力。
 
 4. 零重力模式钩子
    - 在 Commander 初始化时读取参数 `zero_gravity_default`，并提供 `set_zero_gravity(bool)` API，内部调用 I2RT SDK 的零重力接口（若缺失则通过写寄存器实现），状态变更同步到 `/robot_driver/diagnostics`。
    - 服务端做互斥处理：切模式期间暂停指令执行，并在成功/失败时写日志到 `l2/log/robot_driver/`。
 
 5. 日志与诊断
-   - 日志滚动策略：`src/driver/start_robot_driver.sh` 创建 `l2/log/robot_driver/robot_driver_<date>.log`，ROS 节点内部使用 `logging` 模块写同一路径；
+   - 日志滚动策略：`driver/start_robot_driver.sh` 创建 `l2/log/robot_driver/robot_driver_<date>.log`，ROS 节点内部使用 `logging` 模块写同一路径；
    - 关键信息（CAN 重连、零重力切换、`/robot_driver/safety_stop` 触发、心跳超时）必须双写：一份进入 `/robot_driver/diagnostics`，一份落地日志文件，便于离线排查；
    - 发生异常时自动收集最近一次指令上下文（命令源 topic/action、目标值、IK 耗时）并写入日志。
 
@@ -132,7 +132,7 @@ effort: []
    - 若 SDK 提供 `get_joint_state_cached()` 之类非阻塞 API，则驱动优先使用缓存；否则在 commander 层维护 ring buffer，写命令时顺便更新最新状态，供 JointState 发布线程读取。
 
 ## 安全态标定脚本
-- 新增 `src/driver/scripts/set_safe_pose.sh`（暂定命名），提供交互式 SAFE_POSE 标定流程，方便把实机姿态写入配置：
+- 新增 `driver/safe_pose_build.sh`（与其他脚本同级），提供交互式 SAFE_POSE 标定流程，方便把实机姿态写入配置：
   1. 启动后立即调用 `/robot_driver/service/zero_gravity` 进入零重力，提示操作者可手动拖动机械臂至期望安全位。
   2. 脚本阻塞等待回车（或 `ctrl+c` 退出），确保操作者完成调姿后再继续。
   3. 收集当前关节状态：通过 `ros2 topic echo /joint_states --once`（或 commander CLI）读取最新的关节名/角度，并打印到终端让操作者确认。
@@ -141,19 +141,94 @@ effort: []
 
 
 ## 配置与动态更新
-- 默认参数文件：`src/driver/config/robot_driver_params.yaml`（后续创建），通过 `ros2 launch driver robot_driver.launch.py params:=...` 注入；
+- 默认参数文件：`driver/config/robot_driver_config.yaml`（后续创建），通过 `ros2 launch driver robot_driver.launch.py params:=...` 注入；
 - 关键参数：`can_channel`、`zero_gravity_default`、`joint_state_rate`、`diagnostics_rate`、`command_timeout_s`（60 s 默认）、`safe_pose` 数组、`log_dir`（默认 `l2/log/robot_driver/`）。
+  - `safe_pose` 默认从 `config/safe_pose_default.yaml` 读入，可由 `safe_pose_build.sh` 输出的最新 `safe_pose_*.yaml` 替换。
 - 关节直控相关参数：
   - `enable_joint_direct_ctrl`（bool，默认 `false`）：是否订阅 `/robot_driver/joint_command`；
   - `joint_command_topic`（string，默认 `/robot_driver/joint_command`）：话题名，可通过 launch/CLI 调整；
   - `joint_command_mode`（enum: position/velocity/effort，默认 position）：决定如何解读 `sensor_msgs/JointState` 中的 `position/velocity/effort` 字段；
   - `joint_command_rate_limit`（double，默认 0.5 rad/s）：单轴命令的限速，用于调试时保护电机。
-- `src/driver/start_robot_driver.sh` 提供 CLI 覆盖：`--can canX`、`--zero-gravity`、`--xyz-only`、`--params <file>`，脚本会把结果传入 ROS 参数；
+- `driver/start_robot_driver.sh` 提供 CLI 覆盖：`--can canX`、`--zero-gravity`、`--xyz-only`、`--params <file>`，脚本会把结果传入 ROS 参数；
 - 运行期允许通过 `ros2 param set` 更新白名单参数：
   - `can_channel`：触发内部回调 → 暂停命令 → 调用 `/robot_driver/service/reset_can` 逻辑 → 切换 gs_usb 接口；
   - `joint_state_rate`、`diagnostics_rate`、`command_timeout_s`：实时更新定时器和安全心跳；
   - 其他参数需通过 YAML 修改后重启节点。
 - 该机制支持在调试阶段快速在 `can0/can1/can2` 之间切换，后续可扩展自动枚举逻辑以适配更多硬件组合。
+
+### 目录结构
+当前包目录规划如下：
+
+```
+driver/
+├── src/
+│   └── robot_driver_node.py
+├── config/
+│   ├── robot_driver_config.yaml
+│   └── safe_pose_default.yaml
+├── launch/
+│   └── robot_driver.launch.py
+├── resource/
+│   └── robot_driver
+├── setup.py
+├── setup.cfg
+├── package.xml
+├── start_robot_driver.sh
+└── safe_pose_build.sh
+```
+
+- `driver/start_robot_driver.sh`：驱动启动脚本，负责参数解析、环境配置与 `ros2 launch` 拉起。
+- `driver/safe_pose_build.sh`：SAFE_POSE 标定脚本，生成 `safe_pose_*.yaml`。
+- `driver/src/robot_driver_node.py`：ROS 2 主节点实现。
+- `driver/package.xml`：ROS 2 包元数据，声明依赖与构建信息。
+- `driver/setup.py` / `setup.cfg`：声明 `ament_python` 包、入口点、安装数据文件（config、launch、resource）。
+- `driver/resource/robot_driver`：ROS 2 资源索引文件，确保 `ros2 run driver` 可找到节点。
+- `driver/launch/robot_driver.launch.py`：标准 launch，加载参数 YAML、配置日志级别并启动节点（支持 CLI 传参）。
+- `driver/config/robot_driver_config.yaml`：默认参数文件，可通过 launch 覆盖。
+- `driver/config/safe_pose_default.yaml` 及 `safe_pose_*.yaml`：人工标定出的安全位姿快照，供 `safe_pose` 阵列引用。
+- `l2/log/robot_driver/`：运行期日志目录，由启动脚本或节点创建。
+
+### 源码模块划分（面向对象）
+- `driver/src/robot_driver/main.py`
+  - `RobotDriverNode(rclpy.node.Node)`：加载参数、实例化下述组件、注册 ROS 接口，并负责 executor 与生命周期钩子。
+- `driver/src/robot_driver/can_interface_manager.py`
+  - `CanInterfaceManager`：封装 gs_usb 检测、比特率校验、掉线重连，暴露 `ensure_ready()`、`reset()`。
+- `driver/src/robot_driver/hardware_commander.py`
+  - `HardwareCommander`：面向 I2RT SDK 的 OO 包装，提供 `read_joint_state()`、`read_cartesian_state()`、`command_pose()`、`command_joints()`、`move_to_safe_pose()`、`set_zero_gravity()` 等线程安全 API。
+- `driver/src/robot_driver/state_publisher.py`
+  - `StatePublisher`：独立 callback group，周期性读取 commander 缓存并发布 `/joint_states`、TF、`/robot_driver/diagnostics`；可组合 `DiagnosticsReporter` 处理告警聚合。
+- `driver/src/robot_driver/motion_controller.py`
+  - `MotionController`：处理 `/robot_driver/robot_command`、`/robot_driver/joint_command`、`FollowJointTrajectory`，内部集成命令队列、IK/插值、限速与 commander 写入；辅以 `TrajectoryPlanner` 工具类（可放同文件或 `trajectory.py`）。
+- `driver/src/robot_driver/command_watchdog.py`
+  - `CommandWatchdog`：维护 `last_command_stamp`，监听 controller 的活动事件；若超时或收到 `/robot_driver/safety_stop`，执行“若在零重力先退出→调用 commander.move_to_safe_pose() → 落位成功后再启零重力”的顺序，并向 diagnostics 写超时记录。
+- `driver/src/robot_driver/safe_pose_loader.py`
+  - `SafePoseLoader`：解析 `config/safe_pose_default.yaml` 或 `safe_pose_*.yaml`，校验关节名/角度范围，并向 controller/watchdog 提供 SAFE_POSE 数据。
+- `driver/src/robot_driver/logging_utils.py`
+  - 封装日志/事件落盘，统一写 `l2/log/robot_driver/` 与 ROS logger，支持关键事件双写。
+- `driver/src/robot_driver/parameter_schema.py`
+  - 以 dataclass/TypedDict 描述节点参数（rates、超时、安全姿态、限速等），集中做默认值填充与合法性校验。
+- `driver/src/robot_driver/tools/safe_pose_capture.py`（可选）
+  - 供 `safe_pose_build.sh` 调用的 CLI，负责切换零重力、等待操作者、读取 `/joint_states` 并输出 YAML。
+
+`setup.py` 中的 console script 指向 `robot_driver.main:main`，确保各模块按需导入，易于单元测试（组件可独立实例化并用 mock commander 验证）。
+
+### 节点配置（ROS 包）
+- `package.xml`
+  - `<buildtool_depend>ament_python</buildtool_depend>`、`<exec_depend>` 覆盖 `rclpy`、`sensor_msgs`、`geometry_msgs`、`trajectory_msgs`、`control_msgs`、`diagnostic_msgs`、`std_srvs`、`std_msgs` 等接口依赖。
+  - 声明外部 SDK 依赖（I2RT）和脚本运行所需的 `python3` 模块（如 `pyyaml`）。
+- `setup.py`
+  - 使用 `setuptools.setup()` 注册 `packages=[]`（脚本位于 `src/`），通过 `py_modules=['robot_driver_node']` 或将源码改为包形式；
+  - 配置 `entry_points={'console_scripts': ['robot_driver_node=robot_driver_node:main']}` 方便 `ros2 run driver robot_driver_node`。
+- `setup.cfg`
+  - `data_files` 中安装 `package.xml`、`resource/robot_driver`、`launch/` 与 `config/`；
+  - `options.entry_points` 重复声明 console script，确保 `colcon build` 正确生成。
+- `launch/robot_driver.launch.py`
+  - 读取 `robot_driver_config.yaml` 与可选 `safe_pose` YAML，拼装 node 参数；
+  - 暴露 `can_channel`、`zero_gravity_default`、`xyz_only_mode` 等 launch 参数，可供 `start_robot_driver.sh` 复用；
+  - 可选：在 debug 模式下拉起 `ros2 run tf2_ros static_transform_publisher` 或状态可视化节点。
+- `config/robot_driver_config.yaml`
+  - 至少包含 `joint_state_rate`、`diagnostics_rate`、`command_timeout_s`、`safe_pose`、`log_dir`、`enable_joint_direct_ctrl` 等字段；
+  - 默认引用 `config/safe_pose_default.yaml` 以集中维护姿态数据，可在标定后替换为新的 `safe_pose_*.yaml`。
 
 ## 待讨论要点
 1. 通信接口
