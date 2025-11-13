@@ -20,7 +20,7 @@
    - 暴露接口（service/action）以启用或关闭零重力模式，并同步更新状态上报与安全限制。
    - 若节点处于零重力模式且收到新的运动指令，需先自动退出零重力模式，再恢复常规控制链路。
 6. 生命周期管理
-   - 节点启动由工作区根目录的 `start_robot_driver.sh` 负责触发，脚本需拉起驱动、完成初始化并开始发布话题；关闭时安全停车、断开总线，保证流程幂等。
+   - 节点启动由 `src/driver/start_robot_driver.sh` 负责触发，脚本需拉起驱动、完成初始化并开始发布话题；关闭时安全停车、断开总线，保证流程幂等。
 7. 诊断与告警
    - 通过 `diagnostic_msgs/DiagnosticArray` 或自定义话题上报 CAN 状态、力矩/温度/电流异常、模式切换结果。
 8. 故障恢复
@@ -43,6 +43,7 @@
 | --- | --- | --- |
 | `/robot_driver/robot_command` | `geometry_msgs/PoseStamped` | 机械臂基坐标系（默认 `base_link`）下的笛卡尔目标，`Pose.position` 为 XYZ，`orientation` 提供单位四元数；驱动执行 IK → 关节插值。 |
 | `/robot_driver/safety_stop` | `std_msgs/Empty` | 收到立即抢占当前运动、执行安全归位，但不切换零重力模式。 |
+| `/robot_driver/joint_command` | `sensor_msgs/JointState` | （可选）直接指定一个或多个关节位置/速度/力矩；用于调试、标定或单轴测试，默认关闭，通过参数启用。 |
 
 `/robot_driver/robot_command` 示例：
 
@@ -58,6 +59,20 @@ pose:
 - `frame_id` 默认 `base_link`，若使用其他坐标系需在 TF 中可解析；
 - orientation 需是规范化四元数，若只关注 XYZ 可启用 `xyz_only_mode`，节点将沿用当前姿态；
 - 上层以 10–30 Hz 推送命令即可触发连续插值，最新命令会抢占旧命令。
+
+`/robot_driver/joint_command` 示例（position 模式）：
+
+```yaml
+name: [joint_1, joint_3]
+position: [0.5, 1.2]
+velocity: []
+effort: []
+```
+
+- `name` 必须与 `/joint_states` 中的名称一致；
+- 未列出的关节保持当前值；
+- 若 `joint_command_mode` 设为 velocity/effort，则分别读取对应字段并忽略其余字段；
+- 该接口多借鉴 I2RT SDK 的 `command_joint_pos`/`command_joint_vel` 能力，适合单轴标定、零位校准或 I2RT 集成测试。
 
 ### 服务与动作
 | 名称 | 类型 | 用途 | 调用示例 |
@@ -78,7 +93,7 @@ pose:
    - `robot_driver_node`：ROS 2 节点本体，负责接口定义、命令调度、多线程状态发布，与 `Start/Stop` 生命周期钩子。
 
 2. 启动链路
-   - `start_robot_driver.sh`（位于 `L2/` 根目录）：仿照 `L1/start_stage1.sh`，完成以下步骤：
+   - `src/driver/start_robot_driver.sh`：仿照 `L1/start_stage1.sh`，完成以下步骤：
      1. 解析 `--can canX`、`--xyz-only`、`--zero-gravity` 等参数；
      2. 调用 `I2RT/i2rt/scripts/reset_all_can.sh` 强制清总线；
      3. 执行 `python3 -m driver.can_interface_manager --ensure --interface canX` 以确认 gs_usb 接口、比特率；
@@ -90,6 +105,7 @@ pose:
    - 插值策略：
      - 笛卡尔目标：通过 IK 求解后在关节空间作线性插值（同 Stage1 `_interpolate_to_goal`）；
      - 关节轨迹：遵循 `FollowJointTrajectory` action（`/robot_driver/action/follow_joint_trajectory`）的 `time_from_start`，逐点执行并校验速度/加速度；
+     - 关节直控：当启用 `/robot_driver/joint_command` 时，节点根据消息中的关节名替换当前姿态中对应分量，再应用限速/限幅并写入硬件，逻辑复用 Commander 的 `command_joint_pos/vel` 能力。
    - 心跳/超时：维护 `last_command_stamp`，若在 `timeout_s`（固定 60 s）内未收到任何控制指令，则触发安全归位（进入 `SAFE_POSE` 并启用零重力模式）；重新收到命令时即刻退出零重力并恢复常规控制。
    - `/robot_driver/safety_stop`：节点订阅后立即抢占当前运动并调用 `hardware_commander.move_to_safe_pose()`，但保持当前零重力模式不变。
 
@@ -98,7 +114,7 @@ pose:
    - 服务端做互斥处理：切模式期间暂停指令执行，并在成功/失败时写日志到 `l2/log/robot_driver/`。
 
 5. 日志与诊断
-   - 日志滚动策略：`start_robot_driver.sh` 创建 `l2/log/robot_driver/robot_driver_<date>.log`，ROS 节点内部使用 `logging` 模块写同一路径；
+   - 日志滚动策略：`src/driver/start_robot_driver.sh` 创建 `l2/log/robot_driver/robot_driver_<date>.log`，ROS 节点内部使用 `logging` 模块写同一路径；
    - 关键信息（CAN 重连、零重力切换、`/robot_driver/safety_stop` 触发、心跳超时）必须双写：一份进入 `/robot_driver/diagnostics`，一份落地日志文件，便于离线排查；
    - 发生异常时自动收集最近一次指令上下文（命令源 topic/action、目标值、IK 耗时）并写入日志。
 
@@ -116,7 +132,12 @@ pose:
 ## 配置与动态更新
 - 默认参数文件：`src/driver/config/robot_driver_params.yaml`（后续创建），通过 `ros2 launch driver robot_driver.launch.py params:=...` 注入；
 - 关键参数：`can_channel`、`zero_gravity_default`、`joint_state_rate`、`diagnostics_rate`、`command_timeout_s`（60 s 默认）、`safe_pose` 数组、`log_dir`（默认 `l2/log/robot_driver/`）。
-- `start_robot_driver.sh` 提供 CLI 覆盖：`--can canX`、`--zero-gravity`、`--xyz-only`、`--params <file>`，脚本会把结果传入 ROS 参数；
+- 关节直控相关参数：
+  - `enable_joint_direct_ctrl`（bool，默认 `false`）：是否订阅 `/robot_driver/joint_command`；
+  - `joint_command_topic`（string，默认 `/robot_driver/joint_command`）：话题名，可通过 launch/CLI 调整；
+  - `joint_command_mode`（enum: position/velocity/effort，默认 position）：决定如何解读 `sensor_msgs/JointState` 中的 `position/velocity/effort` 字段；
+  - `joint_command_rate_limit`（double，默认 0.5 rad/s）：单轴命令的限速，用于调试时保护电机。
+- `src/driver/start_robot_driver.sh` 提供 CLI 覆盖：`--can canX`、`--zero-gravity`、`--xyz-only`、`--params <file>`，脚本会把结果传入 ROS 参数；
 - 运行期允许通过 `ros2 param set` 更新白名单参数：
   - `can_channel`：触发内部回调 → 暂停命令 → 调用 `/robot_driver/service/reset_can` 逻辑 → 切换 gs_usb 接口；
   - `joint_state_rate`、`diagnostics_rate`、`command_timeout_s`：实时更新定时器和安全心跳；
