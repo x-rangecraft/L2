@@ -1,0 +1,49 @@
+# Intel RealSense D435i - realsense2_camera 参数
+#
+# Stage0 使用官方 realsense2_camera 驱动，并暴露下游组件依赖的话题与 TF。
+# 如需修改，请同步更新 L1/L2 相机启动脚本以保持一致。
+
+/**:
+  ros__parameters:
+    enable_color: true
+    enable_depth: true
+    enable_infra1: false
+    enable_infra2: false
+    enable_gyro: false
+    enable_accel: false
+    enable_sync: true
+
+    colorizer.enable: false
+    pointcloud.enable: false
+    align_depth.enable: true
+
+    # 分辨率配置
+    depth_module.depth_profile: 640x480x30
+    rgb_camera.color_profile: 640x480x30
+    depth_module.depth_width: 640
+    depth_module.depth_height: 480
+    depth_module.depth_fps: 30
+    rgb_camera.color_width: 640
+    rgb_camera.color_height: 480
+    rgb_camera.color_fps: 30
+    rgb_camera.color_format: RGB8
+
+    # 注意：realsense2_camera 会自动在 frame_id 前加上 camera_name（默认 camera_），
+    # 因此这里保持无前缀写法，最终仍会变成 camera_link 等。
+    base_frame_id: link
+    color_frame_id: color_frame
+    color_optical_frame_id: color_optical_frame
+    depth_frame_id: depth_frame
+    depth_optical_frame_id: depth_optical_frame
+    enable_ir_reflectivity: false
+
+    publish_tf: true
+    tf_publish_rate: 0.0
+    hold_back_imu_for_frames: false
+    allow_no_texture_points: false
+
+    # Stage2/Stage3 需要对齐的 depth，滤波器默认关闭以降低开销
+    decimation_filter.enable: false
+    spatial_filter.enable: false
+    temporal_filter.enable: false
+    hole_filling_filter.enable: false
