@@ -1,36 +1,43 @@
-# RealSense Camera Node Requirements
+# Camera 包总体说明
 
-## Goal
-Define the logic and configuration flow that this folder will own for launching the RealSense ROS 2 node with a globally applied configuration profile.
+## 目录定位
+- 该目录承担 Intel RealSense（当前聚焦 D435i）的 ROS 2 启动、参数与调试脚本，避免与上层视觉算法混杂。
+- 集中维护 `realsense2_camera` 的 launch 文件与参数，未来可扩展到多相机实例、动态重配置与标定工具。
+- 与 `vision/` 目录解耦：vision 只消费这里发布的图像/点云等话题。
+- 新增脚本或 launch 文件时，应在本目录内维护，并在本文档中同步说明其作用与入口。
 
-## Scope
-- Manage launch-time parameters for the RealSense depth camera ROS 2 node.
-- Ensure a single source of truth for camera settings that every consumer (local nodes or remote clients) can rely on.
-- Provide hooks for future extensions such as multi-camera support or dynamic reconfiguration.
+## 目标
+为 RealSense ROS 2 相机节点提供统一、可配置、可扩展的启动逻辑，并在系统范围内应用同一份配置基线。
 
-## Requirements Draft
-1. **Configuration Source**
-   - Central YAML (or TOML) file describing sensors, resolutions, frame rates, frame IDs, TF tree roots, and topics.
-   - Support environment-variable overrides for deployment-specific tweaks without editing the base file.
-2. **Launch Interface**
-   - CLI entry point (likely a ROS 2 launch file) that consumes the configuration and spins up the `realsense2_camera` node.
-   - Validation step that fails fast if the config is missing mandatory keys.
-3. **Global Application**
-   - Once loaded, the configuration should be made available to other packages (e.g., via parameters service, topic, or shared library) so every node shares identical camera assumptions.
-4. **Monitoring & Health**
-   - Basic health topic or diagnostic updater to report camera status, firmware, temperature, and frame drops.
-5. **Extensibility Hooks**
-   - Placeholder for runtime dynamic parameter updates.
-   - Optional record/playback integration (rosbag2) toggled via config flags.
+## 范围
+- 管理 RealSense 深度相机 ROS 2 节点的所有启动参数。
+- 提供单一信息源，供本地节点或远程客户端复用。
+- 预留多相机与动态重配置扩展点。
 
-## Open Questions
-- Do we plan to run multiple RealSense devices concurrently?
-- Should calibration files live alongside this package or be fetched from a central store?
-- What is the target ROS 2 distribution and minimum librealsense version?
-- How should failures (USB disconnect, bad calibration) be surfaced to the broader system?
+## 需求草案
+1. **配置来源**
+   - 使用集中式 YAML/TOML 文件描述传感器、分辨率、帧率、frame_id、TF 根节点与话题映射。
+   - 支持通过环境变量覆盖关键参数，以满足不同部署环境的差异化需求。
+2. **启动接口**
+   - 通过 ROS 2 launch（或 CLI wrapper）读取配置并实例化 `realsense2_camera` 节点。
+   - 启动前执行必填字段校验，缺失即快速失败。
+3. **全局应用**
+   - 成功加载后，将配置注入全局：可考虑参数服务、共享库、或发布专用话题，确保其他包读取到一致的相机假设。
+4. **监控与健康检查**
+   - 发布基础诊断信息：固件版本、温度、帧率掉帧等，可复用 ROS 诊断工具。
+   - 为异常（USB 断连、校准失效）预留事件上报通道。
+5. **可扩展性**
+   - 预留运行时动态参数更新接口。
+   - 通过配置开关控制 rosbag2 录制/回放。
 
-## Next Steps
-1. Confirm answers to the open questions above.
-2. Lock down the configuration file format and schema.
-3. Create the launch/utility code that consumes the schema.
-4. Add tests or simulation flows to validate the startup logic.
+## 开放问题
+- 是否需要同时管理多台 RealSense 设备？
+- 标定文件应随包发布还是从集中存储拉取？
+- 目标 ROS 2 发行版与最低 librealsense 版本？
+- 故障（断连、坏校准）需如何向系统其余部分上报？
+
+## 下一步
+1. 明确上述开放问题的答案。
+2. 固定配置文件格式与 schema，并定义验证规则。
+3. 编写 launch/工具代码以消费该 schema。
+4. 设计诊断与全局参数共享机制，并准备仿真/测试流程验证启动逻辑。
