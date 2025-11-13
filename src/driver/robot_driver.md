@@ -87,12 +87,7 @@ effort: []
 3. 驱动节点按 `time_from_start` 执行，并在结果里返回 `SUCCESS/ABORTED` 与失败原因；若过程中触发 `/robot_driver/safety_stop`、心跳超时或零重力切换，action 会立刻 `ABORTED` 并记录日志。
 
 ## 实现技术方案（对标 l1_stage1_device）
-1. 模块分层
-   - `can_interface_manager`：借鉴 `l1_stage1_device/cartesian/can_monitor.py` 的思路，封装 gs_usb 设备检测、`ip -details link show` 解析、`I2RT/i2rt/scripts/reset_all_can.sh` 调用与 1 Mbps 配置校验，暴露 `ensure_ready(required=[canX])` API。
-   - `hardware_commander`：类似 `CartesianCommander`，包装 I2RT SDK 的 joint/pose 读取、轨迹插值、零重力模式切换（SetZeroGravity）、回零/归位等原语，确保上层 ROS 节点不直接触碰 SDK。
-   - `robot_driver_node`：ROS 2 节点本体，负责接口定义、命令调度、多线程状态发布，与 `Start/Stop` 生命周期钩子。
-
-2. 启动链路
+1. 启动链路（方案稳定，暂不调整）
    - `src/driver/start_robot_driver.sh`：仿照 `L1/start_stage1.sh`，完成以下步骤：
      1. 解析 `--can canX`、`--xyz-only`、`--zero-gravity` 等参数；
      2. 调用 `I2RT/i2rt/scripts/reset_all_can.sh` 强制清总线；
@@ -100,13 +95,21 @@ effort: []
      4. 设定 `PYTHONPATH`（挂载 I2RT SDK）、ROS 环境、`l2/log/robot_driver/robot_driver.log` 输出，并以 `ros2 launch driver robot_driver.launch.py` 方式拉起节点；
      5. 统一杀掉旧进程 `robot_driver_node`，保证脚本幂等。
 
+2. 模块分层
+   - `can_interface_manager`：借鉴 `l1_stage1_device/cartesian/can_monitor.py` 的思路，封装 gs_usb 设备检测、`ip -details link show` 解析、`I2RT/i2rt/scripts/reset_all_can.sh` 调用与 1 Mbps 配置校验，暴露 `ensure_ready(required=[canX])` API。
+   - `hardware_commander`：类似 `CartesianCommander`，包装 I2RT SDK 的 joint/pose 读取、轨迹插值、零重力模式切换（SetZeroGravity）、回零/归位等原语，确保上层 ROS 节点不直接触碰 SDK。
+   - `robot_driver_node`：ROS 2 进程主体，进一步拆成三个内部组件：
+     - `state_publisher`：独立 callback group 或 executor，周期性读取 commander 缓存并发布 `/joint_states`、TF 以及 `/robot_driver/diagnostics` 中的运行指标，确保读路径只持有读锁、不阻塞控制线程。
+     - `motion_controller`：承载 `/robot_driver/robot_command`、`/robot_driver/joint_command`、`FollowJointTrajectory` action 等控制接口，负责命令抢占、IK + 插值、限速、写入 commander。
+     - `command_watchdog`：挂在控制线程侧的子模块，维护 `last_command_stamp`；若 60 s（或 `command_timeout_s`）未收到控制指令则主动调用 `motion_controller` 的安全归位流程，并在确认机械臂已落位 SAFE_POSE 后再触发 `hardware_commander.set_zero_gravity(true)`，也负责 `/robot_driver/safety_stop` 的统一抢占收敛。
+
 3. 指令调度与安全
    - 命令队列：沿用 Stage1 的“单工作线程+可抢占”模型，使用 `queue.Queue` 存储笛卡尔/关节指令，任何新区指令会清空旧队列并打断当前插值；
    - 插值策略：
      - 笛卡尔目标：通过 IK 求解后在关节空间作线性插值（同 Stage1 `_interpolate_to_goal`）；
      - 关节轨迹：遵循 `FollowJointTrajectory` action（`/robot_driver/action/follow_joint_trajectory`）的 `time_from_start`，逐点执行并校验速度/加速度；
      - 关节直控：当启用 `/robot_driver/joint_command` 时，节点根据消息中的关节名替换当前姿态中对应分量，再应用限速/限幅并写入硬件，逻辑复用 Commander 的 `command_joint_pos/vel` 能力。
-   - 心跳/超时：维护 `last_command_stamp`，若在 `timeout_s`（固定 60 s）内未收到任何控制指令，则触发安全归位（进入 `SAFE_POSE` 并启用零重力模式）；重新收到命令时即刻退出零重力并恢复常规控制。
+   - 心跳/超时：由 `command_watchdog` 维护 `last_command_stamp`，若在 `timeout_s`（固定 60 s）内未收到任何控制指令，则触发安全归位；当确认机械臂到达 `SAFE_POSE` 后再启用零重力模式，重新收到命令时即刻退出零重力并恢复常规控制。
    - `/robot_driver/safety_stop`：节点订阅后立即抢占当前运动并调用 `hardware_commander.move_to_safe_pose()`，但保持当前零重力模式不变。
 
 4. 零重力模式钩子
@@ -127,6 +130,14 @@ effort: []
      - `joint_state_timer`：以 30 Hz 读取 I2RT SDK 缓存里的关节角、速度、电流，构造 `JointState` 并发布；读取使用轻量读锁，仅在写命令时短暂加写锁，确保运动与状态采集可并行。
      - `tf_timer`：保持 30 Hz（或配置值）读取末端位姿并广播 TF。
    - 若 SDK 提供 `get_joint_state_cached()` 之类非阻塞 API，则驱动优先使用缓存；否则在 commander 层维护 ring buffer，写命令时顺便更新最新状态，供 JointState 发布线程读取。
+
+## 安全态标定脚本
+- 新增 `src/driver/scripts/set_safe_pose.sh`（暂定命名），提供交互式 SAFE_POSE 标定流程，方便把实机姿态写入配置：
+  1. 启动后立即调用 `/robot_driver/service/zero_gravity` 进入零重力，提示操作者可手动拖动机械臂至期望安全位。
+  2. 脚本阻塞等待回车（或 `ctrl+c` 退出），确保操作者完成调姿后再继续。
+  3. 收集当前关节状态：通过 `ros2 topic echo /joint_states --once`（或 commander CLI）读取最新的关节名/角度，并打印到终端让操作者确认。
+  4. 操作者确认后，脚本在当前目录生成 `safe_pose_<timestamp>.yaml`，内容包括 `joint_names`、`positions`、可选末端位姿与备注，便于直接拷贝至 `safe_pose` 配置数组。
+- 后续可把生成的 YAML 纳入版本管理或部署包，`command_watchdog` 与 `/robot_driver/safety_stop` 将依赖该 SAFE_POSE 数据。在补充具体参数前，此脚本可反复执行以更新标定结果。
 
 
 ## 配置与动态更新
