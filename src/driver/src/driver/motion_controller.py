@@ -110,11 +110,14 @@ class MotionController:
         result.error_string = ''
         return result
 
-    def halt_and_safe(self, reason: str = '') -> None:
+    def halt_and_safe(self, reason: str = '') -> bool:
         self._logger.warning('Halting motion: %s', reason)
         self._commander.stop_motion(reason)
-        self._commander.move_to_safe_pose()
+        moved = self._commander.move_to_safe_pose()
+        if not moved:
+            self._logger.warning('SAFE_POSE unavailable; skipping move_to_safe_pose sequence')
         self._mark_activity()
+        return moved
 
     # ------------------------------------------------------------------ helpers
     def _extract_joint_values(self, msg: JointState) -> Dict[str, float]:

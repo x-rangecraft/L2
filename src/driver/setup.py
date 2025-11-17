@@ -10,7 +10,7 @@ setup(
     package_dir={'': 'src'},
     data_files=[
         ('share/ament_index/resource_index/packages', ['resource/robot_driver']),
-        ('share/' + package_name, ['package.xml']),
+        ('share/' + package_name, ['package.xml', 'robot_description.yaml']),
         ('share/' + package_name + '/config', ['config/robot_driver_config.yaml', 'config/safe_pose_default.yaml']),
         ('share/' + package_name + '/launch', ['launch/robot_driver.launch.py']),
     ],

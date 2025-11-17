@@ -13,6 +13,7 @@ from geometry_msgs.msg import Pose
 
 from .can_interface_manager import ensure_ready
 from .logging_utils import get_logger
+from .robot_description_loader import RobotDescription
 from .safe_pose_loader import SafePose
 
 
@@ -96,7 +97,14 @@ class HardwareCommander:
     hooks in ``_maybe_import_sdk`` can be extended to talk to the actual device.
     """
 
-    def __init__(self, safe_pose: SafePose, *, joint_limit_rate: float = 0.5, gripper_type: Optional[str] = None):
+    def __init__(
+        self,
+        safe_pose: SafePose,
+        *,
+        joint_limit_rate: float = 0.5,
+        gripper_type: Optional[str] = None,
+        robot_description: Optional[RobotDescription] = None,
+    ):
         self._logger = get_logger(__name__)
         self._lock = threading.RLock()
         self._safe_pose = safe_pose
@@ -107,9 +115,13 @@ class HardwareCommander:
         self._robot = None
         self._kinematics = None
         self._sdk_commander = self._maybe_import_sdk()
+        self._robot_description = robot_description or RobotDescription()
         self._joint_state = self._initialize_joint_state()
+        self._joint_index: Dict[str, int] = {name: idx for idx, name in enumerate(self._joint_state.names)}
         self._ee_pose = Pose()
         self._last_read_time = 0.0
+        self._default_kp: Optional[np.ndarray] = None
+        self._default_kd: Optional[np.ndarray] = None
 
     def _maybe_import_sdk(self):
         try:
@@ -127,8 +139,17 @@ class HardwareCommander:
 
     def _initialize_joint_state(self) -> JointStateData:
         names = list(self._safe_pose.joint_names)
-        count = len(names)
         positions = list(self._safe_pose.positions)
+        if self._robot_description:
+            for joint_name in self._robot_description.joint_names():
+                if joint_name not in names:
+                    names.append(joint_name)
+                    positions.append(0.0)
+
+        count = len(names)
+        if len(positions) < count:
+            positions.extend([0.0] * (count - len(positions)))
+
         zeros = [0.0] * count
         return JointStateData(names=names, positions=positions, velocities=zeros[:], efforts=zeros[:])
 
@@ -165,6 +186,7 @@ class HardwareCommander:
 
                 # Read initial state from hardware
                 self._update_state_from_hardware()
+                self._cache_default_gains()
             except Exception as exc:
                 self._logger.error('Failed to initialize I2RT robot: %s', exc)
                 self._robot = None
@@ -183,19 +205,39 @@ class HardwareCommander:
         self._logger.info('Hardware commander disconnected')
 
     # ------------------------------------------------------------------ commands
-    def set_zero_gravity(self, enabled: bool) -> None:
+    def set_zero_gravity(self, enabled: bool) -> bool:
         with self._lock:
-            self._zero_gravity = enabled
-            if self._robot:
-                try:
-                    # I2RT SDK may have zero gravity control
-                    if hasattr(self._robot, 'set_zero_gravity'):
-                        self._robot.set_zero_gravity(enabled)
+            if self._zero_gravity == enabled:
+                self._logger.debug('Zero-gravity already %s; skip', enabled)
+                return True
+
+            if not self._robot:
+                self._logger.info('Zero-gravity toggled to %s (simulation mode)', enabled)
+                self._zero_gravity = enabled
+                return True
+
+            try:
+                if enabled:
+                    if not self._ensure_gain_snapshot():
+                        self._logger.warning('Unable to snapshot joint gains; zero-gravity aborted')
+                        return False
+                    if hasattr(self._robot, 'zero_torque_mode'):
+                        self._robot.zero_torque_mode()
                     else:
-                        self._logger.warning('Robot lacks set_zero_gravity method')
-                except Exception as exc:
-                    self._logger.warning('Failed to set zero_gravity: %s', exc)
-            self._logger.info('Zero-gravity mode -> %s', enabled)
+                        self._logger.warning('SDK robot missing zero_torque_mode; zero-gravity unavailable')
+                        return False
+                else:
+                    if self._default_kp is not None and self._default_kd is not None:
+                        self._robot.update_kp_kd(self._default_kp.copy(), self._default_kd.copy())
+                    current = self._robot.get_joint_pos()
+                    self._robot.command_joint_pos(current)
+
+                self._zero_gravity = enabled
+                self._logger.info('Zero-gravity mode -> %s', enabled)
+                return True
+            except Exception as exc:
+                self._logger.error('Failed to set zero_gravity: %s', exc)
+                return False
 
     def command_joint_positions(self, names: Iterable[str], values: Iterable[float], *, rate_limit: Optional[float] = None) -> None:
         mapping = dict(zip(names, values))
@@ -237,6 +279,7 @@ class HardwareCommander:
                     return
 
                 # Command the solved joint positions
+                joint_solution = self._clamp_joint_array(joint_solution)
                 self._robot.command_joint_pos(joint_solution)
                 self._logger.debug('Commanded cartesian pose via IK')
             except Exception as exc:
@@ -244,13 +287,24 @@ class HardwareCommander:
 
     def move_to_safe_pose(self) -> bool:
         """Move to safe pose and return True if successful."""
-        self.command_joint_positions(self._safe_pose.joint_names, self._safe_pose.positions, rate_limit=self._joint_limit_rate)
-        self._logger.info('Moved to SAFE_POSE')
+        if not self.safe_pose_available():
+            self._logger.warning(
+                'SAFE_POSE unavailable (ready flag missing); skipping move_to_safe_pose.'
+            )
+            return False
+        self.command_joint_positions(
+            self._safe_pose.joint_names,
+            self._safe_pose.positions,
+            rate_limit=self._joint_limit_rate,
+        )
+        self._logger.info('Moved to SAFE_POSE using %s', self._safe_pose.source or '<unknown>')
         # TODO: Add position verification
         return True
 
     def check_at_safe_pose(self, tolerance: float = 0.05) -> bool:
         """Check if robot is at safe pose within tolerance (radians)."""
+        if not self.safe_pose_available():
+            return False
         with self._lock:
             for i, name in enumerate(self._safe_pose.joint_names):
                 try:
@@ -262,6 +316,31 @@ class HardwareCommander:
                 except (ValueError, IndexError):
                     return False
             return True
+
+    # ------------------------------------------------------------------ helpers
+    def _cache_default_gains(self) -> None:
+        if not self._robot:
+            return
+        try:
+            info = self._robot.get_robot_info()
+        except Exception as exc:
+            self._logger.warning('Failed to query robot gains: %s', exc)
+            return
+
+        kp = info.get('kp')
+        kd = info.get('kd')
+        if kp is None or kd is None:
+            self._logger.warning('Robot info missing kp/kd; zero-gravity accuracy may degrade')
+            return
+
+        self._default_kp = np.array(kp, copy=True)
+        self._default_kd = np.array(kd, copy=True)
+        self._logger.debug('Cached default joint gains for zero-gravity toggling')
+
+    def _ensure_gain_snapshot(self) -> bool:
+        if self._default_kp is None or self._default_kd is None:
+            self._cache_default_gains()
+        return self._default_kp is not None and self._default_kd is not None
 
     def stop_motion(self, reason: str = '') -> None:
         with self._lock:
@@ -299,6 +378,7 @@ class HardwareCommander:
     def set_joint_state(self, data: JointStateData) -> None:
         with self._lock:
             self._joint_state = data
+            self._joint_index = {name: idx for idx, name in enumerate(self._joint_state.names)}
 
     def get_zero_gravity(self) -> bool:
         return self._zero_gravity
@@ -309,23 +389,66 @@ class HardwareCommander:
 
     # ------------------------------------------------------------------ helpers
     def _apply_joint_delta(self, mapping: Dict[str, float], rate_limit: float) -> None:
-        idx = {name: i for i, name in enumerate(self._joint_state.names)}
         timestamp = time.time()
-        for name, target in mapping.items():
-            if name not in idx:
+        for name, target in list(mapping.items()):
+            bounded_target = self._clamp_joint_target(name, target)
+            if bounded_target != target:
+                mapping[name] = bounded_target
+
+            idx = self._joint_index.get(name)
+            if idx is None:
                 self._logger.warning('Unknown joint %s; ignoring', name)
                 continue
-            i = idx[name]
-            current = self._joint_state.positions[i]
-            delta = target - current
+
+            current = self._joint_state.positions[idx]
+            delta = bounded_target - current
             limit = rate_limit
             if abs(delta) > limit:
                 delta = limit if delta > 0 else -limit
             new_value = current + delta
-            self._joint_state.positions[i] = new_value
-            self._joint_state.velocities[i] = delta
-            self._joint_state.efforts[i] = 0.0
+            self._joint_state.positions[idx] = new_value
+            self._joint_state.velocities[idx] = delta
+            self._joint_state.efforts[idx] = 0.0
             self._logger.debug('Joint %s: %.3f -> %.3f (dt=%.3f)', name, current, new_value, timestamp)
+
+    def _clamp_joint_target(self, name: str, target: float) -> float:
+        if not self._robot_description:
+            return target
+        limit = self._robot_description.joint_limit(name)
+        if not limit:
+            return target
+
+        clamped = target
+        if limit.min_position is not None and clamped < limit.min_position:
+            clamped = limit.min_position
+        if limit.max_position is not None and clamped > limit.max_position:
+            clamped = limit.max_position
+
+        if clamped != target:
+            self._logger.debug(
+                'Joint %s target %.3f clamped to %.3f (limits [%s, %s])',
+                name,
+                target,
+                clamped,
+                limit.min_position,
+                limit.max_position,
+            )
+        return clamped
+
+    def _clamp_joint_array(self, joint_values: np.ndarray) -> np.ndarray:
+        if not self._robot_description or not self._joint_index:
+            return joint_values
+
+        clamped = np.asarray(joint_values, dtype=float).copy()
+        changed = False
+        for name, idx in self._joint_index.items():
+            if idx >= len(clamped):
+                continue
+            limited_value = self._clamp_joint_target(name, float(clamped[idx]))
+            if limited_value != clamped[idx]:
+                clamped[idx] = limited_value
+                changed = True
+        return clamped if changed else joint_values
 
     def _update_state_from_hardware(self) -> None:
         """Update internal joint state from hardware SDK if available."""
@@ -406,3 +529,5 @@ class HardwareCommander:
         except Exception as exc:
             self._logger.error('IK solving failed: %s', exc)
             return False, None
+    def safe_pose_available(self) -> bool:
+        return bool(self._safe_pose.ready) and bool(self._safe_pose.joint_names) and bool(self._safe_pose.positions)

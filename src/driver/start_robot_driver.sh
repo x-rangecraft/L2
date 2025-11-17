@@ -9,8 +9,26 @@ ROS_SETUP="/opt/ros/humble/setup.bash"
 INSTALL_SETUP="${WORKSPACE_ROOT}/install/setup.bash"
 LOG_DIR="${WORKSPACE_ROOT}/log/robot_driver"
 mkdir -p "${LOG_DIR}"
-LOG_FILE="${LOG_DIR}/robot_driver_$(date +'%Y%m%d_%H%M%S').log"
+if [[ -n "${ROBOT_DRIVER_LOG_FILE_OVERRIDE:-}" ]]; then
+    LOG_FILE="${ROBOT_DRIVER_LOG_FILE_OVERRIDE}"
+else
+    LOG_FILE="${LOG_DIR}/robot_driver_$(date +'%Y%m%d_%H%M%S').log"
+fi
 touch "${LOG_FILE}"
+PID_FILE="${LOG_DIR}/robot_driver.pid"
+
+ORIGINAL_ARGS=("$@")
+DAEMON_MODE="daemon"
+DAEMON_CHILD=0
+STOP_ONLY=0
+FOLLOW_LOG=0
+LOG_STDERR_MIRROR=1
+VERBOSE_CONSOLE=0
+declare -a CHILD_ARGS=()
+USER_SET_DAEMON_MODE=0
+EXIT_AFTER_SAFE_POSE=1
+SAFE_POSE_WAIT_TIMEOUT=120
+LAUNCH_PID_FILE="${LOG_DIR}/robot_driver_launch.pid"
 
 CAN_CHANNEL="can0"
 XYZ_ONLY_MODE="false"
@@ -32,13 +50,181 @@ Options:
   --zero-gravity         启动时默认进入零重力
   --no-zero-gravity      启动时默认关闭零重力（默认）
   --params <file>        指定参数 YAML（默认 driver/config/robot_driver_config.yaml，若存在）
+  --daemon               后台守护运行（默认），命令返回后守护进程继续运行
+  --foreground           前台运行，行为与旧版本相同
+  --stop                 停止后台守护进程
+  --follow-log           后台模式下跟随日志输出
+  --no-follow-log        后台模式下不跟随日志（默认）
+  --verbose              控制台打印更多启动进度 / 状态
+  --no-exit-after-safe   前台模式下，不在安全位姿落位后退出脚本
+  --safe-timeout <sec>   等待安全位姿落位的超时时间（默认 120s，前台模式有效）
   -h, --help             显示本帮助
 USAGE
 }
 
 log() {
     local msg="$1"
-    printf '[%s] %s\n' "$(date --iso-8601=seconds)" "${msg}" | tee -a "${LOG_FILE}" >&2
+    local timestamp
+    timestamp="$(date --iso-8601=seconds)"
+    local line="[${timestamp}] ${msg}"
+    printf '%s\n' "${line}" >> "${LOG_FILE}"
+    if [[ ${LOG_STDERR_MIRROR} -ne 0 ]]; then
+        printf '%s\n' "${line}" >&2
+    fi
+}
+
+read_pid_file() {
+    if [[ -f "${PID_FILE}" ]]; then
+        local pid
+        pid="$(tr -d '[:space:]' < "${PID_FILE}")"
+        if [[ "${pid}" =~ ^[0-9]+$ ]]; then
+            printf '%s\n' "${pid}"
+            return 0
+        fi
+    fi
+    return 1
+}
+
+write_pid_file() {
+    printf '%s\n' "$$" > "${PID_FILE}"
+}
+
+cleanup_pid_file_on_exit() {
+    if [[ -f "${PID_FILE}" ]]; then
+        local pid
+        pid="$(tr -d '[:space:]' < "${PID_FILE}")"
+        if [[ "${pid}" = "$$" ]]; then
+            rm -f "${PID_FILE}"
+        fi
+    fi
+}
+
+ensure_no_active_daemon() {
+    local existing_pid
+    if existing_pid="$(read_pid_file)"; then
+        if kill -0 "${existing_pid}" >/dev/null 2>&1; then
+            log "robot_driver supervisor already running as PID ${existing_pid}; use --stop before starting a new instance."
+            exit 0
+        fi
+        log "Removing stale PID file ${PID_FILE} (PID ${existing_pid} not running)"
+        rm -f "${PID_FILE}"
+    fi
+}
+
+wait_for_pid_file() {
+    local timeout=${1:-15}
+    local end=$((SECONDS + timeout))
+    while (( SECONDS < end )); do
+        local pid
+        if pid="$(read_pid_file)"; then
+            printf '%s\n' "${pid}"
+            return 0
+        fi
+        sleep 0.2
+    done
+    return 1
+}
+
+cleanup_processes() {
+    log "Killing existing robot_driver processes (if any)..."
+    pkill -f robot_driver_node 2>/dev/null || true
+    pkill -f "ros2 launch robot_driver robot_driver.launch.py" 2>/dev/null || true
+}
+
+stop_daemon() {
+    local pid
+    if ! pid="$(read_pid_file)"; then
+        log "robot_driver supervisor is not running (PID file ${PID_FILE} not found)."
+        return 0
+    fi
+    if ! kill -0 "${pid}" >/dev/null 2>&1; then
+        log "Stale PID file for PID ${pid}; removing."
+        rm -f "${PID_FILE}"
+        return 0
+    fi
+    local pgid
+    pgid="$(ps -o pgid= -p "${pid}" 2>/dev/null | tr -d '[:space:]')" || pgid=""
+    local kill_target="${pid}"
+    if [[ -n "${pgid}" && "${pgid}" =~ ^[0-9]+$ ]]; then
+        kill_target="-${pgid}"
+        log "Stopping robot_driver supervisor PID ${pid} (process group ${pgid})..."
+    else
+        log "Stopping robot_driver supervisor PID ${pid}..."
+    fi
+    kill "${kill_target}" >/dev/null 2>&1 || true
+    local waited=0
+    local timeout=15
+    local hard_kill_sent=0
+    while kill -0 "${pid}" >/dev/null 2>&1; do
+        if (( waited >= timeout )); then
+            if (( hard_kill_sent == 0 )); then
+                log "PID ${pid} still running after ${timeout}s; sending SIGKILL."
+                kill -9 "${kill_target}" >/dev/null 2>&1 || true
+                hard_kill_sent=1
+                waited=0
+                timeout=5
+                continue
+            fi
+            log "ERROR: Failed to stop PID ${pid}; please kill it manually."
+            return 1
+        fi
+        sleep 1
+        ((waited++))
+    done
+    cleanup_processes || true
+    rm -f "${PID_FILE}"
+    log "robot_driver supervisor stopped."
+    return 0
+}
+
+build_child_args() {
+    CHILD_ARGS=()
+    for arg in "${ORIGINAL_ARGS[@]}"; do
+        case "${arg}" in
+            --daemon|--no-daemon|--foreground|--stop|--follow-log|--no-follow-log|--daemon-child)
+                continue
+                ;;
+            *)
+                CHILD_ARGS+=("${arg}")
+                ;;
+        esac
+    done
+    CHILD_ARGS+=("--daemon-child" "--foreground")
+}
+
+launch_daemon_mode() {
+    ensure_no_active_daemon
+    build_child_args
+    log "Starting robot_driver supervisor in daemon mode (log: ${LOG_FILE})"
+    if command -v setsid >/dev/null 2>&1; then
+        env ROBOT_DRIVER_LOG_FILE_OVERRIDE="${LOG_FILE}" \
+            setsid nohup "$0" "${CHILD_ARGS[@]}" </dev/null >/dev/null 2>&1 &
+    else
+        log "WARNING: 'setsid' command not found; daemon will remain in current session."
+        env ROBOT_DRIVER_LOG_FILE_OVERRIDE="${LOG_FILE}" \
+            nohup "$0" "${CHILD_ARGS[@]}" </dev/null >/dev/null 2>&1 &
+    fi
+    local launcher_pid=$!
+    disown "${launcher_pid}" 2>/dev/null || true
+    local daemon_pid
+    if daemon_pid="$(wait_for_pid_file 10)"; then
+        log "robot_driver supervisor is running as PID ${daemon_pid}."
+    else
+        log "WARNING: Unable to read daemon PID from ${PID_FILE}; check manually."
+    fi
+    if [[ ${FOLLOW_LOG} -eq 1 ]]; then
+        if command -v tail >/dev/null 2>&1; then
+            log "Tailing ${LOG_FILE}. Press Ctrl+C to stop viewing; daemon keeps running."
+            tail -n +1 -F "${LOG_FILE}" || true
+            log "Stopped following ${LOG_FILE}. Daemon continues to run."
+        else
+            log "WARNING: 'tail' command not available; skipping log follow."
+        fi
+    else
+        local summary_pid="${daemon_pid:-unknown}"
+        log "Daemon started without log follow (PID=${summary_pid}); logs -> ${LOG_FILE}"
+    fi
+    exit 0
 }
 
 ensure_command() {
@@ -52,7 +238,10 @@ source_if_exists() {
     local file="$1"
     if [[ -f "$file" ]]; then
         # shellcheck source=/dev/null
+        # Temporarily disable -u to allow ROS setup scripts to reference undefined variables
+        set +u
         source "$file"
+        set -u
         return 0
     fi
     return 1
@@ -129,6 +318,49 @@ while [[ $# -gt 0 ]]; do
             PARAM_FILE="$(resolve_path "$value")"
             shift
             ;;
+        --daemon)
+            DAEMON_MODE="daemon"
+            USER_SET_DAEMON_MODE=1
+            shift
+            ;;
+        --no-daemon|--foreground)
+            DAEMON_MODE="foreground"
+            USER_SET_DAEMON_MODE=1
+            shift
+            ;;
+        --no-exit-after-safe)
+            EXIT_AFTER_SAFE_POSE=0
+            shift
+            ;;
+        --safe-timeout)
+            if [[ $# -lt 2 ]]; then
+                log "ERROR: Missing value for --safe-timeout"
+                exit 1
+            fi
+            SAFE_POSE_WAIT_TIMEOUT="$2"
+            shift 2
+            ;;
+        --follow-log)
+            FOLLOW_LOG=1
+            shift
+            ;;
+        --no-follow-log)
+            FOLLOW_LOG=0
+            shift
+            ;;
+        --verbose)
+            VERBOSE_CONSOLE=1
+            LOG_STDERR_MIRROR=1
+            shift
+            ;;
+        --stop)
+            STOP_ONLY=1
+            shift
+            ;;
+        --daemon-child)
+            DAEMON_CHILD=1
+            shift
+            ;;
         -h|--help)
             usage
             exit 0
@@ -140,6 +372,22 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+if [[ ${DAEMON_CHILD} -eq 1 ]]; then
+    LOG_STDERR_MIRROR=0
+fi
+
+if [[ ${USER_SET_DAEMON_MODE} -eq 0 ]]; then
+    DAEMON_MODE="foreground"
+fi
+
+if [[ ${STOP_ONLY} -eq 1 ]]; then
+    if stop_daemon; then
+        exit 0
+    else
+        exit 1
+    fi
+fi
 
 if [[ ! "${CAN_CHANNEL}" =~ ${CAN_CHANNEL_PATTERN} ]]; then
     log "ERROR: Invalid CAN channel '${CAN_CHANNEL}'. Expected format can<num>."
@@ -154,6 +402,14 @@ fi
 ensure_command ros2
 ensure_command python3
 ensure_command pkill
+
+if [[ ${DAEMON_CHILD} -eq 0 && "${DAEMON_MODE}" = "daemon" ]]; then
+    launch_daemon_mode
+fi
+
+ensure_no_active_daemon
+trap cleanup_pid_file_on_exit EXIT
+write_pid_file
 
 I2RT_REPO_ROOT="$(cd -- "${WORKSPACE_ROOT}/../I2RT" 2>/dev/null && pwd || true)"
 I2RT_PYTHON_ROOT=""
@@ -189,38 +445,58 @@ log "Log file: ${LOG_FILE}"
 log "CAN channel: ${CAN_CHANNEL}"
 log "XYZ-only mode: ${XYZ_ONLY_MODE}"
 log "Zero-gravity default: ${ZERO_GRAVITY_DEFAULT}"
+log "Verbose console: ${VERBOSE_CONSOLE}"
 if [[ -n "${PARAM_FILE}" ]]; then
     log "Parameter file: ${PARAM_FILE}"
 else
     log "Parameter file: <none>"
 fi
+log "启动入口：./src/driver/start_robot_driver.sh --can can0（按需替换 can 通道）；若需要实时输出可追加 --follow-log，默认改写日志至 log/robot_driver/robot_driver_<timestamp>.log"
 
-log "Killing existing robot_driver processes (if any)..."
-pkill -f robot_driver_node 2>/dev/null || true
-pkill -f "ros2 launch driver robot_driver.launch.py" 2>/dev/null || true
+run_can_maintenance() {
+    local first_run="$1"
+    local cleanup_script="${SCRIPT_DIR}/scripts/cleanup_can_interface.sh"
+    if [[ "${first_run}" -eq 1 ]]; then
+        if [[ -x "${cleanup_script}" ]]; then
+            log "Running CAN interface cleanup for ${CAN_CHANNEL}..."
+            if ! bash "${cleanup_script}" "${CAN_CHANNEL}" --force |& tee -a "${LOG_FILE}"; then
+                CLEANUP_EXIT=$?
+                if [[ ${CLEANUP_EXIT} -eq 2 ]]; then
+                    log "WARNING: User cancelled CAN cleanup, continuing anyway"
+                else
+                    log "ERROR: CAN cleanup failed with exit code ${CLEANUP_EXIT}"
+                    return ${CLEANUP_EXIT}
+                fi
+            fi
+        else
+            log "WARNING: CAN cleanup script not found at ${cleanup_script}, skipping cleanup"
+        fi
 
-if [[ -n "${RESET_SCRIPT}" ]]; then
-    log "Resetting CAN bus via ${RESET_SCRIPT}"
-    if ! bash "${RESET_SCRIPT}"; then
-        log "WARNING: reset_all_can.sh returned non-zero exit status"
+        if [[ -n "${RESET_SCRIPT}" ]]; then
+            log "Resetting CAN bus via ${RESET_SCRIPT}"
+            if ! bash "${RESET_SCRIPT}" |& tee -a "${LOG_FILE}"; then
+                log "WARNING: reset_all_can.sh returned non-zero exit status"
+            fi
+        else
+            log "WARNING: reset_all_can.sh not found; skipping CAN reset"
+        fi
     fi
-else
-    log "WARNING: reset_all_can.sh not found; skipping CAN reset"
-fi
 
-if python3 -c 'import importlib.util, sys; sys.exit(0 if importlib.util.find_spec("driver.can_interface_manager") else 1)' >/dev/null 2>&1; then
-    log "Running CAN interface self-check"
-    CAN_CHECK_CMD=(python3 -m driver.can_interface_manager --ensure --interface "${CAN_CHANNEL}")
-    if [[ -n "${RESET_SCRIPT}" ]]; then
-        CAN_CHECK_CMD+=(--reset-script "${RESET_SCRIPT}")
+    if python3 -c 'import importlib.util, sys; sys.exit(0 if importlib.util.find_spec("driver.can_interface_manager") else 1)' >/dev/null 2>&1; then
+        log "Running CAN interface self-check"
+        CAN_CHECK_CMD=(python3 -m driver.can_interface_manager --ensure --interface "${CAN_CHANNEL}")
+        if [[ -n "${RESET_SCRIPT}" ]]; then
+            CAN_CHECK_CMD+=(--reset-script "${RESET_SCRIPT}")
+        fi
+        if ! "${CAN_CHECK_CMD[@]}" |& tee -a "${LOG_FILE}"; then
+            log "ERROR: CAN interface self-check failed"
+            return 1
+        fi
+    elif [[ "${first_run}" -eq 1 ]]; then
+        log "WARNING: driver.can_interface_manager module not found; skipping CAN self-check"
     fi
-    if ! "${CAN_CHECK_CMD[@]}" |& tee -a "${LOG_FILE}"; then
-        log "ERROR: CAN interface self-check failed"
-        exit 1
-    fi
-else
-    log "WARNING: driver.can_interface_manager module not found; skipping CAN self-check"
-fi
+    return 0
+}
 
 export ROBOT_DRIVER_LOG_FILE="${LOG_FILE}"
 
@@ -229,15 +505,52 @@ if [[ -n "${PARAM_FILE}" ]]; then
     LAUNCH_ARGS+=("params:=${PARAM_FILE}")
 fi
 
-log "Starting ros2 launch driver robot_driver.launch.py ${LAUNCH_ARGS[*]}"
-set +e
-ros2 launch driver robot_driver.launch.py "${LAUNCH_ARGS[@]}" |& tee -a "${LOG_FILE}"
-EXIT_CODE=${PIPESTATUS[0]}
-set -e
+SHUTDOWN_REQUESTED=0
+trap 'SHUTDOWN_REQUESTED=1; log "Shutdown signal received, waiting for current launch to exit..."' SIGINT SIGTERM
 
-if [[ ${EXIT_CODE} -ne 0 ]]; then
-    log "ERROR: ros2 launch exited with code ${EXIT_CODE}"
-    exit ${EXIT_CODE}
-fi
+ATTEMPT=0
+RESTART_DELAY_SUCCESS=2
+RESTART_DELAY_FAILURE=5
+FIRST_RUN=1
 
-log "robot_driver launch finished successfully"
+while true; do
+    if [[ ${SHUTDOWN_REQUESTED} -ne 0 ]]; then
+        break
+    fi
+
+    ((++ATTEMPT))
+    log "=== Launch attempt #${ATTEMPT} ==="
+    cleanup_processes
+
+    if ! run_can_maintenance "${FIRST_RUN}"; then
+        log "ERROR: CAN maintenance failed; retrying in ${RESTART_DELAY_FAILURE}s"
+        sleep ${RESTART_DELAY_FAILURE}
+        continue
+    fi
+    FIRST_RUN=0
+
+    log "Starting ros2 launch robot_driver robot_driver.launch.py ${LAUNCH_ARGS[*]}"
+    set +e
+    if [[ ${VERBOSE_CONSOLE} -eq 1 ]]; then
+        ros2 launch robot_driver robot_driver.launch.py "${LAUNCH_ARGS[@]}" |& tee -a "${LOG_FILE}"
+    else
+        ros2 launch robot_driver robot_driver.launch.py "${LAUNCH_ARGS[@]}" >> "${LOG_FILE}" 2>&1
+    fi
+    EXIT_CODE=${PIPESTATUS[0]}
+    set -e
+
+    if [[ ${SHUTDOWN_REQUESTED} -ne 0 ]]; then
+        log "Shutdown requested; exiting supervisor loop (ros2 launch code ${EXIT_CODE})"
+        break
+    fi
+
+    if [[ ${EXIT_CODE} -eq 0 ]]; then
+        log "ros2 launch exited cleanly (code 0). Restarting in ${RESTART_DELAY_SUCCESS}s."
+        sleep ${RESTART_DELAY_SUCCESS}
+    else
+        log "WARNING: ros2 launch exited with code ${EXIT_CODE}; restarting in ${RESTART_DELAY_FAILURE}s"
+        sleep ${RESTART_DELAY_FAILURE}
+    fi
+done
+
+log "robot_driver supervisor stopped"

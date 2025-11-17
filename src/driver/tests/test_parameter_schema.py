@@ -12,6 +12,7 @@ class TestParameterSchema(unittest.TestCase):
         )
         self.assertEqual(len(fallback.joint_names), 3)
         self.assertEqual(len(fallback.positions), 3)
+        self.assertFalse(fallback.ready)
 
     def test_joint_command_config(self):
         """Test JointCommandConfig dataclass."""

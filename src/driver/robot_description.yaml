@@ -1,0 +1,155 @@
+# Robot configuration generated from src/description/config/robot_description.txt.
+robot:
+  name: YAM
+  dof: 6
+  summary: "YAM 6-DoF manipulator derived from the I2RT SDK resource pack."
+resources:
+  urdf: I2RT/i2rt/i2rt/robot_models/yam/yam.urdf
+  mujoco: I2RT/i2rt/i2rt/robot_models/yam/yam.xml
+  mesh_directory: assets/
+  mesh_notes:
+    - Contains STL files such as base_link_*.stl and link_[1-6]_*.stl.
+    - Keep meshes in sync with upstream I2RT repo when regenerating collision/inertia data.
+joints:
+  joint_1:
+    axis_child_frame: [0.0, 0.0, 1.0]
+    world_axis_hint: [0.0, 0.0, 1.0]
+    position_limits_rad: [-2.61799, 3.13]
+    velocity_limit_rad_per_s: 10.0
+    effort_limit_nm: 10.0
+    motor_id_hex: 0x01
+    motor_model: DM4340
+  joint_2:
+    axis_child_frame: [0.0, 0.0, 1.0]
+    world_axis_hint: [1.0, 0.0, 0.0]
+    position_limits_rad: [0.0, 3.65]
+    velocity_limit_rad_per_s: 10.0
+    effort_limit_nm: 10.0
+    motor_id_hex: 0x02
+    motor_model: DM4340
+  joint_3:
+    axis_child_frame: [0.0, 0.0, 1.0]
+    world_axis_hint: [0.0, 0.0, -1.0]
+    position_limits_rad: [0.0, 3.13]
+    velocity_limit_rad_per_s: 10.0
+    effort_limit_nm: 10.0
+    motor_id_hex: 0x03
+    motor_model: DM4340
+  joint_4:
+    axis_child_frame: [0.0, 0.0, 1.0]
+    world_axis_hint: [0.0, 0.0, 1.0]
+    position_limits_rad: [-1.5708, 1.5708]
+    velocity_limit_rad_per_s: 10.0
+    effort_limit_nm: 10.0
+    motor_id_hex: 0x04
+    motor_model: DM4310
+  joint_5:
+    axis_child_frame: [0.0, 0.0, 1.0]
+    world_axis_hint: [0.0, 1.0, 0.0]
+    position_limits_rad: [-1.5708, 1.5708]
+    velocity_limit_rad_per_s: 10.0
+    effort_limit_nm: 10.0
+    motor_id_hex: 0x05
+    motor_model: DM4310
+  joint_6:
+    axis_child_frame: [0.0, 0.0, 1.0]
+    world_axis_hint: [0.0, 1.0, 0.0]
+    position_limits_rad: [-2.0944, 2.0944]
+    velocity_limit_rad_per_s: 10.0
+    effort_limit_nm: 10.0
+    motor_id_hex: 0x06
+    motor_model: DM4310
+  gripper:
+    optional: true
+    motor_id_hex: 0x07
+    motor_model: depends_on_gripper_type
+    limit_force_n: 50.0
+motors:
+  DM-J4310-2EC-V1.1:
+    applies_to: [joint_4, joint_5, joint_6]
+    nominal_voltage_v: 24
+    optional_voltage_v: 48
+    nominal_current_a: 2.5
+    peak_current_a: 7.5
+    phase_resistance_mohm: 650
+    phase_inductance_uh: 340
+    pole_pairs: 14
+    torque_constant_nm_per_a: 0.945
+    rotor_inertia_kg_m2: 1.8e-5
+    mass_kg: 0.30
+    rated_torque_nm: 3.0
+    peak_torque_nm: 7.0
+    rated_speed_rpm: 120
+    max_speed_rpm: 200
+    gear_ratio: "10:1"
+    dimensions_mm:
+      diameter: 57
+      length: 46
+  DM-J4340-2EC-V1.1:
+    applies_to: [joint_1, joint_2, joint_3]
+    nominal_voltage_v: [24, 48]
+    nominal_current_a: 2.5
+    peak_current_a:
+      min: 8.0
+      max: 12.5
+    phase_resistance_mohm: 760
+    phase_inductance_uh: 317
+    pole_pairs: 14
+    torque_constant_nm_per_a: 4.074
+    rotor_inertia_kg_m2: 2.0e-5
+    mass_kg: 0.36
+    rated_torque_nm: 9.0
+    peak_torque_nm: 27.0
+    rated_speed_rpm: 36
+    max_speed_rpm:
+      at_24v: 52
+      at_48v: 100
+    gear_ratio: "40:1"
+    dimensions_mm:
+      diameter: 57
+      length: 53.3
+base_frame:
+  world_tf:
+    translation_m: [0.0, 0.0, 0.0]
+    orientation_xyzw: [0.0, 0.0, 0.0, 1.0]
+  notes:
+    - Update this transform if the pedestal or fixture introduces an offset.
+control_defaults:
+  gravity_comp_factor: 1.3
+  kp: [80, 80, 80, 40, 10, 10]
+  kd: [5, 5, 5, 1.5, 1.5, 1.5]
+  receive_mode: p16
+  control_mode: MIT
+  zero_gravity_mode_default: true
+  motor_offsets_rad: 0.0
+  auto_offset_window: "±2π"
+  joint_limit_extra_margin_rad: 0.15
+  gripper:
+    gains_defined_in_sdk: true
+    limit_force_n: 50.0
+communication:
+  interface: DMChainCanInterface
+  transport: socketcan
+  channels: [can0, can1, can2]
+  start_thread: false
+  same_bus_encoder_chain: true
+  receive_mode: p16
+safety_and_timeouts:
+  communication_timeout_ms: 400
+  timeout_behavior: damped_mode
+  watchdog_source: motor_chain_robot.py
+  joint_state_publish_rate_hz: 50
+  diagnostics:
+    zero_gravity_mode_enabled: true
+    gravity_comp_factor: 1.3
+can_setup:
+  driver_module: gs_usb
+  bitrate_mbps: 1
+  recommended_script: start_yam.sh
+  udev_rules: 80-can-usb.rules (gs_usb_arm64_fix)
+operations_notes:
+  - URDF velocity/effort limits default to 10; replace with measured data when available.
+  - MuJoCo and URDF assets are mirrored from the upstream I2RT repository.
+  - Gravity compensation exits automatically when new commands arrive in robot_driver.
+  - Teaching pendant support reuses the same CAN bus via get_encoder_chain().
+  - MoveIt integration assumes the limits defined above; regenerate SRDF if limits change.

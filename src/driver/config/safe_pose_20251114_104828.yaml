@@ -1,0 +1,21 @@
+joint_names:
+- joint_1
+- joint_2
+- joint_3
+- joint_4
+- joint_5
+- joint_6
+positions:
+- -0.044823
+- 0.020027
+- 0.005531
+- -0.052834
+- -0.018502
+- 0.001335
+metadata:
+  frame_id: base_link
+  source_topic: /joint_states
+  captured_at: 2025-11-14 02:48:28.536163+00:00
+  zero_gravity_requested: true
+  ready: true
+  notes: ''

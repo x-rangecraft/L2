@@ -11,6 +11,7 @@ from rclpy.node import Node
 class SafePoseFallback:
     joint_names: List[str] = field(default_factory=list)
     positions: List[float] = field(default_factory=list)
+    ready: bool = False
 
 
 @dataclass
@@ -31,6 +32,7 @@ class DriverParameters:
     xyz_only_mode: bool
     log_dir: str
     safe_pose_file: str
+    robot_description_file: str
     publish_tf: bool
     tf_base_frame: str
     tf_tool_frame: str
@@ -70,21 +72,33 @@ def declare_and_get_parameters(node: Node) -> DriverParameters:
     if joint_cfg.mode not in _JOINT_MODES:
         raise ValueError(f"joint_command_mode must be one of {_JOINT_MODES}, got {joint_cfg.mode}")
 
-    fallback_data = _declare('safe_pose_fallback', {'joint_names': [], 'positions': []})
+    DEFAULT_SAFE_JOINTS = ['joint_1', 'joint_2', 'joint_3', 'joint_4', 'joint_5', 'joint_6']
+    DEFAULT_SAFE_POS = [0.0, -0.3, 0.6, -1.2, 0.8, 0.0]
+
+    # Nested parameters use dot notation in ROS 2 parameter files. Declaring
+    # the dotted names ensures YAML snippets like ``safe_pose_fallback: { ... }``
+    # map to the expected lists and avoids declaring dictionaries (which ROS 2
+    # parameters do not support).
+    joint_names = _declare('safe_pose_fallback.joint_names', DEFAULT_SAFE_JOINTS)
+    positions = _declare('safe_pose_fallback.positions', DEFAULT_SAFE_POS)
+    ready_flag = bool(_declare('safe_pose_fallback.ready', False))
+
     safe_pose_fallback = SafePoseFallback(
-        joint_names=list(fallback_data.get('joint_names', [])),
-        positions=list(float(x) for x in fallback_data.get('positions', [])),
+        joint_names=list(joint_names),
+        positions=[float(x) for x in positions],
+        ready=ready_flag,
     )
 
     return DriverParameters(
         can_channel=_declare('can_channel', 'can0'),
         joint_state_rate=float(_declare('joint_state_rate', 30.0)),
         diagnostics_rate=float(_declare('diagnostics_rate', 1.0)),
-        command_timeout_s=float(_declare('command_timeout_s', 60.0)),
+        command_timeout_s=float(_declare('command_timeout_s', 600.0)),
         zero_gravity_default=bool(_declare('zero_gravity_default', False)),
         xyz_only_mode=bool(_declare('xyz_only_mode', False)),
         log_dir=_declare('log_dir', 'l2/log/robot_driver'),
         safe_pose_file=_declare('safe_pose_file', 'config/safe_pose_default.yaml'),
+        robot_description_file=_declare('robot_description_file', 'robot_description.yaml'),
         publish_tf=bool(_declare('publish_tf', True)),
         tf_base_frame=_declare('tf_base_frame', 'base_link'),
         tf_tool_frame=_declare('tf_tool_frame', 'tool0'),

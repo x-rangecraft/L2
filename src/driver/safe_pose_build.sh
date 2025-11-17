@@ -5,28 +5,76 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 WORKSPACE_ROOT="$(cd -- "${SCRIPT_DIR}/../.." && pwd)"
 ROS_SETUP="/opt/ros/humble/setup.bash"
 INSTALL_SETUP="${WORKSPACE_ROOT}/install/setup.bash"
-DEFAULT_OUTPUT_DIR="$(pwd)"
+DEFAULT_OUTPUT_DIR="${SCRIPT_DIR}/config"
 JOINT_TOPIC="/joint_states"
 CAPTURE_TIMEOUT=10
 ZERO_G_SERVICE="/robot_driver/service/zero_gravity"
-SKIP_ZERO_G=0
+CAN_CHANNEL="can0"
+MARK_READY_TARGET=""
 
 usage() {
     cat <<'USAGE'
 Usage: safe_pose_build.sh [options]
 
 Options:
-  --output-dir <dir>     保存 safe_pose_*.yaml 的目录（默认当前工作目录）
+  --output-dir <dir>     保存 safe_pose_*.yaml 的目录（默认 driver/config）
   --topic <name>         JointState 话题名（默认 /joint_states）
-  --timeout <sec>        采集超时时间，默认 10 秒
-  --service <name>       零重力 service 名称，默认 /robot_driver/service/zero_gravity
-  --skip-zero-gravity    跳过自动切换零重力
+  --timeout <sec>        采集超时时间（默认 10 秒）
+  --service <name>       零重力 service 名称（默认 /robot_driver/service/zero_gravity）
+  --can <canX>           指定要检查的 CAN 通道（默认 can0）
+  --mark-ready <file>    仅标记已有 safe_pose YAML 为可用（写 metadata.ready 并创建 .ready）
   -h, --help             显示帮助
+
+说明:
+  此脚本必须在 robot_driver_node 运行的情况下使用。
+  脚本会自动启动零重力模式，让你可以手动拖动机械臂到安全姿态。
+  请确保先运行: ./src/driver/start_robot_driver.sh
 USAGE
 }
 
 info() { printf '[safe_pose] %s\n' "$1"; }
 warn() { printf '[safe_pose][WARN] %s\n' "$1" >&2; }
+
+mark_safe_pose_ready_file() {
+    local target="$1"
+    if [[ ! -f "$target" ]]; then
+        warn "未找到 safe_pose 文件: $target"
+        exit 1
+    fi
+
+    if ! SAFE_POSE_MARK_TARGET="$target" python3 <<'PY'
+import os
+import sys
+import yaml
+
+path = os.environ['SAFE_POSE_MARK_TARGET']
+with open(path, 'r', encoding='utf-8') as f:
+    data = yaml.safe_load(f) or {}
+
+wrapped = False
+node = data
+if isinstance(data, dict) and 'safe_pose' in data:
+    node = data['safe_pose']
+    wrapped = True
+
+if not isinstance(node, dict):
+    raise SystemExit(f'无法解析 {path}，请确认 safe_pose YAML 格式正确')
+
+metadata = node.setdefault('metadata', {})
+metadata['ready'] = True
+
+payload = {'safe_pose': node} if wrapped else node
+with open(path, 'w', encoding='utf-8') as f:
+    yaml.safe_dump(payload, f, allow_unicode=True, sort_keys=False)
+PY
+    then
+        warn "写入 metadata.ready 失败"
+        exit 1
+    fi
+
+    touch "${target}.ready"
+    info "已标记 ${target} 可用，并创建 ${target}.ready"
+}
 
 resolve_path() {
     local target="$1"
@@ -77,7 +125,6 @@ ensure_command() {
 }
 
 ensure_command python3
-ensure_command ros2
 
 OUTPUT_DIR="${DEFAULT_OUTPUT_DIR}"
 
@@ -132,8 +179,29 @@ while [[ $# -gt 0 ]]; do
             ZERO_G_SERVICE="${1#*=}"
             shift
             ;;
-        --skip-zero-gravity)
-            SKIP_ZERO_G=1
+        --can)
+            if [[ $# -lt 2 ]]; then
+                warn "--can 缺少参数"
+                exit 1
+            fi
+            CAN_CHANNEL="$2"
+            shift 2
+            ;;
+        --can=*)
+            CAN_CHANNEL="${1#*=}"
+            shift
+            ;;
+        --mark-ready)
+            if [[ $# -lt 2 ]]; then
+                warn "--mark-ready 缺少参数"
+                exit 1
+            fi
+            MARK_READY_TARGET="$(resolve_path "$2")"
+            shift 2
+            ;;
+        --mark-ready=*)
+            value="${1#*=}"
+            MARK_READY_TARGET="$(resolve_path "$value")"
             shift
             ;;
         -h|--help)
@@ -148,18 +216,79 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+if [[ -n "${MARK_READY_TARGET}" ]]; then
+    mark_safe_pose_ready_file "${MARK_READY_TARGET}"
+    exit 0
+fi
+
+ensure_command ros2
+
 mkdir -p "${OUTPUT_DIR}"
 source_ros_env
 
-if [[ ${SKIP_ZERO_G} -eq 0 ]]; then
-    info "切换零重力模式 (${ZERO_G_SERVICE}) ..."
-    if ! ros2 service call "${ZERO_G_SERVICE}" std_srvs/srv/SetBool "{data: true}" >/dev/null 2>&1; then
-        warn "零重力 service 调用失败，继续执行"
+info "检查 robot_driver_node 是否运行..."
+if ! ros2 node list 2>/dev/null | grep -q "/robot_driver"; then
+    warn "robot_driver_node 未运行！"
+
+    # robot_driver 未运行，检查是否有其他进程占用 CAN 接口
+    info "检查 CAN 接口 (${CAN_CHANNEL}) 占用情况..."
+    CAN_USERS=$(sudo lsof 2>/dev/null | grep -i "${CAN_CHANNEL}" | awk '{print $2}' | sort -u || true)
+    I2RT_PIDS=$(ps aux | grep -E "python.*(i2rt|stage1_device)" | grep -v grep | awk '{print $2}' || true)
+
+    if [[ -n "${CAN_USERS}" || -n "${I2RT_PIDS}" ]]; then
+        warn "发现其他进程可能占用了 CAN 接口或 I2RT SDK"
+        if [[ -n "${CAN_USERS}" ]]; then
+            warn "  占用 ${CAN_CHANNEL} 的进程: ${CAN_USERS}"
+        fi
+        if [[ -n "${I2RT_PIDS}" ]]; then
+            warn "  I2RT 相关进程: ${I2RT_PIDS}"
+        fi
+
+        CLEANUP_SCRIPT="${SCRIPT_DIR}/scripts/cleanup_can_interface.sh"
+        if [[ -x "${CLEANUP_SCRIPT}" ]]; then
+            read -rp "是否清理这些进程后再启动 robot_driver? [y/N]: " confirm_cleanup
+            if [[ "${confirm_cleanup}" =~ ^[Yy]$ ]]; then
+                info "清理占用进程..."
+                if ! bash "${CLEANUP_SCRIPT}" "${CAN_CHANNEL}" --force; then
+                    warn "清理失败"
+                    exit 1
+                fi
+                info "清理完成，请先运行: ./src/driver/start_robot_driver.sh"
+            else
+                warn "用户取消清理"
+            fi
+        fi
     else
-        info "零重力请求已发送。"
+        info "未发现占用 CAN 接口的进程"
     fi
+
+    warn "请先启动 robot_driver: ./src/driver/start_robot_driver.sh"
+    exit 1
+fi
+
+info "robot_driver_node 运行正常"
+
+info "切换零重力模式 (${ZERO_G_SERVICE}) ..."
+set +e
+SERVICE_RESULT="$(timeout 5 ros2 service call "${ZERO_G_SERVICE}" std_srvs/srv/SetBool "{data: true}" 2>&1)"
+SERVICE_EXIT=$?
+set -e
+if [[ ${SERVICE_EXIT} -eq 124 ]]; then
+    warn "零重力 service 调用超时！"
+    warn "没有零重力模式无法手动调整机械臂姿态。"
+    exit 1
+elif [[ ${SERVICE_EXIT} -ne 0 ]]; then
+    warn "零重力 service 调用失败 (exit ${SERVICE_EXIT})！"
+    printf '%s\n' "${SERVICE_RESULT}"
+    warn "没有零重力模式无法手动调整机械臂姿态。"
+    exit 1
+elif ! printf '%s' "${SERVICE_RESULT}" | grep -qiE "success[:=][[:space:]]*true"; then
+    warn "零重力 service 返回失败："
+    printf '%s\n' "${SERVICE_RESULT}"
+    warn "请检查 robot_driver_node 日志。"
+    exit 1
 else
-    info "已跳过自动零重力开关。"
+    info "零重力模式已启动。"
 fi
 
 info "请将机械臂拖到期望 SAFE_POSE，完成后按回车继续。"
@@ -167,7 +296,9 @@ read -r _
 
 info "正在采集 ${JOINT_TOPIC} ..."
 set +e
-JOINT_STATE_JSON="$(SAFE_POSE_TOPIC="${JOINT_TOPIC}" SAFE_POSE_TIMEOUT="${CAPTURE_TIMEOUT}" python3 <<'PY'
+JOINT_STATE_JSON="$(
+SAFE_POSE_TOPIC="${JOINT_TOPIC}" SAFE_POSE_TIMEOUT="${CAPTURE_TIMEOUT}" \
+python3 <<'PY'
 import json
 import os
 import sys
@@ -175,6 +306,7 @@ import time
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import JointState
+from rclpy.task import Future
 
 TOPIC = os.environ.get("SAFE_POSE_TOPIC", "/joint_states")
 TIMEOUT = float(os.environ.get("SAFE_POSE_TIMEOUT", "10"))
@@ -182,7 +314,7 @@ TIMEOUT = float(os.environ.get("SAFE_POSE_TIMEOUT", "10"))
 class JointStateCapture(Node):
     def __init__(self):
         super().__init__('safe_pose_capture_cli')
-        self._future = self.create_future()
+        self._future = Future()
         self.create_subscription(JointState, TOPIC, self._callback, 10)
 
     def _callback(self, msg: JointState):
@@ -212,6 +344,9 @@ if msg is None:
     rclpy.shutdown()
     sys.exit(1)
 
+print("RAW JointState message:", file=sys.stderr)
+print(msg, file=sys.stderr)
+
 data = {
     "names": list(msg.name),
     "positions": list(msg.position),
@@ -221,14 +356,29 @@ data = {
     "stamp_sec": msg.header.stamp.sec,
     "stamp_nanosec": msg.header.stamp.nanosec,
 }
+pretty_json = json.dumps(data, indent=2)
+print("Formatted JointState JSON:", file=sys.stderr)
+print(pretty_json, file=sys.stderr)
 print(json.dumps(data))
 rclpy.shutdown()
-PY)"
+PY
+)"
 CAPTURE_STATUS=$?
 set -e
 
 if [[ ${CAPTURE_STATUS} -ne 0 ]]; then
     warn "采集 JointState 失败 (exit ${CAPTURE_STATUS})"
+    case "${CAPTURE_STATUS}" in
+        1)
+            warn "错误原因: JointState 消息为空，Python 捕获脚本返回 1"
+            ;;
+        2)
+            warn "错误原因: 等待 ${JOINT_TOPIC} 超时 (${CAPTURE_TIMEOUT}s)"
+            ;;
+        *)
+            warn "错误原因: Python 捕获脚本异常，详见上方输出"
+            ;;
+    esac
     exit ${CAPTURE_STATUS}
 fi
 
@@ -294,6 +444,7 @@ content = [
     f"  source_topic: {topic}",
     f"  captured_at: {now}",
     "  zero_gravity_requested: true",
+    "  ready: true",
     "  notes: ''",
 ]
 
@@ -306,6 +457,7 @@ with open(path, 'w', encoding='utf-8') as f:
 
 print(f"已写入 {path}")
 PY
+mark_safe_pose_ready_file "${OUTPUT_FILE}"
 
-info "SAFE_POSE YAML 已生成：${OUTPUT_FILE}"
-info "可将内容复制到 config/safe_pose_default.yaml 的 safe_pose 列表中。"
+info "SAFE_POSE YAML 已生成并标记为 ready：${OUTPUT_FILE}"
+info "可直接在 driver/config/robot_driver_config.yaml 的 safe_pose_file 字段引用该文件。"

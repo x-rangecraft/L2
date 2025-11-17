@@ -25,6 +25,8 @@
 | 查看状态 | `./src/tf_tools/static_tf_config_publish.sh --status` | 列出 PID 文件中每条 TF 的运行状态（在/不在运行）。 |
 | 帮助 | `./src/tf_tools/static_tf_config_publish.sh --help` | 输出上述说明。 |
 
+**TODO**：当前实现沿用 ROS 2 官方 `static_transform_publisher`，每条变换必须由一个独立进程发布，因而后台模式会看到多个 `static_transform_publisher_*` 节点。后续如需减少节点数量，可自研单节点广播器，读取 `static_tf_config.yaml` 内所有变换并在同一进程内批量发布。
+
 后台数据目录说明：
 - `src/tf_tools/.static_tf_publish/pids`：记录 `PID TF名称`，供 `--stop/--status` 读取。
 - `src/tf_tools/.static_tf_publish/logs/<tf_name>.log`：对应 TF 的 stdout/stderr，若 ROS 环境缺依赖（例如缺 `librcl_action.so`）可在这里排查。

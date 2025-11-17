@@ -16,4 +16,5 @@ safe_pose:
   metadata:
     frame_id: base_link
     source: default
-    notes: Replace with calibrated SAFE_POSE captured from hardware.
+    ready: false
+    notes: Replace with calibrated SAFE_POSE captured from hardware and mark ready via safe_pose_build.sh.

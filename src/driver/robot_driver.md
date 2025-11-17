@@ -72,6 +72,7 @@ effort: []
 - `name` 必须与 `/joint_states` 中的名称一致；
 - 未列出的关节保持当前值；
 - 若 `joint_command_mode` 设为 velocity/effort，则分别读取对应字段并忽略其余字段；
+- 关节位置会自动参考 `robot_description.yaml` 中的 `position_limits_rad` 做限幅，防止越界指令写入硬件；
 - 该接口多借鉴 I2RT SDK 的 `command_joint_pos`/`command_joint_vel` 能力，适合单轴标定、零位校准或 I2RT 集成测试。
 
 ### 服务与动作
@@ -94,6 +95,7 @@ effort: []
      3. 执行 `python3 -m driver.can_interface_manager --ensure --interface canX` 以确认 gs_usb 接口、比特率；
      4. 设定 `PYTHONPATH`（挂载 I2RT SDK）、ROS 环境、`l2/log/robot_driver/robot_driver.log` 输出，并以 `ros2 launch driver robot_driver.launch.py` 方式拉起节点；
      5. 统一杀掉旧进程 `robot_driver_node`，保证脚本幂等。
+     6. 使用方式：在仓库根目录运行 `./src/driver/start_robot_driver.sh --can can0` 即可后台启动，若需要实时日志可追加 `--follow-log`，否则默认把输出写入 `log/robot_driver/robot_driver_<timestamp>.log` 后静默运行。
 
 2. 模块分层
    - `can_interface_manager`：借鉴 `l1_stage1_device/cartesian/can_monitor.py` 的思路，封装 gs_usb 设备检测、`ip -details link show` 解析、`I2RT/i2rt/scripts/reset_all_can.sh` 调用与 1 Mbps 配置校验，暴露 `ensure_ready(required=[canX])` API。
@@ -136,7 +138,7 @@ effort: []
   1. 启动后立即调用 `/robot_driver/service/zero_gravity` 进入零重力，提示操作者可手动拖动机械臂至期望安全位。
   2. 脚本阻塞等待回车（或 `ctrl+c` 退出），确保操作者完成调姿后再继续。
   3. 收集当前关节状态：通过 `ros2 topic echo /joint_states --once`（或 commander CLI）读取最新的关节名/角度，并打印到终端让操作者确认。
-  4. 操作者确认后，脚本在当前目录生成 `safe_pose_<timestamp>.yaml`，内容包括 `joint_names`、`positions`、可选末端位姿与备注，便于直接拷贝至 `safe_pose` 配置数组。
+  4. 操作者确认后，脚本把 `safe_pose_<timestamp>.yaml` 直接写入 `driver/config/`，内容包括 `joint_names`、`positions`、可选末端位姿与备注，便于立即在 `safe_pose_file` 中引用。
 - 后续可把生成的 YAML 纳入版本管理或部署包，`command_watchdog` 与 `/robot_driver/safety_stop` 将依赖该 SAFE_POSE 数据。在补充具体参数前，此脚本可反复执行以更新标定结果。
 
 
@@ -144,7 +146,8 @@ effort: []
 - 默认参数文件：`driver/config/robot_driver_config.yaml`（后续创建），通过 `ros2 launch driver robot_driver.launch.py params:=...` 注入；
 - 关键参数：`can_channel`、`zero_gravity_default`、`joint_state_rate`、`diagnostics_rate`、`command_timeout_s`（60 s 默认）、`safe_pose` 数组、`log_dir`（默认 `l2/log/robot_driver/`）。
   - `safe_pose` 默认从 `config/safe_pose_default.yaml` 读入，可由 `safe_pose_build.sh` 输出的最新 `safe_pose_*.yaml` 替换。
-- 关节直控相关参数：
+  - `robot_description_file`：解析关节限位、电机信息等静态元数据，默认位于 `robot_description.yaml`，供驱动做命令限幅与诊断展示。
+  - 关节直控相关参数：
   - `enable_joint_direct_ctrl`（bool，默认 `false`）：是否订阅 `/robot_driver/joint_command`；
   - `joint_command_topic`（string，默认 `/robot_driver/joint_command`）：话题名，可通过 launch/CLI 调整；
   - `joint_command_mode`（enum: position/velocity/effort，默认 position）：决定如何解读 `sensor_msgs/JointState` 中的 `position/velocity/effort` 字段；
@@ -178,7 +181,7 @@ driver/
 ```
 
 - `driver/start_robot_driver.sh`：驱动启动脚本，负责参数解析、环境配置与 `ros2 launch` 拉起。
-- `driver/safe_pose_build.sh`：SAFE_POSE 标定脚本，生成 `safe_pose_*.yaml`。
+- `driver/safe_pose_build.sh`：SAFE_POSE 标定脚本，生成 `safe_pose_*.yaml` 并统一落在 `driver/config/`。
 - `driver/src/robot_driver_node.py`：ROS 2 主节点实现。
 - `driver/package.xml`：ROS 2 包元数据，声明依赖与构建信息。
 - `driver/setup.py` / `setup.cfg`：声明 `ament_python` 包、入口点、安装数据文件（config、launch、resource）。

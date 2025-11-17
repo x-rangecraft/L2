@@ -3,11 +3,12 @@ robot_driver:
     can_channel: can0
     joint_state_rate: 30.0
     diagnostics_rate: 1.0
-    command_timeout_s: 60.0
+    command_timeout_s: 600.0
     zero_gravity_default: false
     xyz_only_mode: false
     log_dir: l2/log/robot_driver
-    safe_pose_file: config/safe_pose_default.yaml
+    safe_pose_file: config/safe_pose_20251114_104828.yaml
+    robot_description_file: robot_description.yaml
     publish_tf: true
     tf_base_frame: base_link
     tf_tool_frame: tool0
@@ -42,3 +43,4 @@ robot_driver:
         - -1.2
         - 0.8
         - 0.0
+      ready: false

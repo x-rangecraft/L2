@@ -18,6 +18,7 @@ from .hardware_commander import HardwareCommander
 from .logging_utils import get_logger
 from .motion_controller import MotionController
 from .parameter_schema import DriverParameters, declare_and_get_parameters
+from .robot_description_loader import RobotDescriptionLoader
 from .safe_pose_loader import SafePoseLoader
 from .state_publisher import StatePublisher
 
@@ -28,7 +29,12 @@ class RobotDriverNode(Node):
         self._logger = get_logger('robot_driver_node')
         self._params: DriverParameters = declare_and_get_parameters(self)
         self._safe_pose = SafePoseLoader(self._params.safe_pose_fallback).load(self._params.safe_pose_file)
-        self._commander = HardwareCommander(self._safe_pose, joint_limit_rate=self._params.joint_command.rate_limit)
+        self._robot_description = RobotDescriptionLoader().load(self._params.robot_description_file)
+        self._commander = HardwareCommander(
+            self._safe_pose,
+            joint_limit_rate=self._params.joint_command.rate_limit,
+            robot_description=self._robot_description,
+        )
         self._motion_controller = MotionController(self._params, self._commander)
         self._state_publisher = StatePublisher(self, self._commander, self._params)
         self._watchdog = CommandWatchdog(
@@ -104,7 +110,10 @@ class RobotDriverNode(Node):
             self._commander.connect(self._params.can_channel, reset_script=reset_script)
             if self._params.zero_gravity_default:
                 self._commander.set_zero_gravity(True)
-            self._commander.move_to_safe_pose()
+            if self._safe_pose.ready:
+                self._commander.move_to_safe_pose()
+            else:
+                self._logger.warning('SAFE_POSE not marked ready; skipping initial move.')
         except Exception as exc:  # pragma: no cover
             self._logger.error('Failed to connect hardware: %s', exc)
             self.get_logger().error(traceback.format_exc())
@@ -119,9 +128,12 @@ class RobotDriverNode(Node):
 
     # ------------------------------------------------------------------ services
     def _handle_zero_gravity(self, request: SetBool.Request, response: SetBool.Response):
-        self._commander.set_zero_gravity(request.data)
-        response.success = True
-        response.message = f'zero_gravity -> {request.data}'
+        success = self._commander.set_zero_gravity(request.data)
+        response.success = success
+        if success:
+            response.message = f'zero_gravity -> {request.data}'
+        else:
+            response.message = 'Failed to toggle zero_gravity (see logs)'
         return response
 
     def _handle_reset_can(self, _request: Trigger.Request, response: Trigger.Response):

@@ -34,15 +34,15 @@ class CommandWatchdog:
         age = self._motion_controller.seconds_since_last_command()
         if age > self._timeout:
             self._logger.warning('Command watchdog timeout (%.1fs > %.1fs)', age, self._timeout)
-            self.engage('command_timeout', enable_zero_gravity=True)
+            self.engage('command_timeout')
 
     # ------------------------------------------------------------------ public
     def handle_safety_stop(self, _msg: Empty | None = None) -> None:
-        """Handle safety stop: exit zero-gravity first, move to safe pose, then NO auto zero-gravity."""
-        self.engage('safety_stop', enable_zero_gravity=False)
+        """Handle safety stop with the same SAFE_POSE+zero-gravity sequence used for timeouts."""
+        self.engage('safety_stop')
 
-    def engage(self, reason: str, *, enable_zero_gravity: bool) -> None:
-        """Execute safety sequence: optionally exit zero-gravity, move to safe pose, wait for arrival, then enable zero-gravity if requested."""
+    def engage(self, reason: str) -> None:
+        """Execute safety sequence: exit zero-gravity if active, move to safe pose, wait, then re-enter zero-gravity."""
         now = time.monotonic()
         if now - self._last_trigger < 1.0:
             return
@@ -58,21 +58,19 @@ class CommandWatchdog:
             time.sleep(0.2)  # Brief pause
 
         # Step 2: Stop current motion and move to SAFE_POSE
-        self._motion_controller.halt_and_safe(reason)
+        moved = self._motion_controller.halt_and_safe(reason)
+        if not moved:
+            self._logger.warning('SAFE_POSE move skipped; watchdog sequence degraded.')
+            return
 
         # Step 3: Wait and verify arrival at SAFE_POSE
         self._logger.info('Waiting %.1fs for SAFE_POSE arrival', self._safe_pose_wait_time)
         time.sleep(self._safe_pose_wait_time)
 
-        # Step 4: Verify position
+        # Step 4: Verify position; only re-enter zero-gravity when SAFE_POSE is confirmed
         if self._commander.check_at_safe_pose(tolerance=0.1):
-            self._logger.info('Confirmed arrival at SAFE_POSE')
-        else:
-            self._logger.warning('Robot may not be at SAFE_POSE, continuing anyway')
-
-        # Step 5: Enable zero-gravity if requested (e.g., for timeout but not safety_stop)
-        if enable_zero_gravity:
+            self._logger.info('Confirmed arrival at SAFE_POSE, entering zero-gravity mode')
             self._commander.set_zero_gravity(True)
             self._logger.info('Safety sequence complete, zero_gravity enabled')
         else:
-            self._logger.info('Safety sequence complete, zero_gravity NOT enabled (manual intervention required)')
+            self._logger.warning('Robot may not be at SAFE_POSE; zero-gravity re-enable skipped')
