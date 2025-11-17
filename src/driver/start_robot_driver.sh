@@ -25,10 +25,8 @@ FOLLOW_LOG=0
 LOG_STDERR_MIRROR=1
 VERBOSE_CONSOLE=0
 declare -a CHILD_ARGS=()
-USER_SET_DAEMON_MODE=0
 EXIT_AFTER_SAFE_POSE=1
 SAFE_POSE_WAIT_TIMEOUT=120
-LAUNCH_PID_FILE="${LOG_DIR}/robot_driver_launch.pid"
 
 CAN_CHANNEL="can0"
 XYZ_ONLY_MODE="false"
@@ -71,6 +69,16 @@ log() {
     if [[ ${LOG_STDERR_MIRROR} -ne 0 ]]; then
         printf '%s\n' "${line}" >&2
     fi
+}
+
+status_cn() {
+    local msg="$1"
+    local prefix="${2:-INFO}"
+    local time_str
+    time_str="$(date +'%H:%M:%S')"
+    local console_line="[robot_driver][${time_str}][${prefix}] ${msg}"
+    printf '%s\n' "${console_line}"
+    log "提示(${prefix}): ${msg}"
 }
 
 read_pid_file() {
@@ -179,15 +187,23 @@ stop_daemon() {
 
 build_child_args() {
     CHILD_ARGS=()
-    for arg in "${ORIGINAL_ARGS[@]}"; do
+    local i=0
+    local total=${#ORIGINAL_ARGS[@]}
+    while (( i < total )); do
+        local arg="${ORIGINAL_ARGS[i]}"
         case "${arg}" in
-            --daemon|--no-daemon|--foreground|--stop|--follow-log|--no-follow-log|--daemon-child)
-                continue
+            --daemon|--no-daemon|--foreground|--stop|--follow-log|--no-follow-log|--daemon-child|--verbose|--no-exit-after-safe)
+                ;;
+            --safe-timeout)
+                ((i++))  # skip value
+                ;;
+            --safe-timeout=*)
                 ;;
             *)
                 CHILD_ARGS+=("${arg}")
                 ;;
         esac
+        ((i++))
     done
     CHILD_ARGS+=("--daemon-child" "--foreground")
 }
@@ -195,6 +211,7 @@ build_child_args() {
 launch_daemon_mode() {
     ensure_no_active_daemon
     build_child_args
+    status_cn "正在后台启动 robot_driver，日志输出：${LOG_FILE}"
     log "Starting robot_driver supervisor in daemon mode (log: ${LOG_FILE})"
     if command -v setsid >/dev/null 2>&1; then
         env ROBOT_DRIVER_LOG_FILE_OVERRIDE="${LOG_FILE}" \
@@ -208,22 +225,50 @@ launch_daemon_mode() {
     disown "${launcher_pid}" 2>/dev/null || true
     local daemon_pid
     if daemon_pid="$(wait_for_pid_file 10)"; then
-        log "robot_driver supervisor is running as PID ${daemon_pid}."
+        status_cn "后台守护进程 PID=${daemon_pid} 已启动"
     else
-        log "WARNING: Unable to read daemon PID from ${PID_FILE}; check manually."
+        status_cn "后台守护进程 PID 暂不可见，请手动检查" "WARN"
     fi
     if [[ ${FOLLOW_LOG} -eq 1 ]]; then
         if command -v tail >/dev/null 2>&1; then
-            log "Tailing ${LOG_FILE}. Press Ctrl+C to stop viewing; daemon keeps running."
+            status_cn "进入实时日志跟随模式，按 Ctrl+C 可退出（驱动持续运行）"
             tail -n +1 -F "${LOG_FILE}" || true
-            log "Stopped following ${LOG_FILE}. Daemon continues to run."
+            status_cn "停止跟随日志，驱动仍在后台运行"
         else
-            log "WARNING: 'tail' command not available; skipping log follow."
+            status_cn "系统缺少 tail 命令，无法实时跟随日志" "WARN"
+        fi
+        exit 0
+    fi
+
+    status_cn "等待硬件连接与安全位姿落位（超时 ${SAFE_POSE_WAIT_TIMEOUT}s）"
+    if monitor_startup_events "${LOG_FILE}" "${SAFE_POSE_WAIT_TIMEOUT}"; then
+        status_cn "启动流程完成，脚本退出，后台驱动持续运行"
+        if [[ ${EXIT_AFTER_SAFE_POSE} -eq 1 ]]; then
+            exit 0
         fi
     else
-        local summary_pid="${daemon_pid:-unknown}"
-        log "Daemon started without log follow (PID=${summary_pid}); logs -> ${LOG_FILE}"
+        local monitor_rc=$?
+        case "${monitor_rc}" in
+            1)
+                status_cn "未在超时时间内检测到安全位姿，请检查日志 ${LOG_FILE}" "WARN"
+                ;;
+            2)
+                status_cn "硬件连接失败，请检查电源/CAN 接口，详见 ${LOG_FILE}" "WARN"
+                ;;
+            3)
+                status_cn "SAFE_POSE 未就绪，驱动跳过落位，请确认 YAML 已标记 ready" "WARN"
+                ;;
+            *)
+                status_cn "启动监控异常 (code=${monitor_rc})，请查看 ${LOG_FILE}" "WARN"
+                ;;
+        esac
+        if [[ ${EXIT_AFTER_SAFE_POSE} -eq 1 ]]; then
+            exit "${monitor_rc}"
+        fi
     fi
+
+    status_cn "继续输出日志，按 Ctrl+C 结束查看（驱动仍在后台运行）"
+    tail -n +1 -F "${LOG_FILE}" || true
     exit 0
 }
 
@@ -320,12 +365,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --daemon)
             DAEMON_MODE="daemon"
-            USER_SET_DAEMON_MODE=1
             shift
             ;;
         --no-daemon|--foreground)
             DAEMON_MODE="foreground"
-            USER_SET_DAEMON_MODE=1
             shift
             ;;
         --no-exit-after-safe)
@@ -377,10 +420,6 @@ if [[ ${DAEMON_CHILD} -eq 1 ]]; then
     LOG_STDERR_MIRROR=0
 fi
 
-if [[ ${USER_SET_DAEMON_MODE} -eq 0 ]]; then
-    DAEMON_MODE="foreground"
-fi
-
 if [[ ${STOP_ONLY} -eq 1 ]]; then
     if stop_daemon; then
         exit 0
@@ -410,6 +449,8 @@ fi
 ensure_no_active_daemon
 trap cleanup_pid_file_on_exit EXIT
 write_pid_file
+
+status_cn "开始启动 robot_driver（CAN=${CAN_CHANNEL}，零重力默认=${ZERO_GRAVITY_DEFAULT}）"
 
 I2RT_REPO_ROOT="$(cd -- "${WORKSPACE_ROOT}/../I2RT" 2>/dev/null && pwd || true)"
 I2RT_PYTHON_ROOT=""
@@ -496,6 +537,89 @@ run_can_maintenance() {
         log "WARNING: driver.can_interface_manager module not found; skipping CAN self-check"
     fi
     return 0
+}
+
+monitor_startup_events() {
+    local log_file="$1"
+    local timeout="$2"
+    local fifo
+    fifo="$(mktemp -u)"
+    mkfifo "${fifo}"
+    python3 - "${log_file}" "${timeout}" <<'PY' > "${fifo}" &
+import os
+import sys
+import time
+
+log_path = sys.argv[1]
+timeout = float(sys.argv[2])
+deadline = time.time() + timeout
+os.makedirs(os.path.dirname(log_path), exist_ok=True)
+open(log_path, 'a').close()
+
+ros_started = False
+hardware_ready = False
+
+with open(log_path, 'r', encoding='utf-8', errors='ignore') as f:
+    f.seek(0, os.SEEK_SET)
+    while True:
+        if time.time() > deadline:
+            print('EVENT:TIMEOUT', flush=True)
+            sys.exit(1)
+        pos = f.tell()
+        line = f.readline()
+        if not line:
+            time.sleep(0.2)
+            f.seek(pos)
+            continue
+        if 'process started with pid' in line and 'robot_driver_node' in line and not ros_started:
+            ros_started = True
+            print('EVENT:ROS_PROCESS', flush=True)
+        if 'Hardware connected via' in line and not hardware_ready:
+            hardware_ready = True
+            print('EVENT:HARDWARE', flush=True)
+        if 'SAFE_POSE not marked ready' in line or 'SAFE_POSE unavailable' in line:
+            print('EVENT:SAFE_POSE_SKIP', flush=True)
+            sys.exit(3)
+        if 'Moved to SAFE_POSE' in line:
+            print('EVENT:SAFE_POSE_DONE', flush=True)
+            sys.exit(0)
+        if 'Failed to connect hardware' in line:
+            print('EVENT:CONNECT_FAIL', flush=True)
+            sys.exit(2)
+        if 'Traceback' in line or 'ERROR' in line:
+            print('EVENT:ERROR:' + line.strip(), flush=True)
+PY
+    local monitor_pid=$!
+    local line
+    while IFS= read -r line; do
+        case "${line}" in
+            EVENT:ROS_PROCESS)
+                status_cn "ROS 节点进程已启动"
+                ;;
+            EVENT:HARDWARE)
+                status_cn "硬件通信已建立，准备落位安全姿态"
+                ;;
+            EVENT:SAFE_POSE_DONE)
+                status_cn "安全位姿已到位，驱动后台继续运行"
+                ;;
+            EVENT:SAFE_POSE_SKIP)
+                status_cn "SAFE_POSE 未标记为 ready，驱动跳过落位，请检查配置" "WARN"
+                ;;
+            EVENT:CONNECT_FAIL)
+                status_cn "硬件连接失败，查看日志 ${LOG_FILE}" "WARN"
+                ;;
+            EVENT:TIMEOUT)
+                status_cn "等待安全位姿超时（${SAFE_POSE_WAIT_TIMEOUT}s），请检查日志 ${LOG_FILE}" "WARN"
+                ;;
+            EVENT:ERROR:*)
+                status_cn "${line#EVENT:ERROR:}" "WARN"
+                ;;
+        esac
+    done < "${fifo}"
+    wait "${monitor_pid}" || true
+    local rc=$?
+    rm -f "${fifo}"
+    return "${rc}"
 }
 
 export ROBOT_DRIVER_LOG_FILE="${LOG_FILE}"
