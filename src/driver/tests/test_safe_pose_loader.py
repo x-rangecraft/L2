@@ -1,9 +1,10 @@
 """Unit tests for SafePoseLoader."""
-import unittest
 import tempfile
+import unittest
 from pathlib import Path
-from driver.safe_pose_loader import SafePoseLoader, SafePose
-from driver.parameter_schema import SafePoseFallback
+
+from driver.config.parameter_schema import SafePoseFallback
+from driver.config.safe_pose_loader import SafePoseLoader, SafePose
 
 
 class TestSafePoseLoader(unittest.TestCase):
@@ -26,9 +27,9 @@ class TestSafePoseLoader(unittest.TestCase):
             f.write("""
 safe_pose:
   joint_names:
-    - joint_1
-    - joint_2
-    - joint_3
+    - joint1
+    - joint2
+    - joint3
   positions:
     - 0.0
     - -0.3
@@ -42,7 +43,7 @@ safe_pose:
             loader = SafePoseLoader()
             pose = loader.load(temp_path)
 
-            self.assertEqual(pose.joint_names, ['joint_1', 'joint_2', 'joint_3'])
+            self.assertEqual(pose.joint_names, ['joint1', 'joint2', 'joint3'])
             self.assertEqual(pose.positions, [0.0, -0.3, 0.6])
             self.assertEqual(pose.frame_id, 'base_link')
             self.assertFalse(pose.ready)

@@ -11,7 +11,7 @@ resources:
     - Contains STL files such as base_link_*.stl and link_[1-6]_*.stl.
     - Keep meshes in sync with upstream I2RT repo when regenerating collision/inertia data.
 joints:
-  joint_1:
+  joint1:
     axis_child_frame: [0.0, 0.0, 1.0]
     world_axis_hint: [0.0, 0.0, 1.0]
     position_limits_rad: [-2.61799, 3.13]
@@ -19,7 +19,7 @@ joints:
     effort_limit_nm: 10.0
     motor_id_hex: 0x01
     motor_model: DM4340
-  joint_2:
+  joint2:
     axis_child_frame: [0.0, 0.0, 1.0]
     world_axis_hint: [1.0, 0.0, 0.0]
     position_limits_rad: [0.0, 3.65]
@@ -27,7 +27,7 @@ joints:
     effort_limit_nm: 10.0
     motor_id_hex: 0x02
     motor_model: DM4340
-  joint_3:
+  joint3:
     axis_child_frame: [0.0, 0.0, 1.0]
     world_axis_hint: [0.0, 0.0, -1.0]
     position_limits_rad: [0.0, 3.13]
@@ -35,7 +35,7 @@ joints:
     effort_limit_nm: 10.0
     motor_id_hex: 0x03
     motor_model: DM4340
-  joint_4:
+  joint4:
     axis_child_frame: [0.0, 0.0, 1.0]
     world_axis_hint: [0.0, 0.0, 1.0]
     position_limits_rad: [-1.5708, 1.5708]
@@ -43,7 +43,7 @@ joints:
     effort_limit_nm: 10.0
     motor_id_hex: 0x04
     motor_model: DM4310
-  joint_5:
+  joint5:
     axis_child_frame: [0.0, 0.0, 1.0]
     world_axis_hint: [0.0, 1.0, 0.0]
     position_limits_rad: [-1.5708, 1.5708]
@@ -51,7 +51,7 @@ joints:
     effort_limit_nm: 10.0
     motor_id_hex: 0x05
     motor_model: DM4310
-  joint_6:
+  joint6:
     axis_child_frame: [0.0, 0.0, 1.0]
     world_axis_hint: [0.0, 1.0, 0.0]
     position_limits_rad: [-2.0944, 2.0944]
@@ -66,7 +66,7 @@ joints:
     limit_force_n: 50.0
 motors:
   DM-J4310-2EC-V1.1:
-    applies_to: [joint_4, joint_5, joint_6]
+    applies_to: [joint4, joint5, joint6]
     nominal_voltage_v: 24
     optional_voltage_v: 48
     nominal_current_a: 2.5
@@ -86,7 +86,7 @@ motors:
       diameter: 57
       length: 46
   DM-J4340-2EC-V1.1:
-    applies_to: [joint_1, joint_2, joint_3]
+    applies_to: [joint1, joint2, joint3]
     nominal_voltage_v: [24, 48]
     nominal_current_a: 2.5
     peak_current_a:

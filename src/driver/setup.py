@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-from setuptools import setup
+from setuptools import setup, find_packages
 
 package_name = 'robot_driver'
 
 setup(
     name=package_name,
     version='0.1.0',
-    packages=['driver', 'driver.tools'],
+    packages=find_packages('src'),
     package_dir={'': 'src'},
     data_files=[
         ('share/ament_index/resource_index/packages', ['resource/robot_driver']),

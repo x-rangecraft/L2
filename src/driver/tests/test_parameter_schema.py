@@ -1,6 +1,6 @@
 """Unit tests for parameter schema."""
 import unittest
-from driver.parameter_schema import SafePoseFallback, JointCommandConfig
+from driver.config.parameter_schema import SafePoseFallback, JointCommandConfig
 
 
 class TestParameterSchema(unittest.TestCase):
@@ -17,12 +17,9 @@ class TestParameterSchema(unittest.TestCase):
     def test_joint_command_config(self):
         """Test JointCommandConfig dataclass."""
         config = JointCommandConfig(
-            enabled=True,
-            topic='/test/topic',
             mode='position',
             rate_limit=0.5
         )
-        self.assertTrue(config.enabled)
         self.assertEqual(config.mode, 'position')
         self.assertEqual(config.rate_limit, 0.5)
 

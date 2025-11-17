@@ -5,7 +5,13 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PACKAGE_ROOT="${SCRIPT_DIR}"
 WORKSPACE_ROOT="$(cd -- "${PACKAGE_ROOT}/../.." && pwd)"
 DEFAULT_PARAM_FILE="${PACKAGE_ROOT}/config/robot_driver_config.yaml"
-ROS_SETUP="/opt/ros/humble/setup.bash"
+# Prefer shell-matching setup script if available (avoids zsh sourcing bash issues),
+# fallback to standard bash setup.
+if [[ -n "${ZSH_VERSION:-}" && -f "/opt/ros/humble/setup.zsh" ]]; then
+    ROS_SETUP="/opt/ros/humble/setup.zsh"
+else
+    ROS_SETUP="/opt/ros/humble/setup.bash"
+fi
 INSTALL_SETUP="${WORKSPACE_ROOT}/install/setup.bash"
 LOG_DIR="${WORKSPACE_ROOT}/log/robot_driver"
 mkdir -p "${LOG_DIR}"
@@ -22,6 +28,7 @@ DAEMON_MODE="daemon"
 DAEMON_CHILD=0
 STOP_ONLY=0
 FOLLOW_LOG=0
+# 镜像日志到标准错误，方便直接看到提示。后台子进程会自动关闭该开关。
 LOG_STDERR_MIRROR=1
 VERBOSE_CONSOLE=0
 declare -a CHILD_ARGS=()
@@ -30,7 +37,8 @@ SAFE_POSE_WAIT_TIMEOUT=120
 
 CAN_CHANNEL="can0"
 XYZ_ONLY_MODE="false"
-ZERO_GRAVITY_DEFAULT="false"
+# 默认在落位 SAFE_POSE 后自动进入零重力模式
+ZERO_GRAVITY_DEFAULT="true"
 PARAM_FILE=""
 
 if [[ -f "${DEFAULT_PARAM_FILE}" ]]; then
@@ -177,7 +185,7 @@ stop_daemon() {
             return 1
         fi
         sleep 1
-        ((waited++))
+        ((waited+=1))
     done
     cleanup_processes || true
     rm -f "${PID_FILE}"
@@ -195,7 +203,7 @@ build_child_args() {
             --daemon|--no-daemon|--foreground|--stop|--follow-log|--no-follow-log|--daemon-child|--verbose|--no-exit-after-safe)
                 ;;
             --safe-timeout)
-                ((i++))  # skip value
+                ((i+=1))  # skip value
                 ;;
             --safe-timeout=*)
                 ;;
@@ -203,9 +211,92 @@ build_child_args() {
                 CHILD_ARGS+=("${arg}")
                 ;;
         esac
-        ((i++))
+        ((i+=1))
     done
     CHILD_ARGS+=("--daemon-child" "--foreground")
+}
+
+monitor_startup_events() {
+    local log_file="$1"
+    local timeout="$2"
+    local fifo
+    fifo="$(mktemp -u)"
+    mkfifo "${fifo}"
+    python3 - "${log_file}" "${timeout}" <<'PY' > "${fifo}" &
+import os
+import sys
+import time
+
+log_path = sys.argv[1]
+timeout = float(sys.argv[2])
+deadline = time.time() + timeout
+os.makedirs(os.path.dirname(log_path), exist_ok=True)
+open(log_path, 'a').close()
+
+ros_started = False
+hardware_ready = False
+
+with open(log_path, 'r', encoding='utf-8', errors='ignore') as f:
+    f.seek(0, os.SEEK_SET)
+    while True:
+        if time.time() > deadline:
+            print('EVENT:TIMEOUT', flush=True)
+            sys.exit(1)
+        pos = f.tell()
+        line = f.readline()
+        if not line:
+            time.sleep(0.2)
+            f.seek(pos)
+            continue
+        if 'process started with pid' in line and 'robot_driver_node' in line and not ros_started:
+            ros_started = True
+            print('EVENT:ROS_PROCESS', flush=True)
+        if 'Hardware connected via' in line and not hardware_ready:
+            hardware_ready = True
+            print('EVENT:HARDWARE', flush=True)
+        if 'SAFE_POSE not marked ready' in line or 'SAFE_POSE unavailable' in line:
+            print('EVENT:SAFE_POSE_SKIP', flush=True)
+            sys.exit(3)
+        if 'Moved to SAFE_POSE' in line:
+            print('EVENT:SAFE_POSE_DONE', flush=True)
+            sys.exit(0)
+        if 'Failed to connect hardware' in line:
+            print('EVENT:CONNECT_FAIL', flush=True)
+            sys.exit(2)
+        if 'Traceback' in line or 'ERROR' in line:
+            print('EVENT:ERROR:' + line.strip(), flush=True)
+PY
+    local monitor_pid=$!
+    local line
+    while IFS= read -r line; do
+        case "${line}" in
+            EVENT:ROS_PROCESS)
+                status_cn "ROS 节点进程已启动"
+                ;;
+            EVENT:HARDWARE)
+                status_cn "硬件通信已建立，准备落位安全姿态"
+                ;;
+            EVENT:SAFE_POSE_DONE)
+                status_cn "安全位姿已到位，默认切换至零重力模式并保持后台运行"
+                ;;
+            EVENT:SAFE_POSE_SKIP)
+                status_cn "SAFE_POSE 未标记为 ready，驱动跳过落位，请检查配置" "WARN"
+                ;;
+            EVENT:CONNECT_FAIL)
+                status_cn "硬件连接失败，查看日志 ${LOG_FILE}" "WARN"
+                ;;
+            EVENT:TIMEOUT)
+                status_cn "等待安全位姿超时（${SAFE_POSE_WAIT_TIMEOUT}s），请检查日志 ${LOG_FILE}" "WARN"
+                ;;
+            EVENT:ERROR:*)
+                status_cn "${line#EVENT:ERROR:}" "WARN"
+                ;;
+        esac
+    done < "${fifo}"
+    wait "${monitor_pid}" || true
+    local rc=$?
+    rm -f "${fifo}"
+    return "${rc}"
 }
 
 launch_daemon_mode() {
@@ -318,15 +409,30 @@ resolve_path() {
     fi
 }
 
+ensure_value_present() {
+    local option="$1"
+    local remaining="$2"
+    if (( remaining < 2 )); then
+        log "ERROR: Missing value for ${option}"
+        exit 1
+    fi
+}
+
+prepend_pythonpath() {
+    local new_entry="$1"
+    if [[ -z "${PYTHONPATH:-}" ]]; then
+        export PYTHONPATH="${new_entry}"
+    else
+        export PYTHONPATH="${new_entry}:${PYTHONPATH}"
+    fi
+}
+
 CAN_CHANNEL_PATTERN='^can[0-9]+$'
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --can)
-            if [[ $# -lt 2 ]]; then
-                log "ERROR: Missing value for --can"
-                exit 1
-            fi
+            ensure_value_present "--can" "$#"
             CAN_CHANNEL="$2"
             shift 2
             ;;
@@ -351,10 +457,7 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --params)
-            if [[ $# -lt 2 ]]; then
-                log "ERROR: Missing value for --params"
-                exit 1
-            fi
+            ensure_value_present "--params" "$#"
             PARAM_FILE="$(resolve_path "$2")"
             shift 2
             ;;
@@ -376,10 +479,7 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --safe-timeout)
-            if [[ $# -lt 2 ]]; then
-                log "ERROR: Missing value for --safe-timeout"
-                exit 1
-            fi
+            ensure_value_present "--safe-timeout" "$#"
             SAFE_POSE_WAIT_TIMEOUT="$2"
             shift 2
             ;;
@@ -416,6 +516,7 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# 只有父进程需要镜像到终端；子进程专注写日志文件，避免重复输出
 if [[ ${DAEMON_CHILD} -eq 1 ]]; then
     LOG_STDERR_MIRROR=0
 fi
@@ -466,26 +567,18 @@ fi
 
 source_ros_env
 
-if [[ -n "${I2RT_PYTHON_ROOT}" ]]; then
-    if [[ -z "${PYTHONPATH:-}" ]]; then
-        export PYTHONPATH="${I2RT_PYTHON_ROOT}"
-    else
-        export PYTHONPATH="${I2RT_PYTHON_ROOT}:${PYTHONPATH}"
+    if [[ -n "${I2RT_PYTHON_ROOT}" ]]; then
+        prepend_pythonpath "${I2RT_PYTHON_ROOT}"
     fi
-fi
-if [[ -d "${PACKAGE_ROOT}/src" ]]; then
-    if [[ -z "${PYTHONPATH:-}" ]]; then
-        export PYTHONPATH="${PACKAGE_ROOT}/src"
-    else
-        export PYTHONPATH="${PACKAGE_ROOT}/src:${PYTHONPATH}"
+    if [[ -d "${PACKAGE_ROOT}/src" ]]; then
+        prepend_pythonpath "${PACKAGE_ROOT}/src"
     fi
-fi
 
 log "Using workspace: ${WORKSPACE_ROOT}"
 log "Log file: ${LOG_FILE}"
 log "CAN channel: ${CAN_CHANNEL}"
 log "XYZ-only mode: ${XYZ_ONLY_MODE}"
-log "Zero-gravity default: ${ZERO_GRAVITY_DEFAULT}"
+log "Zero-gravity default: ${ZERO_GRAVITY_DEFAULT} (SAFE_POSE 完成后自动启用)"
 log "Verbose console: ${VERBOSE_CONSOLE}"
 if [[ -n "${PARAM_FILE}" ]]; then
     log "Parameter file: ${PARAM_FILE}"
@@ -523,9 +616,9 @@ run_can_maintenance() {
         fi
     fi
 
-    if python3 -c 'import importlib.util, sys; sys.exit(0 if importlib.util.find_spec("driver.can_interface_manager") else 1)' >/dev/null 2>&1; then
+    if python3 -c 'import importlib.util, sys; sys.exit(0 if importlib.util.find_spec("driver.hardware.can_interface_manager") else 1)' >/dev/null 2>&1; then
         log "Running CAN interface self-check"
-        CAN_CHECK_CMD=(python3 -m driver.can_interface_manager --ensure --interface "${CAN_CHANNEL}")
+        CAN_CHECK_CMD=(python3 -m driver.hardware.can_interface_manager --ensure --interface "${CAN_CHANNEL}")
         if [[ -n "${RESET_SCRIPT}" ]]; then
             CAN_CHECK_CMD+=(--reset-script "${RESET_SCRIPT}")
         fi
@@ -534,97 +627,15 @@ run_can_maintenance() {
             return 1
         fi
     elif [[ "${first_run}" -eq 1 ]]; then
-        log "WARNING: driver.can_interface_manager module not found; skipping CAN self-check"
+        log "WARNING: driver.hardware.can_interface_manager module not found; skipping CAN self-check"
     fi
     return 0
-}
-
-monitor_startup_events() {
-    local log_file="$1"
-    local timeout="$2"
-    local fifo
-    fifo="$(mktemp -u)"
-    mkfifo "${fifo}"
-    python3 - "${log_file}" "${timeout}" <<'PY' > "${fifo}" &
-import os
-import sys
-import time
-
-log_path = sys.argv[1]
-timeout = float(sys.argv[2])
-deadline = time.time() + timeout
-os.makedirs(os.path.dirname(log_path), exist_ok=True)
-open(log_path, 'a').close()
-
-ros_started = False
-hardware_ready = False
-
-with open(log_path, 'r', encoding='utf-8', errors='ignore') as f:
-    f.seek(0, os.SEEK_SET)
-    while True:
-        if time.time() > deadline:
-            print('EVENT:TIMEOUT', flush=True)
-            sys.exit(1)
-        pos = f.tell()
-        line = f.readline()
-        if not line:
-            time.sleep(0.2)
-            f.seek(pos)
-            continue
-        if 'process started with pid' in line and 'robot_driver_node' in line and not ros_started:
-            ros_started = True
-            print('EVENT:ROS_PROCESS', flush=True)
-        if 'Hardware connected via' in line and not hardware_ready:
-            hardware_ready = True
-            print('EVENT:HARDWARE', flush=True)
-        if 'SAFE_POSE not marked ready' in line or 'SAFE_POSE unavailable' in line:
-            print('EVENT:SAFE_POSE_SKIP', flush=True)
-            sys.exit(3)
-        if 'Moved to SAFE_POSE' in line:
-            print('EVENT:SAFE_POSE_DONE', flush=True)
-            sys.exit(0)
-        if 'Failed to connect hardware' in line:
-            print('EVENT:CONNECT_FAIL', flush=True)
-            sys.exit(2)
-        if 'Traceback' in line or 'ERROR' in line:
-            print('EVENT:ERROR:' + line.strip(), flush=True)
-PY
-    local monitor_pid=$!
-    local line
-    while IFS= read -r line; do
-        case "${line}" in
-            EVENT:ROS_PROCESS)
-                status_cn "ROS 节点进程已启动"
-                ;;
-            EVENT:HARDWARE)
-                status_cn "硬件通信已建立，准备落位安全姿态"
-                ;;
-            EVENT:SAFE_POSE_DONE)
-                status_cn "安全位姿已到位，驱动后台继续运行"
-                ;;
-            EVENT:SAFE_POSE_SKIP)
-                status_cn "SAFE_POSE 未标记为 ready，驱动跳过落位，请检查配置" "WARN"
-                ;;
-            EVENT:CONNECT_FAIL)
-                status_cn "硬件连接失败，查看日志 ${LOG_FILE}" "WARN"
-                ;;
-            EVENT:TIMEOUT)
-                status_cn "等待安全位姿超时（${SAFE_POSE_WAIT_TIMEOUT}s），请检查日志 ${LOG_FILE}" "WARN"
-                ;;
-            EVENT:ERROR:*)
-                status_cn "${line#EVENT:ERROR:}" "WARN"
-                ;;
-        esac
-    done < "${fifo}"
-    wait "${monitor_pid}" || true
-    local rc=$?
-    rm -f "${fifo}"
-    return "${rc}"
 }
 
 export ROBOT_DRIVER_LOG_FILE="${LOG_FILE}"
 
 LAUNCH_ARGS=("can_channel:=${CAN_CHANNEL}" "xyz_only_mode:=${XYZ_ONLY_MODE}" "zero_gravity_default:=${ZERO_GRAVITY_DEFAULT}")
+# 默认使用内置配置文件，除非显式传入 --params 覆盖
 if [[ -n "${PARAM_FILE}" ]]; then
     LAUNCH_ARGS+=("params:=${PARAM_FILE}")
 fi

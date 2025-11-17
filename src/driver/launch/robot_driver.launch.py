@@ -13,7 +13,11 @@ def generate_launch_description():
 
     can_arg = DeclareLaunchArgument('can_channel', default_value='can0', description='CAN interface name, e.g. can0')
     xyz_arg = DeclareLaunchArgument('xyz_only_mode', default_value='false', description='XYZ-only Cartesian mode flag')
-    zero_g_arg = DeclareLaunchArgument('zero_gravity_default', default_value='false', description='Enable zero gravity at startup')
+    zero_g_arg = DeclareLaunchArgument(
+        'zero_gravity_default',
+        default_value='true',
+        description='Enable zero gravity after initial safe pose',
+    )
     params_arg = DeclareLaunchArgument(
         'params',
         default_value=str(default_params),
