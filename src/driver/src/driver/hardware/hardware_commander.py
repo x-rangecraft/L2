@@ -206,84 +206,107 @@ class HardwareCommander:
 
     # ------------------------------------------------------------------ commands
     def set_zero_gravity(self, enabled: bool) -> bool:
+        # Short lock: check state and snapshot pointers/buffers
         with self._lock:
             if self._zero_gravity == enabled:
                 self._logger.debug('Zero-gravity already %s; skip', enabled)
                 return True
+            robot = self._robot
+            default_kp = self._default_kp.copy() if self._default_kp is not None else None
+            default_kd = self._default_kd.copy() if self._default_kd is not None else None
 
-            if not self._robot:
-                self._logger.info('Zero-gravity toggled to %s (simulation mode)', enabled)
+        if not robot:
+            self._logger.info('Zero-gravity toggled to %s (simulation mode)', enabled)
+            with self._lock:
                 self._zero_gravity = enabled
-                return True
+            return True
 
-            try:
-                if enabled:
-                    if not self._ensure_gain_snapshot():
-                        self._logger.warning('Unable to snapshot joint gains; zero-gravity aborted')
-                        return False
-                    if hasattr(self._robot, 'zero_torque_mode'):
-                        self._robot.zero_torque_mode()
-                    else:
-                        self._logger.warning('SDK robot missing zero_torque_mode; zero-gravity unavailable')
-                        return False
+        try:
+            if enabled:
+                if not self._ensure_gain_snapshot():
+                    self._logger.warning('Unable to snapshot joint gains; zero-gravity aborted')
+                    return False
+                if hasattr(robot, 'zero_torque_mode'):
+                    robot.zero_torque_mode()
                 else:
-                    if self._default_kp is not None and self._default_kd is not None:
-                        self._robot.update_kp_kd(self._default_kp.copy(), self._default_kd.copy())
-                    current = self._robot.get_joint_pos()
-                    self._robot.command_joint_pos(current)
+                    self._logger.warning('SDK robot missing zero_torque_mode; zero-gravity unavailable')
+                    return False
+            else:
+                if default_kp is not None and default_kd is not None:
+                    robot.update_kp_kd(default_kp, default_kd)
+                current = robot.get_joint_pos()
+                robot.command_joint_pos(current)
 
+            with self._lock:
                 self._zero_gravity = enabled
-                self._logger.info('Zero-gravity mode -> %s', enabled)
-                return True
-            except Exception as exc:
-                self._logger.error('Failed to set zero_gravity: %s', exc)
-                return False
+            self._logger.info('Zero-gravity mode -> %s', enabled)
+            return True
+        except Exception as exc:
+            self._logger.error('Failed to set zero_gravity: %s', exc)
+            return False
 
     def command_joint_positions(self, names: Iterable[str], values: Iterable[float], *, rate_limit: Optional[float] = None) -> None:
         mapping = dict(zip(names, values))
+        robot = None
+        current = None
+        joint_index: Optional[Dict[str, int]] = None
+
+        # Step 1: update local cache under lock (short critical section)
         with self._lock:
             self._apply_joint_delta(mapping, rate_limit or self._joint_limit_rate)
             self._logger.debug('Updated joints: %s', mapping)
-            if self._robot:
+
+            # Snapshot data needed for SDK call so the lock can be released before blocking
+            robot = self._robot
+            if robot:
                 try:
-                    # Build full joint array
-                    current = np.array(self._robot.get_joint_pos())
-                    for name, value in mapping.items():
-                        try:
-                            idx = self._joint_state.names.index(name)
-                            if idx < len(current):
-                                current[idx] = value
-                        except ValueError:
-                            self._logger.warning('Unknown joint %s', name)
-                    self._robot.command_joint_pos(current)
-                except Exception as exc:
-                    self._logger.warning('SDK command_joint_pos failed: %s', exc)
+                    current = np.array(robot.get_joint_pos())
+                    joint_index = dict(self._joint_index)
+                except Exception as exc:  # pragma: no cover
+                    self._logger.warning('SDK get_joint_pos failed: %s', exc)
+                    robot = None
+
+        # Step 2: perform potentially blocking SDK call without holding the lock
+        if robot is not None and current is not None and joint_index is not None:
+            try:
+                for name, value in mapping.items():
+                    idx = joint_index.get(name)
+                    if idx is None or idx >= len(current):
+                        self._logger.warning('Unknown joint %s', name)
+                        continue
+                    current[idx] = value
+                robot.command_joint_pos(current)
+            except Exception as exc:
+                self._logger.warning('SDK command_joint_pos failed: %s', exc)
 
     def command_cartesian_pose(self, pose: Pose, *, xyz_only: bool = False) -> None:
         """Command a Cartesian pose. This method will solve IK and command joint positions."""
+        # Minimal lock: store target pose and snapshot handles
         with self._lock:
             self._logger.info('Received cartesian command xyz_only=%s', xyz_only)
             self._ee_pose = deepcopy(pose)
+            robot = self._robot
+            kinematics = self._kinematics
 
-            if not self._robot or not self._kinematics:
-                self._logger.debug('No SDK/kinematics available, storing target only')
+        if not robot or not kinematics:
+            self._logger.debug('No SDK/kinematics available, storing target only')
+            return
+
+        try:
+            # Solve IK (reads robot state internally)
+            target = _pose_to_target(pose)
+            success, joint_solution = self.solve_ik(target, xyz_only=xyz_only)
+
+            if not success or joint_solution is None:
+                self._logger.warning('IK failed for target pose')
                 return
 
-            try:
-                # Solve IK
-                target = _pose_to_target(pose)
-                success, joint_solution = self.solve_ik(target, xyz_only=xyz_only)
-
-                if not success or joint_solution is None:
-                    self._logger.warning('IK failed for target pose')
-                    return
-
-                # Command the solved joint positions
-                joint_solution = self._clamp_joint_array(joint_solution)
-                self._robot.command_joint_pos(joint_solution)
-                self._logger.debug('Commanded cartesian pose via IK')
-            except Exception as exc:
-                self._logger.error('Failed to command cartesian pose: %s', exc)
+            # Clamp and command; clamping uses cached limits and is cheap
+            joint_solution = self._clamp_joint_array(joint_solution)
+            robot.command_joint_pos(joint_solution)
+            self._logger.debug('Commanded cartesian pose via IK')
+        except Exception as exc:
+            self._logger.error('Failed to command cartesian pose: %s', exc)
 
     def move_to_safe_pose(self) -> bool:
         """Move to SAFE_POSE. If hardware is present, ramp joints smoothly instead of a step."""

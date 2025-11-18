@@ -1,7 +1,9 @@
 """Safety watchdog for robot_driver."""
 from __future__ import annotations
 
+import threading
 import time
+from typing import Optional
 
 from std_msgs.msg import Empty
 
@@ -29,6 +31,8 @@ class CommandWatchdog:
         period = min(1.0, timeout_s / 3.0)
         self._timer = node.create_timer(period, self._tick)
         self._last_max_error = 0.0
+        self._worker_lock = threading.Lock()
+        self._worker_thread: Optional[threading.Thread] = None
 
     def _safe_pose_callback(self, success: bool, max_error: float) -> None:
         self._last_max_error = max_error
@@ -50,20 +54,37 @@ class CommandWatchdog:
         self.engage('safety_stop')
 
     def engage(self, reason: str) -> None:
-        """Execute safety sequence: exit zero-gravity if active, move to safe pose, wait, then re-enter zero-gravity."""
+        """Execute safety sequence without blocking the rclpy executor."""
         now = time.monotonic()
         if now - self._last_trigger < 1.0:
             return
         self._last_trigger = now
 
-        self._logger.warning('Safety engage triggered: %s', reason)
-        ok = self._motion_controller.safe_pose_sequence(
-            reason=reason,
-            exit_zero_gravity=True,
-            wait_time=self._safe_pose_wait_time,
-            tolerance=0.1,
-            reenable_zero_gravity=True,
-            on_complete=self._safe_pose_callback,
-        )
-        if not ok:
-            self._logger.warning('Safety sequence incomplete; zero_gravity may remain disabled')
+        with self._worker_lock:
+            if self._worker_thread and self._worker_thread.is_alive():
+                self._logger.info('Safety sequence already running; ignoring trigger %s', reason)
+                return
+            self._worker_thread = threading.Thread(
+                target=self._run_safety_sequence,
+                args=(reason,),
+                daemon=True,
+            )
+            self._worker_thread.start()
+
+    # ------------------------------------------------------------------ helpers
+    def _run_safety_sequence(self, reason: str) -> None:
+        try:
+            self._logger.warning('Safety engage triggered: %s', reason)
+            ok = self._motion_controller.safe_pose_sequence(
+                reason=reason,
+                exit_zero_gravity=True,
+                wait_time=self._safe_pose_wait_time,
+                tolerance=0.1,
+                reenable_zero_gravity=True,
+                on_complete=self._safe_pose_callback,
+            )
+            if not ok:
+                self._logger.warning('Safety sequence incomplete; zero_gravity may remain disabled')
+        finally:
+            with self._worker_lock:
+                self._worker_thread = None
