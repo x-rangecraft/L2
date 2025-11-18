@@ -280,7 +280,7 @@ class HardwareCommander:
                 self._logger.warning('SDK command_joint_pos failed: %s', exc)
 
     def command_cartesian_pose(self, pose: Pose, *, xyz_only: bool = False) -> None:
-        """Command a Cartesian pose. This method will solve IK and command joint positions."""
+        """Command a Cartesian pose. This method will solve IK and ramp joints smoothly."""
         # Minimal lock: store target pose and snapshot handles
         with self._lock:
             self._logger.info('Received cartesian command xyz_only=%s', xyz_only)
@@ -301,10 +301,24 @@ class HardwareCommander:
                 self._logger.warning('IK failed for target pose')
                 return
 
-            # Clamp and command; clamping uses cached limits and is cheap
+            # Clamp and ramp similar to SAFE_POSE to avoid step changes
             joint_solution = self._clamp_joint_array(joint_solution)
-            robot.command_joint_pos(joint_solution)
-            self._logger.debug('Commanded cartesian pose via IK')
+            ramp_ok, duration, steps, max_delta = self._ramp_from_current_to_target(
+                joint_solution,
+                label='cartesian_pose',
+                min_duration=0.25,
+                max_duration=5.0,
+            )
+            if ramp_ok:
+                self._logger.debug(
+                    'Commanded cartesian pose via IK (ramp %.2fs, %d steps, max Δ=%.3f rad)',
+                    duration,
+                    steps,
+                    max_delta,
+                )
+            else:
+                self._logger.warning('Cartesian pose ramp degraded; fall back to step move')
+                robot.command_joint_pos(joint_solution)
         except Exception as exc:
             self._logger.error('Failed to command cartesian pose: %s', exc)
 
@@ -345,36 +359,15 @@ class HardwareCommander:
                 continue
             target[idx] = self._clamp_joint_target(name, float(target_val))
 
-        delta = target - current
-        max_delta = float(np.max(np.abs(delta))) if delta.size else 0.0
-        if max_delta < 1e-4:
-            self._logger.info('Already at SAFE_POSE (max joint delta %.4f rad)', max_delta)
-            return True
-
-        # 依据关节位移决定时长：位移大 -> 时间长，位移小 -> 时间短
-        nominal_speed = max(self._joint_limit_rate, 0.2)  # rad/s 估计
-        computed_duration = max_delta / nominal_speed
-        ramp_duration = float(min(max(computed_duration, 0.4), 6.0))
-        target_hz = 40.0
-        ramp_steps = max(int(ramp_duration * target_hz), 10)
-        dt = ramp_duration / ramp_steps if ramp_steps else 0.02
-
-        for step in range(1, ramp_steps + 1):
-            alpha = step / ramp_steps
-            cmd = current + delta * alpha
-            try:
-                self._robot.command_joint_pos(cmd)
-            except Exception as exc:  # pragma: no cover
-                self._logger.warning('SAFE_POSE ramp step failed (%s); aborting ramp', exc)
-                break
-            time.sleep(dt)
-
-        # 更新内部状态缓存，便于后续 check_at_safe_pose 判断
-        with self._lock:
-            if len(self._joint_state.positions) == len(target):
-                self._joint_state.positions = target.tolist()
-                self._joint_state.velocities = [0.0] * len(target)
-                self._joint_state.efforts = [0.0] * len(target)
+        ramp_ok, ramp_duration, ramp_steps, max_delta = self._execute_joint_ramp(
+            current,
+            target,
+            label='SAFE_POSE',
+            min_duration=0.4,
+            max_duration=6.0,
+        )
+        if not ramp_ok:
+            return False
 
         self._logger.info(
             'Moved to SAFE_POSE (ramped %.2fs, %d steps, max Δ=%.3f rad) using %s',
@@ -383,8 +376,87 @@ class HardwareCommander:
             max_delta,
             self._safe_pose.source or '<unknown>',
         )
-        # TODO: Add position verification
         return True
+
+    def _ramp_from_current_to_target(
+        self,
+        target: np.ndarray,
+        *,
+        label: str,
+        min_duration: float,
+        max_duration: float,
+    ) -> Tuple[bool, float, int, float]:
+        robot = self._robot
+        if not robot:
+            return False, 0.0, 0, 0.0
+        try:
+            current = np.array(robot.get_joint_pos(), dtype=float)
+        except Exception as exc:
+            self._logger.warning('Failed to read current pose for %s: %s', label, exc)
+            return False, 0.0, 0, 0.0
+
+        return self._execute_joint_ramp(
+            current,
+            np.array(target, dtype=float),
+            label=label,
+            min_duration=min_duration,
+            max_duration=max_duration,
+        )
+
+    def _execute_joint_ramp(
+        self,
+        current: np.ndarray,
+        target: np.ndarray,
+        *,
+        label: str,
+        min_duration: float,
+        max_duration: float,
+        target_hz: float = 40.0,
+    ) -> Tuple[bool, float, int, float]:
+        robot = self._robot
+        if robot is None:
+            self._logger.debug('Joint ramp %s skipped: robot unavailable', label)
+            return False, 0.0, 0, 0.0
+
+        current = np.array(current, dtype=float)
+        target = np.array(target, dtype=float)
+        if current.shape != target.shape:
+            size = min(current.size, target.size)
+            current = current[:size]
+            target = target[:size]
+
+        delta = target - current
+        max_delta = float(np.max(np.abs(delta))) if delta.size else 0.0
+        if max_delta < 1e-4:
+            return True, 0.0, 0, max_delta
+
+        nominal_speed = max(self._joint_limit_rate, 0.2)
+        computed_duration = max_delta / nominal_speed
+        ramp_duration = float(min(max(computed_duration, min_duration), max_duration))
+        ramp_steps = max(int(ramp_duration * target_hz), 10)
+        dt = ramp_duration / ramp_steps if ramp_steps else 0.02
+
+        for step in range(1, ramp_steps + 1):
+            alpha = step / ramp_steps
+            cmd = current + delta * alpha
+            try:
+                robot.command_joint_pos(cmd)
+            except Exception as exc:
+                self._logger.warning('%s ramp step failed (%s); aborting ramp', label, exc)
+                return False, ramp_duration, step, max_delta
+            if step < ramp_steps:
+                time.sleep(dt)
+
+        with self._lock:
+            limit = min(len(self._joint_state.positions), len(target))
+            for i in range(limit):
+                self._joint_state.positions[i] = float(target[i])
+            for i in range(len(self._joint_state.velocities)):
+                self._joint_state.velocities[i] = 0.0
+            for i in range(len(self._joint_state.efforts)):
+                self._joint_state.efforts[i] = 0.0
+
+        return True, ramp_duration, ramp_steps, max_delta
 
     def check_at_safe_pose(self, tolerance: float = 0.05) -> bool:
         """Check if robot is at SAFE_POSE within tolerance using fresh telemetry."""

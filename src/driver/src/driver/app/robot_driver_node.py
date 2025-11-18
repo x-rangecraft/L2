@@ -130,10 +130,18 @@ class RobotDriverNode(Node):
 
     # ------------------------------------------------------------------ subscribers
     def _on_robot_command(self, msg: PoseStamped) -> None:
-        self._motion_controller.handle_robot_command(msg)
+        try:
+            self._motion_controller.handle_robot_command(msg)
+        except Exception as exc:  # pragma: no cover - defensive guard
+            self._logger.error('robot_command handler failed: %s', exc)
+            self.get_logger().error(traceback.format_exc())
 
     def _on_joint_command(self, msg: JointState) -> None:
-        self._motion_controller.handle_joint_command(msg)
+        try:
+            self._motion_controller.handle_joint_command(msg)
+        except Exception as exc:  # pragma: no cover - defensive guard
+            self._logger.error('joint_command handler failed: %s', exc)
+            self.get_logger().error(traceback.format_exc())
 
     # ------------------------------------------------------------------ services
     def _handle_zero_gravity(self, request: SetBool.Request, response: SetBool.Response):

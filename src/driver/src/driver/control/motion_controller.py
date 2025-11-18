@@ -19,6 +19,15 @@ from driver.utils.logging_utils import get_logger
 
 
 class MotionController:
+    # Approximate Cartesian workspace in base_link frame (meters), derived from
+    # yam.urdf joint limits sampling. Used for basic input validation only.
+    _WORKSPACE_X_MIN = -0.61
+    _WORKSPACE_X_MAX = 0.60
+    _WORKSPACE_Y_MIN = -0.59
+    _WORKSPACE_Y_MAX = 0.61
+    _WORKSPACE_Z_MIN = -0.37
+    _WORKSPACE_Z_MAX = 0.72
+
     def __init__(self, params: DriverParameters, commander: HardwareCommander):
         self._params = params
         self._commander = commander
@@ -44,6 +53,11 @@ class MotionController:
         """Handle Cartesian pose command. Automatically exits zero-gravity if needed."""
         self._logger.debug('Got /robot_command: frame=%s', msg.header.frame_id)
 
+        # Basic parameter validation (format + numeric range)
+        if not self._validate_robot_command(msg):
+            self._logger.error('Rejected /robot_command due to invalid parameters')
+            return
+
         # Auto-exit zero-gravity mode if currently enabled
         if self._commander.get_zero_gravity():
             self._logger.info('Auto-exiting zero-gravity mode for robot_command')
@@ -55,6 +69,11 @@ class MotionController:
         self._preempt_event.set()  # Signal any ongoing motion to preempt
 
     def handle_joint_command(self, msg: JointState) -> None:
+        # Basic parameter validation (format + numeric range)
+        if not self._validate_joint_command(msg):
+            self._logger.error('Rejected /joint_command due to invalid parameters')
+            return
+
         # Auto-exit zero-gravity mode if currently enabled
         if self._commander.get_zero_gravity():
             self._logger.info('Auto-exiting zero-gravity mode for joint_command')
@@ -144,6 +163,142 @@ class MotionController:
         )
 
     # ------------------------------------------------------------------ helpers
+    def _validate_robot_command(self, msg: PoseStamped) -> bool:
+        """Validate PoseStamped for /robot_driver/robot_command.
+
+        Checks:
+        - position x/y/z must be finite and within configured workspace bounds;
+        - orientation components must be finite and form a non-degenerate quaternion;
+        - if xyz_only_mode is disabled, quaternion norm must be in a sane range.
+        """
+        pose = msg.pose
+        p = pose.position
+        q = pose.orientation
+
+        # Position must be finite
+        if not all(math.isfinite(v) for v in (p.x, p.y, p.z)):
+            self._logger.error(
+                'robot_command position contains non-finite values: x=%.3f, y=%.3f, z=%.3f',
+                p.x,
+                p.y,
+                p.z,
+            )
+            return False
+
+        # Position must lie within approximate workspace bounds
+        if not (self._WORKSPACE_X_MIN <= p.x <= self._WORKSPACE_X_MAX):
+            self._logger.error(
+                'robot_command x=%.3f outside workspace [%.2f, %.2f]',
+                p.x,
+                self._WORKSPACE_X_MIN,
+                self._WORKSPACE_X_MAX,
+            )
+            return False
+        if not (self._WORKSPACE_Y_MIN <= p.y <= self._WORKSPACE_Y_MAX):
+            self._logger.error(
+                'robot_command y=%.3f outside workspace [%.2f, %.2f]',
+                p.y,
+                self._WORKSPACE_Y_MIN,
+                self._WORKSPACE_Y_MAX,
+            )
+            return False
+        if not (self._WORKSPACE_Z_MIN <= p.z <= self._WORKSPACE_Z_MAX):
+            self._logger.error(
+                'robot_command z=%.3f outside workspace [%.2f, %.2f]',
+                p.z,
+                self._WORKSPACE_Z_MIN,
+                self._WORKSPACE_Z_MAX,
+            )
+            return False
+
+        # Orientation must be finite
+        q_vals = (q.x, q.y, q.z, q.w)
+        if not all(math.isfinite(v) for v in q_vals):
+            self._logger.error(
+                'robot_command orientation contains non-finite values: '
+                'x=%.6f, y=%.6f, z=%.6f, w=%.6f',
+                q.x,
+                q.y,
+                q.z,
+                q.w,
+            )
+            return False
+
+        # Quaternion norm must be non-zero; allow a broad range and let commander normalize.
+        norm_sq = sum(v * v for v in q_vals)
+        if norm_sq < 1e-6:
+            self._logger.error('robot_command orientation is near zero quaternion; rejecting')
+            return False
+
+        # When xyz_only_mode is disabled we expect a reasonably normalized quaternion.
+        if not self._params.xyz_only_mode and not (0.25 <= norm_sq <= 4.0):
+            self._logger.error(
+                'robot_command orientation norm^2=%.6f out of expected range [0.25, 4.0]',
+                norm_sq,
+            )
+            return False
+
+        return True
+
+    def _validate_joint_command(self, msg: JointState) -> bool:
+        """Validate JointState for /robot_driver/joint_command.
+
+        Checks:
+        - required field for current mode (position/velocity/effort) is present;
+        - name list non-empty and matches value list length;
+        - all values are finite;
+        - all joint names exist in current joint state.
+        """
+        mode = self._params.joint_command.mode
+        if mode == 'position':
+            buffer = list(msg.position or [])
+            field_name = 'position'
+        elif mode == 'velocity':
+            buffer = list(msg.velocity or [])
+            field_name = 'velocity'
+        elif mode == 'effort':
+            buffer = list(msg.effort or [])
+            field_name = 'effort'
+        else:
+            self._logger.error('Unknown joint_command mode: %s', mode)
+            return False
+
+        if not msg.name:
+            self._logger.error('joint_command missing joint names')
+            return False
+        if not buffer:
+            self._logger.error('joint_command missing %s values for mode %s', field_name, mode)
+            return False
+        if len(msg.name) != len(buffer):
+            self._logger.error(
+                'joint_command name/value length mismatch: names=%d, %s=%d',
+                len(msg.name),
+                field_name,
+                len(buffer),
+            )
+            return False
+
+        # Values must be finite
+        for name, value in zip(msg.name, buffer):
+            if not math.isfinite(value):
+                self._logger.error(
+                    'joint_command %s for joint %s is non-finite: %r',
+                    field_name,
+                    name,
+                    value,
+                )
+                return False
+
+        # All joints must be known
+        state = self._commander.read_joint_state()
+        known = set(state.names)
+        unknown = [name for name in msg.name if name not in known]
+        if unknown:
+            self._logger.error('joint_command contains unknown joints: %s', ', '.join(unknown))
+            return False
+
+        return True
+
     def _extract_joint_values(self, msg: JointState) -> Dict[str, float]:
         mapping: Dict[str, float] = {}
         buffer: Iterable[float]
@@ -157,7 +312,14 @@ class MotionController:
         else:
             return mapping
         for name, value in zip(msg.name, buffer):
-            mapping[name] = float(value)
+            try:
+                mapping[name] = float(value)
+            except (TypeError, ValueError):
+                self._logger.warning(
+                    'Skipping non-numeric joint_command value for %s: %r',
+                    name,
+                    value,
+                )
         return mapping
 
     def _apply_trajectory_point(self, joint_names: list[str], point: JointTrajectoryPoint) -> None:

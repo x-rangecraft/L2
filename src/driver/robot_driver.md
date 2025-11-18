@@ -41,7 +41,7 @@
 ### 订阅的 Topic
 | 话题 | 类型 | 说明 |
 | --- | --- | --- |
-| `/robot_driver/robot_command` | `geometry_msgs/PoseStamped` | 机械臂基坐标系（默认 `base_link`）下的笛卡尔目标，`Pose.position` 为 XYZ，`orientation` 提供单位四元数；驱动执行 IK → 关节插值。 |
+| `/robot_driver/robot_command` | `geometry_msgs/PoseStamped` | 机械臂基坐标系（默认 `base_link`）下的笛卡尔目标，`Pose.position` 为 XYZ，`orientation` 提供单位四元数；驱动执行 IK → 关节插值，并参考 SAFE_POSE 同款 ramp 逻辑自动按位移估算 0.25–5 s 的平滑运动。 |
 | `/robot_driver/safety_stop` | `std_msgs/Empty` | 收到立即抢占当前运动、执行安全归位，但不切换零重力模式。 |
 | `/robot_driver/joint_command` | `sensor_msgs/JointState` | 直接指定一个或多个关节位置/速度/力矩；用于调试、标定或单轴测试，节点始终订阅该话题。 |
 
@@ -60,7 +60,17 @@ pose:
 
 - `frame_id` 默认 `base_link`，若使用其他坐标系需在 TF 中可解析；
 - orientation 需是规范化四元数，若只关注 XYZ 可启用 `xyz_only_mode`，节点将沿用当前姿态；
-- 上层以 10–30 Hz 推送命令即可触发连续插值，最新命令会抢占旧命令。
+- `position`（x/y/z）可达范围 *（基于 `robot_description.yaml` 与 `yam.urdf` 在关节极限内采样得到，仅反映几何工作空间，未考虑自碰撞与环境约束）*：
+  - x ≈ `[-0.61, 0.60]` m，y ≈ `[-0.59, 0.61]` m，z ≈ `[-0.37, 0.72]` m；
+  - 等价地，末端到 `base_link` 原点的距离 r ≈ `[0.04, 0.73]` m；
+  - 驱动当前不会对 x/y/z 再做软件限幅，若目标超出可达区或对应姿态无 IK 解，将在日志中打印 `IK failed for target pose`，机械臂保持不动；
+  - 实际安全工作空间应由上层（如 `move_controller`）结合自碰撞、工装/桌面等因素进一步收紧，一般建议只在机器人底座周围“安全盒”内规划目标点；
+- `orientation` 取值说明：
+  - 使用单位四元数 `{x, y, z, w}` 表示姿态，四个分量数值通常落在 `[-1.0, 1.0]` 区间内；
+  - 驱动在 `_quaternion_to_matrix()` 中会自动对四元数做归一化（除非传入全 0），因此只要是合法四元数即可；
+  - 代码层面无额外“角度范围”限制，真正的限制来自关节位置极限与几何可达性——某些位置 + 姿态组合虽然消息可以发出，但可能求不出 IK 解；
+  - 若在配置中启用 `xyz_only_mode=true`，则会忽略消息中的 `orientation`，只修改末端位置，姿态沿用当前值。
+- 驱动会根据“当前关节-目标关节”最大夹角自动算 ramp 速度（同 `/robot_driver/safety_stop`），无需填写时间戳；若仍以 10–30 Hz 推送命令，最新命令会抢占旧命令。
 
 `/robot_driver/joint_command` 示例（position 模式）：
 
