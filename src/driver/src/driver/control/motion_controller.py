@@ -39,6 +39,11 @@ class MotionController:
         self._running = True
         self._joint_ramp_thread: Optional[threading.Thread] = None
         self._joint_ramp_stop = threading.Event()
+        # Dedicated worker for blocking Cartesian moves so ROS timers stay responsive.
+        # A per-command stop event allows new /robot_command messages to preempt
+        # the previous ramp without blocking the ROS executor.
+        self._robot_command_thread: Optional[threading.Thread] = None
+        self._robot_command_stop = threading.Event()
 
     # ------------------------------------------------------------------ getters
     @property
@@ -58,14 +63,41 @@ class MotionController:
             self._logger.error('Rejected /robot_command due to invalid parameters')
             return
 
-        # Auto-exit zero-gravity mode if currently enabled
-        if self._commander.get_zero_gravity():
-            self._logger.info('Auto-exiting zero-gravity mode for robot_command')
-            self._commander.set_zero_gravity(False)
-            time.sleep(0.1)  # Brief pause to let mode switch settle
+        # Heavy IK + joint ramp must not block the rclpy executor thread; otherwise
+        # timers (including /joint_states publisher) are stalled. Mirror the
+        # joint_command design by offloading the actual motion to a worker thread.
+        # If there is an ongoing cartesian ramp, signal its stop event so the
+        # internal ramp loop can exit early and let this new command take over.
+        if self._robot_command_thread and self._robot_command_thread.is_alive():
+            self._logger.info('Preempting previous /robot_command with new target')
+            self._robot_command_stop.set()
 
-        self._commander.command_cartesian_pose(msg.pose, xyz_only=self._params.xyz_only_mode)
+        pose = msg.pose
+        stop_event = threading.Event()
+        self._robot_command_stop = stop_event
+
+        # Record activity at dispatch time so the watchdog's "time since last
+        # command" reflects command heartbeats rather than ramp completion.
         self._mark_activity()
+
+        def _worker():
+            try:
+                # Auto-exit zero-gravity mode if currently enabled
+                if self._commander.get_zero_gravity():
+                    self._logger.info('Auto-exiting zero-gravity mode for robot_command')
+                    self._commander.set_zero_gravity(False)
+                    time.sleep(0.1)  # Brief pause to let mode switch settle
+
+                self._commander.command_cartesian_pose(
+                    pose,
+                    xyz_only=self._params.xyz_only_mode,
+                    stop_event=stop_event,
+                )
+            except Exception as exc:  # pragma: no cover - defensive guard
+                self._logger.error('robot_command worker failed: %s', exc)
+
+        self._robot_command_thread = threading.Thread(target=_worker, daemon=True)
+        self._robot_command_thread.start()
         self._preempt_event.set()  # Signal any ongoing motion to preempt
 
     def handle_joint_command(self, msg: JointState) -> None:

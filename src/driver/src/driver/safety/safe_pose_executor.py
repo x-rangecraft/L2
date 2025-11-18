@@ -46,13 +46,21 @@ def run_safe_pose_sequence(
         commander.set_zero_gravity(False)
         time.sleep(0.2)
 
+    # 统一的 SAFE_POSE 执行入口：先尝试让机械臂朝安全位姿运动
+    logger.info(
+        '正在回到安全位姿 (SAFE_POSE sequence started), reason=%s',
+        reason or '<unknown>',
+    )
     moved = halt_and_safe(reason)
     if not moved:
+        logger.warning('SAFE_POSE movement did not complete; skipping pose verification.')
         if on_complete:
             on_complete(False, float('inf'))
         return False
 
     if wait_time > 0:
+        # 等待一小段时间，避免还在插值过程就开始做 SAFE_POSE 校验
+        logger.info('正在校验安全位姿，等待机械臂稳定 (%.1fs)...', wait_time)
         logger.info('Waiting %.1fs for SAFE_POSE arrival', wait_time)
         time.sleep(wait_time)
 
@@ -67,6 +75,9 @@ def run_safe_pose_sequence(
         if on_complete:
             on_complete(False, max_err)
         return False
+
+    # 校验通过，确认已经到达 SAFE_POSE
+    logger.info('已经回到安全位姿 (max |Δ|=%.3f rad)', max_err)
 
     if reenable_zero_gravity:
         logger.info('Confirmed arrival at SAFE_POSE, entering zero-gravity mode')

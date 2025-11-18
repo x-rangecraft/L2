@@ -279,7 +279,13 @@ class HardwareCommander:
             except Exception as exc:
                 self._logger.warning('SDK command_joint_pos failed: %s', exc)
 
-    def command_cartesian_pose(self, pose: Pose, *, xyz_only: bool = False) -> None:
+    def command_cartesian_pose(
+        self,
+        pose: Pose,
+        *,
+        xyz_only: bool = False,
+        stop_event: Optional[threading.Event] = None,
+    ) -> None:
         """Command a Cartesian pose. This method will solve IK and ramp joints smoothly."""
         # Minimal lock: store target pose and snapshot handles
         with self._lock:
@@ -303,11 +309,12 @@ class HardwareCommander:
 
             # Clamp and ramp similar to SAFE_POSE to avoid step changes
             joint_solution = self._clamp_joint_array(joint_solution)
-            ramp_ok, duration, steps, max_delta = self._ramp_from_current_to_target(
+            ramp_ok, duration, steps, max_delta, preempted = self._ramp_from_current_to_target(
                 joint_solution,
                 label='cartesian_pose',
                 min_duration=0.25,
                 max_duration=5.0,
+                stop_event=stop_event,
             )
             if ramp_ok:
                 self._logger.debug(
@@ -316,6 +323,10 @@ class HardwareCommander:
                     steps,
                     max_delta,
                 )
+            elif preempted:
+                # Motion was intentionally preempted by a newer command; do not
+                # force a final step move to the old target.
+                self._logger.info('Cartesian pose ramp preempted; skipping fallback step move')
             else:
                 self._logger.warning('Cartesian pose ramp degraded; fall back to step move')
                 robot.command_joint_pos(joint_solution)
@@ -359,7 +370,7 @@ class HardwareCommander:
                 continue
             target[idx] = self._clamp_joint_target(name, float(target_val))
 
-        ramp_ok, ramp_duration, ramp_steps, max_delta = self._execute_joint_ramp(
+        ramp_ok, ramp_duration, ramp_steps, max_delta, _ = self._execute_joint_ramp(
             current,
             target,
             label='SAFE_POSE',
@@ -385,15 +396,16 @@ class HardwareCommander:
         label: str,
         min_duration: float,
         max_duration: float,
-    ) -> Tuple[bool, float, int, float]:
+        stop_event: Optional[threading.Event] = None,
+    ) -> Tuple[bool, float, int, float, bool]:
         robot = self._robot
         if not robot:
-            return False, 0.0, 0, 0.0
+            return False, 0.0, 0, 0.0, False
         try:
             current = np.array(robot.get_joint_pos(), dtype=float)
         except Exception as exc:
             self._logger.warning('Failed to read current pose for %s: %s', label, exc)
-            return False, 0.0, 0, 0.0
+            return False, 0.0, 0, 0.0, False
 
         return self._execute_joint_ramp(
             current,
@@ -401,6 +413,7 @@ class HardwareCommander:
             label=label,
             min_duration=min_duration,
             max_duration=max_duration,
+            stop_event=stop_event,
         )
 
     def _execute_joint_ramp(
@@ -412,11 +425,12 @@ class HardwareCommander:
         min_duration: float,
         max_duration: float,
         target_hz: float = 40.0,
-    ) -> Tuple[bool, float, int, float]:
+        stop_event: Optional[threading.Event] = None,
+    ) -> Tuple[bool, float, int, float, bool]:
         robot = self._robot
         if robot is None:
             self._logger.debug('Joint ramp %s skipped: robot unavailable', label)
-            return False, 0.0, 0, 0.0
+            return False, 0.0, 0, 0.0, False
 
         current = np.array(current, dtype=float)
         target = np.array(target, dtype=float)
@@ -428,7 +442,7 @@ class HardwareCommander:
         delta = target - current
         max_delta = float(np.max(np.abs(delta))) if delta.size else 0.0
         if max_delta < 1e-4:
-            return True, 0.0, 0, max_delta
+            return True, 0.0, 0, max_delta, False
 
         nominal_speed = max(self._joint_limit_rate, 0.2)
         computed_duration = max_delta / nominal_speed
@@ -436,16 +450,26 @@ class HardwareCommander:
         ramp_steps = max(int(ramp_duration * target_hz), 10)
         dt = ramp_duration / ramp_steps if ramp_steps else 0.02
 
+        preempted = False
         for step in range(1, ramp_steps + 1):
+            if stop_event is not None and stop_event.is_set():
+                self._logger.info('%s ramp preempted (%d/%d steps)', label, step - 1, ramp_steps)
+                preempted = True
+                break
             alpha = step / ramp_steps
             cmd = current + delta * alpha
             try:
                 robot.command_joint_pos(cmd)
             except Exception as exc:
                 self._logger.warning('%s ramp step failed (%s); aborting ramp', label, exc)
-                return False, ramp_duration, step, max_delta
+                return False, ramp_duration, step, max_delta, False
             if step < ramp_steps:
                 time.sleep(dt)
+
+        if preempted:
+            # Do not overwrite cached state with full target; let subsequent
+            # telemetry refresh reflect the partially executed motion.
+            return False, ramp_duration, step - 1, max_delta, True
 
         with self._lock:
             limit = min(len(self._joint_state.positions), len(target))
@@ -456,7 +480,7 @@ class HardwareCommander:
             for i in range(len(self._joint_state.efforts)):
                 self._joint_state.efforts[i] = 0.0
 
-        return True, ramp_duration, ramp_steps, max_delta
+        return True, ramp_duration, ramp_steps, max_delta, False
 
     def check_at_safe_pose(self, tolerance: float = 0.05) -> bool:
         """Check if robot is at SAFE_POSE within tolerance using fresh telemetry."""

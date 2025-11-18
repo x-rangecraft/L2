@@ -147,6 +147,43 @@ cleanup_processes() {
     pkill -f "ros2 launch robot_driver robot_driver.launch.py" 2>/dev/null || true
 }
 
+safe_shutdown_before_kill() {
+    # Best-effort: request SAFE_POSE via /robot_driver/safety_stop before stopping supervisor.
+    # 如果任一步失败（无 PID、ROS 环境不可用、缺少 ros2 等），仅记录日志并继续原有关机流程。
+    local pid
+    if ! pid="$(read_pid_file)"; then
+        log "safe_shutdown: PID file ${PID_FILE} not found, skip SAFE_POSE request."
+        return 0
+    fi
+    if ! kill -0 "${pid}" >/dev/null 2>&1; then
+        log "safe_shutdown: PID ${pid} not running, skip SAFE_POSE request."
+        return 0
+    fi
+
+    # 尝试加载 ROS 环境；失败则不影响后续 stop 行为。
+    if ! try_source_ros_env >/dev/null 2>&1; then
+        log "safe_shutdown: Failed to source ROS 2 env, skipping SAFE_POSE request."
+        return 0
+    fi
+
+    if ! command -v ros2 >/dev/null 2>&1; then
+        log "safe_shutdown: 'ros2' CLI not found, skipping SAFE_POSE request."
+        return 0
+    fi
+
+    status_cn "停止 robot_driver 前：先通过 /robot_driver/safety_stop 请求回到 SAFE_POSE" "INFO"
+    if ! ros2 topic pub /robot_driver/safety_stop std_msgs/msg/Empty "{}" --once >/dev/null 2>&1; then
+        log "safe_shutdown: Failed to publish /robot_driver/safety_stop, continuing with shutdown."
+        return 0
+    fi
+
+    # 等待一小段时间，让 SAFE_POSE 序列有机会完成（内部已带 wait_time 与校验）。
+    local wait_sec=10
+    log "safe_shutdown: Waiting ${wait_sec}s for SAFE_POSE sequence before stopping supervisor PID ${pid}"
+    sleep "${wait_sec}"
+    return 0
+}
+
 stop_daemon() {
     local pid
     if ! pid="$(read_pid_file)"; then
@@ -397,6 +434,22 @@ source_ros_env() {
     fi
 }
 
+try_source_ros_env() {
+    # 与 source_ros_env 类似，但失败时只打 WARNING，不退出脚本；用于停机安全路径。
+    local sourced=0
+    if source_if_exists "${ROS_SETUP}"; then
+        sourced=1
+    fi
+    if source_if_exists "${INSTALL_SETUP}"; then
+        sourced=1
+    fi
+    if [[ ${sourced} -eq 0 ]]; then
+        log "WARNING: Failed to source ROS 2 environment; skipping ROS-based SAFE_POSE request."
+        return 1
+    fi
+    return 0
+}
+
 resolve_path() {
     local target="$1"
     if [[ -z "$target" ]]; then
@@ -522,6 +575,9 @@ if [[ ${DAEMON_CHILD} -eq 1 ]]; then
 fi
 
 if [[ ${STOP_ONLY} -eq 1 ]]; then
+    # 在真正停止 supervisor 前，先向运行中的 robot_driver 节点发送一次 /robot_driver/safety_stop，
+    # 尝试回到 SAFE_POSE，避免悬停姿态下直接断控导致“掉下去”。
+    safe_shutdown_before_kill || true
     if stop_daemon; then
         exit 0
     else
