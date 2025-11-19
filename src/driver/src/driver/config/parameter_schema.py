@@ -41,7 +41,6 @@ class DriverParameters:
     diagnostics_topic: str
     follow_joint_trajectory_action: str
     zero_gravity_service: str
-    reset_can_service: str
     can_reset_script: str
     joint_command: JointCommandConfig
     enable_joint_velocity_fuse: bool
@@ -104,7 +103,6 @@ def declare_and_get_parameters(node: Node) -> DriverParameters:
             'follow_joint_trajectory_action', '/robot_driver/action/follow_joint_trajectory'
         ),
         zero_gravity_service=_declare('zero_gravity_service', '/robot_driver/service/zero_gravity'),
-        reset_can_service=_declare('reset_can_service', '/robot_driver/service/reset_can'),
         can_reset_script=_declare('can_reset_script', ''),
         joint_command=joint_cfg,
         enable_joint_velocity_fuse=bool(_declare('enable_joint_velocity_fuse', False)),

@@ -85,11 +85,6 @@ class RobotDriverNode(Node):
             self._params.zero_gravity_service,
             self._handle_zero_gravity,
         )
-        self._reset_can_srv = self.create_service(
-            Trigger,
-            self._params.reset_can_service,
-            self._handle_reset_can,
-        )
         self._self_check_srv = self.create_service(
             Trigger,
             '/robot_driver/service/self_check',
@@ -151,16 +146,6 @@ class RobotDriverNode(Node):
             response.message = f'zero_gravity -> {request.data}'
         else:
             response.message = 'Failed to toggle zero_gravity (see logs)'
-        return response
-
-    def _handle_reset_can(self, _request: Trigger.Request, response: Trigger.Response):
-        try:
-            self._commander.reset_can()
-            response.success = True
-            response.message = 'CAN interface reset'
-        except Exception as exc:
-            response.success = False
-            response.message = str(exc)
         return response
 
     def _handle_self_check(self, _request: Trigger.Request, response: Trigger.Response):

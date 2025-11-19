@@ -19,7 +19,6 @@ robot_driver:
     diagnostics_topic: /robot_driver/diagnostics
     follow_joint_trajectory_action: /robot_driver/action/follow_joint_trajectory
     zero_gravity_service: /robot_driver/service/zero_gravity
-    reset_can_service: /robot_driver/service/reset_can
     can_reset_script: ""
     joint_command_mode: position
     joint_command_rate_limit: 0.5

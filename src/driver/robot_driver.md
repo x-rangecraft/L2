@@ -4,7 +4,7 @@
 
 ## 背景
 - `robot_driver_node` 位于 `driver/src/robot_driver_node.py`（仓库路径 `L2/src/driver/src/`），承担机械臂/夹爪等执行器的底层通信、状态采集与命令下发。
-- 上层模块（move_controller、skill、app 等）依赖该节点提供稳定的实时接口。
+- 上层模块（robot_skill、skill、app 等）依赖该节点提供稳定的实时接口。
 
 ## 节点职责（目标）
 1. 发布 `/joint_states`
@@ -64,7 +64,7 @@ pose:
   - x ≈ `[-0.61, 0.60]` m，y ≈ `[-0.59, 0.61]` m，z ≈ `[-0.37, 0.72]` m；
   - 等价地，末端到 `base_link` 原点的距离 r ≈ `[0.04, 0.73]` m；
   - 驱动当前不会对 x/y/z 再做软件限幅，若目标超出可达区或对应姿态无 IK 解，将在日志中打印 `IK failed for target pose`，机械臂保持不动；
-  - 实际安全工作空间应由上层（如 `move_controller`）结合自碰撞、工装/桌面等因素进一步收紧，一般建议只在机器人底座周围“安全盒”内规划目标点；
+  - 实际安全工作空间应由上层（如 `robot_skill`）结合自碰撞、工装/桌面等因素进一步收紧，一般建议只在机器人底座周围"安全盒"内规划目标点；
 - `orientation` 取值说明：
   - 使用单位四元数 `{x, y, z, w}` 表示姿态，四个分量数值通常落在 `[-1.0, 1.0]` 区间内；
   - 驱动在 `_quaternion_to_matrix()` 中会自动对四元数做归一化（除非传入全 0），因此只要是合法四元数即可；
@@ -91,14 +91,52 @@ effort: []
 ### 服务与动作
 | 名称 | 类型 | 用途 | 调用示例 |
 | --- | --- | --- | --- |
-| `/robot_driver/service/zero_gravity` | Service (`std_srvs/SetBool`) | 打开/关闭零重力模式。 | `ros2 service call /robot_driver/service/zero_gravity std_srvs/srv/SetBool "{data: true}"` |
-| `/robot_driver/service/reset_can` | Service (`std_srvs/Trigger`) | 手动触发 CAN 复位并重新初始化 commander。 | `ros2 service call /robot_driver/service/reset_can std_srvs/srv/Trigger {}` |
-| `/robot_driver/action/follow_joint_trajectory` | Action (`control_msgs/action/FollowJointTrajectory`) | 承载标准关节轨迹控制，供 MoveIt/controller_manager 直接发送轨迹。 | `ros2 action send_goal /robot_driver/action/follow_joint_trajectory control_msgs/action/FollowJointTrajectory "{goal: {trajectory: ...}}"` |
+| `/robot_driver/service/zero_gravity` | Service (`std_srvs/SetBool`) | 最底层零重力开关，快速切换，成功与否在响应中返回。 | `ros2 service call /robot_driver/service/zero_gravity std_srvs/srv/SetBool "{data: true}"` |
+| `/robot_driver/action/joint` | Action (`control_msgs/action/FollowJointTrajectory`) | 最底层关节控制，单轴或多轴都可，通过 joint_names + trajectory 下发；带反馈/取消。 | `ros2 action send_goal /robot_driver/action/joint control_msgs/action/FollowJointTrajectory "{trajectory: {joint_names: ['joint1'], points: [{positions: [0.5], time_from_start: {sec: 1}}]}}" --feedback` |
+| `/robot_driver/action/safety_pose` | Action | 包装：停机→回 SAFE_POSE→等待稳定→校验，可选重新开零重力；内部复用 `/robot_driver/action/joint`。 | 设计中 |
+| `/robot_driver/action/reset` | Action | 编排：调用 `safety_pose` 成功后再调用 `zero_gravity`，实现“回安全位并开零重力”。 | 设计中 |
+| `/robot_driver/action/robot` | Action | 笛卡尔控制：空间位姿 → IK → 生成关节轨迹 → 交给 `/robot_driver/action/joint` 执行。 | 设计中 |
+| `/robot_driver/action/gripper` | Action (`l2_msgs/action/GripperCommand`) | 夹爪/末端执行器控制，底层同样复用关节执行器（单通道或映射到 joint action）。支持夹紧/松开/保持力并返回实时状态。 | `ros2 action send_goal /robot_driver/action/gripper l2_msgs/action/GripperCommand "{mode: 'grip', max_force: 40.0, timeout: {sec: 3}}" --feedback` |
 
 **Action 使用方法**
-1. 规划器根据 `/joint_states` 的关节命名生成 `trajectory_msgs/JointTrajectory`；
-2. 调用 `/robot_driver/action/follow_joint_trajectory` 发送目标（可使用 `ros2 action send_goal` 或 controller_manager）；
-3. 驱动节点按 `time_from_start` 执行，并在结果里返回 `SUCCESS/ABORTED` 与失败原因；若过程中触发 `/robot_driver/safety_stop`、心跳超时或零重力切换，action 会立刻 `ABORTED` 并记录日志。
+- `/robot_driver/robot_command_action`：客户端把目标姿态、速度/力阈配置打包成 goal，使用 `--feedback` 可实时获取当前末端 pose、进度与接触标志；`ros2 action send_goal /robot_driver/robot_command_action ... --feedback` 适合快速验证；取消 goal 会触发驱动抢占并执行安全停车。
+- `/robot_driver/gripper_command_action`：将夹爪动作（闭合/张开/保持力度）封成 goal，可设定最大力、等待行程百分比等，反馈中会推送当前位置与是否夹到物体；一旦检测到接触或达到最大力，Action 立即返回结果。
+
+> 规划中将以 `/robot_driver/action/robot` 取代 `/robot_driver/robot_command_action`，两者可在过渡期兼容，底层都复用 `/robot_driver/action/joint`。
+
+### 接口分层（结构调整规划）
+底层暴露 *两个* 原语接口，其他 Topic/Action 均在其之上包装：
+
+1. `ZeroGravityService` → `/robot_driver/service/zero_gravity`
+   - 职责：快速切换零重力/恢复力矩；同步返回结果。
+2. `JointMotionAction` → `/robot_driver/action/joint`
+   - 职责：统一的关节轨迹执行器，兼容单个或多个关节；提供反馈/取消，内部串行化 commander 的 `command_joint_positions` 调用。
+
+在此基础上构建上层接口：
+
+1. `/robot_driver/action/safety_pose`
+   - 流程：`STOP` → 调用 `JointMotionAction` 运行 SAFE_POSE 轨迹 → 等待稳定 → 校验误差，可选恢复零重力。
+   - 用途：看门狗、人工触发、测试脚本，共享同一执行器保证互斥。
+2. `/robot_driver/action/reset`
+   - 流程：发送 `safety_pose` goal 成功 → 调用 `ZeroGravityService` 重新开启零重力。
+   - 用途：安全停机后的“回位+漂浮”一站式指令。
+3. `/robot_driver/action/robot`
+   - 流程：接收笛卡尔目标 → IK 求解 → 生成关节轨迹 → 调用 `JointMotionAction`。
+   - 用途：高层运动接口，便于 MoveIt/脚本统一调用。
+4. `/robot_driver/joint_command`（Topic）
+   - 实现：对 `JointMotionAction` 的轻量封装，单点命令或微调由内部生成短轨迹后转发。
+5. `/robot_driver/robot_command`（Topic）
+   - 实现：上层 Topic → 直接构造 `robot` Action goal，或调用其 client 并同步等待。
+6. `/robot_driver/safety_stop`（Topic）
+   - 实现：最高优先级触发，收到消息立即抢占所有当前 goal，转而发送 `reset` Action goal。若 Action 已在执行，则请求取消并重发，确保“安全停机”只有一份执行路径。
+
+优先级/互斥策略：
+- `Action > Topic`：同一能力若同时提供 Action 与 Topic（例如 joint/robot），Action 请求永远优先；Topic 层只是 `goal` 的语法糖，内部会在 Action 正忙时排队或丢弃。
+- `最新 goal 抢占旧 goal`：同一 Action（joint/robot/reset 等）上，新 goal 会主动 cancel 旧 goal 并从当前姿态续跑，保持单执行链路。
+- `safety_stop` → `reset` → `joint`：安全链路最高优先级，触发后 cancel 其它一切；`reset` 内部又会顺序执行 `safety_pose` 与 `zero_gravity`。
+- `gripper`：已统一为 `/robot_driver/action/gripper`，其底层也通过 `/robot_driver/action/joint`（或映射到特定关节）执行，确保所有执行互斥策略一致。
+
+> 备注：统一的 `JointMotionAction` 让“落位”、“常规轨迹”、“单轴 Debug”都走同一执行链路、共享互斥与反馈，减少重复线程，实现优雅的抢占管理。
 
 ## 实现技术方案（对标 l1_stage1_device）
 1. 启动链路（方案稳定，暂不调整）
@@ -115,15 +153,15 @@ effort: []
    - `hardware_commander`：类似 `CartesianCommander`，包装 I2RT SDK 的 joint/pose 读取、轨迹插值、零重力模式切换（SetZeroGravity）、回零/归位等原语，确保上层 ROS 节点不直接触碰 SDK。
    - `robot_driver_node`：ROS 2 进程主体，进一步拆成三个内部组件：
      - `state_publisher`：独立 callback group 或 executor，周期性读取 commander 缓存并发布 `/joint_states`、TF 以及 `/robot_driver/diagnostics` 中的运行指标，确保读路径只持有读锁、不阻塞控制线程。
-     - `motion_controller`：承载 `/robot_driver/robot_command`、`/robot_driver/joint_command`、`FollowJointTrajectory` action 等控制接口，负责命令抢占、IK + 插值、限速、写入 commander。
+     - `motion_controller`：承载 `/robot_driver/robot_command`、`/robot_driver/joint_command` 以及 Action 接口（`/robot_driver/robot_command_action`、`/robot_driver/gripper_command_action`），负责命令抢占、IK + 插值、限速、写入 commander。
      - `command_watchdog`：挂在控制线程侧的子模块，维护 `last_command_stamp`；若 60 s（或 `command_timeout_s`）未收到控制指令则主动调用 `motion_controller` 的安全归位流程，并在确认机械臂已落位 SAFE_POSE 后再触发 `hardware_commander.set_zero_gravity(true)`，也负责 `/robot_driver/safety_stop` 的统一抢占收敛。
 
-3. 指令调度与安全
-   - 命令队列：沿用 Stage1 的“单工作线程+可抢占”模型，使用 `queue.Queue` 存储笛卡尔/关节指令，任何新区指令会清空旧队列并打断当前插值；
-   - 插值策略：
-     - 笛卡尔目标：通过 IK 求解后在关节空间作线性插值（同 Stage1 `_interpolate_to_goal`）；
-     - 关节轨迹：遵循 `FollowJointTrajectory` action（`/robot_driver/action/follow_joint_trajectory`）的 `time_from_start`，逐点执行并校验速度/加速度；
-     - 关节直控：当启用 `/robot_driver/joint_command` 时，节点根据消息中的关节名替换当前姿态中对应分量，再应用限速/限幅并写入硬件，逻辑复用 Commander 的 `command_joint_pos/vel` 能力。
+   3. 指令调度与安全
+      - 命令队列：沿用 Stage1 的“单工作线程+可抢占”模型，使用 `queue.Queue` 存储笛卡尔/关节指令，任何新区指令会清空旧队列并打断当前插值；
+      - 插值策略：
+        - 笛卡尔目标：通过 IK 求解后在关节空间作线性插值（同 Stage1 `_interpolate_to_goal`）；
+        - Action 目标：`/robot_driver/robot_command_action` 直接复用笛卡尔插值并在反馈中输出进度/接触标志；`/robot_driver/gripper_command_action` 走夹爪状态机，支持力阈/行程阈结束条件；如需 MoveIt/ControllerManager 兼容，可继续保留 FollowJointTrajectory 执行链路，在内部与抢占机制共存。
+        - 关节直控：当启用 `/robot_driver/joint_command` 时，节点根据消息中的关节名替换当前姿态中对应分量，再应用限速/限幅并写入硬件，逻辑复用 Commander 的 `command_joint_pos/vel` 能力。
    - 心跳/超时：由 `command_watchdog` 维护 `last_command_stamp`，若在 `timeout_s`（固定 60 s）内未收到任何控制指令，则触发安全归位；当确认机械臂到达 `SAFE_POSE` 后再启用零重力模式，重新收到命令时即刻退出零重力并恢复常规控制。
    - `/robot_driver/safety_stop`：节点订阅后立即抢占当前运动；若当前已处于零重力模式，先调用 `hardware_commander.set_zero_gravity(false)` 以恢复常规控制，再执行 `move_to_safe_pose()`，待确认 SAFE_POSE 落位成功后再次启用零重力；若原本不在零重力模式，则直接回到安全位并在完成后开启零重力。
 
@@ -165,7 +203,7 @@ effort: []
   - `joint_command_rate_limit`（double，默认 0.5 rad/s）：单轴命令的限速，用于调试时保护电机；接口始终订阅 `/robot_driver/joint_command`，无需额外开关或改 topic。
 - `driver/start_robot_driver.sh` 提供 CLI 覆盖：`--can canX`、`--zero-gravity`、`--xyz-only`、`--params <file>`，脚本会把结果传入 ROS 参数；
 - 运行期允许通过 `ros2 param set` 更新白名单参数：
-  - `can_channel`：触发内部回调 → 暂停命令 → 调用 `/robot_driver/service/reset_can` 逻辑 → 切换 gs_usb 接口；
+  - `can_channel`：触发内部回调 → 暂停命令 → 复位 commander 并切换 gs_usb 接口；
   - `joint_state_rate`、`diagnostics_rate`、`command_timeout_s`：实时更新定时器和安全心跳；
   - 其他参数需通过 YAML 修改后重启节点。
 - 该机制支持在调试阶段快速在 `can0/can1/can2` 之间切换，后续可扩展自动枚举逻辑以适配更多硬件组合。

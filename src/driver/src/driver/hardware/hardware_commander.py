@@ -548,15 +548,6 @@ class HardwareCommander:
                 except Exception as exc:
                     self._logger.warning('Failed to stop robot: %s', exc)
 
-    def reset_can(self) -> None:
-        ensure_ready(self._can_channel)
-        if self._robot:
-            try:
-                if hasattr(self._robot, 'reset_bus'):
-                    self._robot.reset_bus()
-            except Exception as exc:
-                self._logger.debug('Failed to reset CAN bus: %s', exc)
-
     # ------------------------------------------------------------------ telemetry
     def read_joint_state(self) -> JointStateData:
         """Read joint state, updating from hardware if available."""
