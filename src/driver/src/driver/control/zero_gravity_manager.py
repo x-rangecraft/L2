@@ -50,6 +50,11 @@ class ZeroGravityManager:
         """Convenience helper to disable zero-gravity."""
         return self.set_state(False)
 
+    def refresh_state(self) -> bool:
+        """Sync cached state from HardwareCommander."""
+        self._current_state = self._commander.get_zero_gravity()
+        return self._current_state
+
     # ------------------------------------------------------------------ ROS callbacks
     def _handle_service_request(self, request: SetBool.Request, response: SetBool.Response):
         success = self.set_state(request.data)

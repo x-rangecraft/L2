@@ -31,7 +31,7 @@ def generate_launch_description():
 
         node = Node(
             package='robot_driver',
-            executable='robot_driver_node',
+            executable='robot_driver_node.py',  # use explicit wrapper script; avoids broken console entry points
             name='robot_driver',
             output='screen',
             parameters=[

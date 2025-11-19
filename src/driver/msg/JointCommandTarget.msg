@@ -1,0 +1,3 @@
+sensor_msgs/JointState joint_state
+bool relative
+float32 speed_scale

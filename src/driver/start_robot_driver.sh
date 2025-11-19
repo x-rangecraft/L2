@@ -32,8 +32,6 @@ FOLLOW_LOG=0
 LOG_STDERR_MIRROR=1
 VERBOSE_CONSOLE=0
 declare -a CHILD_ARGS=()
-EXIT_AFTER_SAFE_POSE=1
-SAFE_POSE_WAIT_TIMEOUT=120
 
 CAN_CHANNEL="can0"
 XYZ_ONLY_MODE="false"
@@ -147,43 +145,6 @@ cleanup_processes() {
     pkill -f "ros2 launch robot_driver robot_driver.launch.py" 2>/dev/null || true
 }
 
-safe_shutdown_before_kill() {
-    # Best-effort: request SAFE_POSE via /robot_driver/safety_stop before stopping supervisor.
-    # 如果任一步失败（无 PID、ROS 环境不可用、缺少 ros2 等），仅记录日志并继续原有关机流程。
-    local pid
-    if ! pid="$(read_pid_file)"; then
-        log "safe_shutdown: PID file ${PID_FILE} not found, skip SAFE_POSE request."
-        return 0
-    fi
-    if ! kill -0 "${pid}" >/dev/null 2>&1; then
-        log "safe_shutdown: PID ${pid} not running, skip SAFE_POSE request."
-        return 0
-    fi
-
-    # 尝试加载 ROS 环境；失败则不影响后续 stop 行为。
-    if ! try_source_ros_env >/dev/null 2>&1; then
-        log "safe_shutdown: Failed to source ROS 2 env, skipping SAFE_POSE request."
-        return 0
-    fi
-
-    if ! command -v ros2 >/dev/null 2>&1; then
-        log "safe_shutdown: 'ros2' CLI not found, skipping SAFE_POSE request."
-        return 0
-    fi
-
-    status_cn "停止 robot_driver 前：先通过 /robot_driver/safety_stop 请求回到 SAFE_POSE" "INFO"
-    if ! ros2 topic pub /robot_driver/safety_stop std_msgs/msg/Empty "{}" --once >/dev/null 2>&1; then
-        log "safe_shutdown: Failed to publish /robot_driver/safety_stop, continuing with shutdown."
-        return 0
-    fi
-
-    # 等待一小段时间，让 SAFE_POSE 序列有机会完成（内部已带 wait_time 与校验）。
-    local wait_sec=10
-    log "safe_shutdown: Waiting ${wait_sec}s for SAFE_POSE sequence before stopping supervisor PID ${pid}"
-    sleep "${wait_sec}"
-    return 0
-}
-
 stop_daemon() {
     local pid
     if ! pid="$(read_pid_file)"; then
@@ -253,89 +214,6 @@ build_child_args() {
     CHILD_ARGS+=("--daemon-child" "--foreground")
 }
 
-monitor_startup_events() {
-    local log_file="$1"
-    local timeout="$2"
-    local fifo
-    fifo="$(mktemp -u)"
-    mkfifo "${fifo}"
-    python3 - "${log_file}" "${timeout}" <<'PY' > "${fifo}" &
-import os
-import sys
-import time
-
-log_path = sys.argv[1]
-timeout = float(sys.argv[2])
-deadline = time.time() + timeout
-os.makedirs(os.path.dirname(log_path), exist_ok=True)
-open(log_path, 'a').close()
-
-ros_started = False
-hardware_ready = False
-
-with open(log_path, 'r', encoding='utf-8', errors='ignore') as f:
-    f.seek(0, os.SEEK_SET)
-    while True:
-        if time.time() > deadline:
-            print('EVENT:TIMEOUT', flush=True)
-            sys.exit(1)
-        pos = f.tell()
-        line = f.readline()
-        if not line:
-            time.sleep(0.2)
-            f.seek(pos)
-            continue
-        if 'process started with pid' in line and 'robot_driver_node' in line and not ros_started:
-            ros_started = True
-            print('EVENT:ROS_PROCESS', flush=True)
-        if 'Hardware connected via' in line and not hardware_ready:
-            hardware_ready = True
-            print('EVENT:HARDWARE', flush=True)
-        if 'SAFE_POSE not marked ready' in line or 'SAFE_POSE unavailable' in line:
-            print('EVENT:SAFE_POSE_SKIP', flush=True)
-            sys.exit(3)
-        if 'Moved to SAFE_POSE' in line:
-            print('EVENT:SAFE_POSE_DONE', flush=True)
-            sys.exit(0)
-        if 'Failed to connect hardware' in line:
-            print('EVENT:CONNECT_FAIL', flush=True)
-            sys.exit(2)
-        if 'Traceback' in line or 'ERROR' in line:
-            print('EVENT:ERROR:' + line.strip(), flush=True)
-PY
-    local monitor_pid=$!
-    local line
-    while IFS= read -r line; do
-        case "${line}" in
-            EVENT:ROS_PROCESS)
-                status_cn "ROS 节点进程已启动"
-                ;;
-            EVENT:HARDWARE)
-                status_cn "硬件通信已建立，准备落位安全姿态"
-                ;;
-            EVENT:SAFE_POSE_DONE)
-                status_cn "安全位姿已到位，默认切换至零重力模式并保持后台运行"
-                ;;
-            EVENT:SAFE_POSE_SKIP)
-                status_cn "SAFE_POSE 未标记为 ready，驱动跳过落位，请检查配置" "WARN"
-                ;;
-            EVENT:CONNECT_FAIL)
-                status_cn "硬件连接失败，查看日志 ${LOG_FILE}" "WARN"
-                ;;
-            EVENT:TIMEOUT)
-                status_cn "等待安全位姿超时（${SAFE_POSE_WAIT_TIMEOUT}s），请检查日志 ${LOG_FILE}" "WARN"
-                ;;
-            EVENT:ERROR:*)
-                status_cn "${line#EVENT:ERROR:}" "WARN"
-                ;;
-        esac
-    done < "${fifo}"
-    wait "${monitor_pid}" || true
-    local rc=$?
-    rm -f "${fifo}"
-    return "${rc}"
-}
-
 launch_daemon_mode() {
     ensure_no_active_daemon
     build_child_args
@@ -367,36 +245,7 @@ launch_daemon_mode() {
         fi
         exit 0
     fi
-
-    status_cn "等待硬件连接与安全位姿落位（超时 ${SAFE_POSE_WAIT_TIMEOUT}s）"
-    if monitor_startup_events "${LOG_FILE}" "${SAFE_POSE_WAIT_TIMEOUT}"; then
-        status_cn "启动流程完成，脚本退出，后台驱动持续运行"
-        if [[ ${EXIT_AFTER_SAFE_POSE} -eq 1 ]]; then
-            exit 0
-        fi
-    else
-        local monitor_rc=$?
-        case "${monitor_rc}" in
-            1)
-                status_cn "未在超时时间内检测到安全位姿，请检查日志 ${LOG_FILE}" "WARN"
-                ;;
-            2)
-                status_cn "硬件连接失败，请检查电源/CAN 接口，详见 ${LOG_FILE}" "WARN"
-                ;;
-            3)
-                status_cn "SAFE_POSE 未就绪，驱动跳过落位，请确认 YAML 已标记 ready" "WARN"
-                ;;
-            *)
-                status_cn "启动监控异常 (code=${monitor_rc})，请查看 ${LOG_FILE}" "WARN"
-                ;;
-        esac
-        if [[ ${EXIT_AFTER_SAFE_POSE} -eq 1 ]]; then
-            exit "${monitor_rc}"
-        fi
-    fi
-
-    status_cn "继续输出日志，按 Ctrl+C 结束查看（驱动仍在后台运行）"
-    tail -n +1 -F "${LOG_FILE}" || true
+    status_cn "robot_driver 已在后台运行（跳过 SAFE_POSE 监控，日志：${LOG_FILE}）。使用 --follow-log 可实时查看输出。"
     exit 0
 }
 
@@ -432,22 +281,6 @@ source_ros_env() {
         log "ERROR: Failed to source ROS 2 environment. Expected ${ROS_SETUP} or ${INSTALL_SETUP}."
         exit 1
     fi
-}
-
-try_source_ros_env() {
-    # 与 source_ros_env 类似，但失败时只打 WARNING，不退出脚本；用于停机安全路径。
-    local sourced=0
-    if source_if_exists "${ROS_SETUP}"; then
-        sourced=1
-    fi
-    if source_if_exists "${INSTALL_SETUP}"; then
-        sourced=1
-    fi
-    if [[ ${sourced} -eq 0 ]]; then
-        log "WARNING: Failed to source ROS 2 environment; skipping ROS-based SAFE_POSE request."
-        return 1
-    fi
-    return 0
 }
 
 resolve_path() {
@@ -527,15 +360,6 @@ while [[ $# -gt 0 ]]; do
             DAEMON_MODE="foreground"
             shift
             ;;
-        --no-exit-after-safe)
-            EXIT_AFTER_SAFE_POSE=0
-            shift
-            ;;
-        --safe-timeout)
-            ensure_value_present "--safe-timeout" "$#"
-            SAFE_POSE_WAIT_TIMEOUT="$2"
-            shift 2
-            ;;
         --follow-log)
             FOLLOW_LOG=1
             shift
@@ -575,9 +399,6 @@ if [[ ${DAEMON_CHILD} -eq 1 ]]; then
 fi
 
 if [[ ${STOP_ONLY} -eq 1 ]]; then
-    # 在真正停止 supervisor 前，先向运行中的 robot_driver 节点发送一次 /robot_driver/safety_stop，
-    # 尝试回到 SAFE_POSE，避免悬停姿态下直接断控导致“掉下去”。
-    safe_shutdown_before_kill || true
     if stop_daemon; then
         exit 0
     else

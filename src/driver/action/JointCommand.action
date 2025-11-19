@@ -1,0 +1,20 @@
+# Goal
+robot_driver/JointCommandTarget target
+robot_driver/JointCommandOptions options
+---
+# Result
+bool success
+string result_code
+string last_error
+sensor_msgs/JointState final_state
+sensor_msgs/JointState target_state
+robot_driver/JointContact[] contact_state
+---
+# Feedback
+string phase
+float32 completion_ratio
+builtin_interfaces/Duration remaining_time
+sensor_msgs/JointState current_state
+sensor_msgs/JointState target_state
+robot_driver/JointContact[] contact_state
+string last_error

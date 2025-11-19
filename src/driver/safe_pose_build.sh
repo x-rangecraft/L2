@@ -5,85 +5,15 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 WORKSPACE_ROOT="$(cd -- "${SCRIPT_DIR}/../.." && pwd)"
 ROS_SETUP="/opt/ros/humble/setup.bash"
 INSTALL_SETUP="${WORKSPACE_ROOT}/install/setup.bash"
-DEFAULT_OUTPUT_DIR="${SCRIPT_DIR}/config"
 JOINT_TOPIC="/joint_states"
-CAPTURE_TIMEOUT=10
 ZERO_G_SERVICE="/robot_driver/service/zero_gravity"
-CAN_CHANNEL="can0"
-MARK_READY_TARGET=""
-
-usage() {
-    cat <<'USAGE'
-Usage: safe_pose_build.sh [options]
-
-Options:
-  --output-dir <dir>     保存 safe_pose_*.yaml 的目录（默认 driver/config）
-  --topic <name>         JointState 话题名（默认 /joint_states）
-  --timeout <sec>        采集超时时间（默认 10 秒）
-  --service <name>       零重力 service 名称（默认 /robot_driver/service/zero_gravity）
-  --can <canX>           指定要检查的 CAN 通道（默认 can0）
-  --mark-ready <file>    仅标记已有 safe_pose YAML 为可用（写 metadata.ready 并创建 .ready）
-  -h, --help             显示帮助
-
-说明:
-  此脚本必须在 robot_driver_node 运行的情况下使用。
-  脚本会自动启动零重力模式，让你可以手动拖动机械臂到安全姿态。
-  请确保先运行: ./src/driver/start_robot_driver.sh
-USAGE
-}
+CAPTURE_TIMEOUT=10
+OUTPUT_FILE="${WORKSPACE_ROOT}/src/driver/config/safe_pose_config.yaml"
+REQUIRED_JOINTS=(joint1 joint2 joint3 joint4 joint5 joint6 gripper)
+REQUIRED_JOINTS_STR="$(IFS=,; printf '%s' "${REQUIRED_JOINTS[*]}")"
 
 info() { printf '[safe_pose] %s\n' "$1"; }
 warn() { printf '[safe_pose][WARN] %s\n' "$1" >&2; }
-
-mark_safe_pose_ready_file() {
-    local target="$1"
-    if [[ ! -f "$target" ]]; then
-        warn "未找到 safe_pose 文件: $target"
-        exit 1
-    fi
-
-    if ! SAFE_POSE_MARK_TARGET="$target" python3 <<'PY'
-import os
-import sys
-import yaml
-
-path = os.environ['SAFE_POSE_MARK_TARGET']
-with open(path, 'r', encoding='utf-8') as f:
-    data = yaml.safe_load(f) or {}
-
-wrapped = False
-node = data
-if isinstance(data, dict) and 'safe_pose' in data:
-    node = data['safe_pose']
-    wrapped = True
-
-if not isinstance(node, dict):
-    raise SystemExit(f'无法解析 {path}，请确认 safe_pose YAML 格式正确')
-
-metadata = node.setdefault('metadata', {})
-metadata['ready'] = True
-
-payload = {'safe_pose': node} if wrapped else node
-with open(path, 'w', encoding='utf-8') as f:
-    yaml.safe_dump(payload, f, allow_unicode=True, sort_keys=False)
-PY
-    then
-        warn "写入 metadata.ready 失败"
-        exit 1
-    fi
-
-    touch "${target}.ready"
-    info "已标记 ${target} 可用，并创建 ${target}.ready"
-}
-
-resolve_path() {
-    local target="$1"
-    if [[ "$target" = /* ]]; then
-        printf '%s\n' "$target"
-    else
-        python3 -c 'import os,sys; print(os.path.abspath(sys.argv[1]))' "$target"
-    fi
-}
 
 source_if_exists() {
     local file="$1"
@@ -112,210 +42,138 @@ source_ros_env() {
         sourced=1
     fi
     if [[ ${sourced} -eq 0 ]]; then
-        warn "未找到 ROS 2 环境: ${ROS_SETUP} or ${INSTALL_SETUP}"
+        warn "未找到 ROS 2 环境: ${ROS_SETUP} 或 ${INSTALL_SETUP}"
         exit 1
     fi
 }
 
 ensure_command() {
     if ! command -v "$1" >/dev/null 2>&1; then
-        warn "Missing required command: $1"
+        warn "缺少命令: $1"
         exit 1
     fi
 }
 
-ensure_command python3
+check_robot_driver_node() {
+    info "[Step 1/5] 检查 /robot_driver 节点..."
+    local nodes
+    nodes="$(ros2 node list 2>/dev/null || true)"
+    if ! printf '%s\n' "$nodes" | grep -qx "/robot_driver"; then
+        warn "未检测到 /robot_driver 节点，请先启动 robot_driver。"
+        exit 1
+    fi
+    info "[Step 1/5] 完成：/robot_driver 在线。"
+}
 
-OUTPUT_DIR="${DEFAULT_OUTPUT_DIR}"
-
-while [[ $# -gt 0 ]]; do
-    case "$1" in
-        --output-dir)
-            if [[ $# -lt 2 ]]; then
-                warn "--output-dir 缺少参数"
-                exit 1
-            fi
-            OUTPUT_DIR="$(resolve_path "$2")"
-            shift 2
-            ;;
-        --output-dir=*)
-            value="${1#*=}"
-            OUTPUT_DIR="$(resolve_path "$value")"
-            shift
-            ;;
-        --topic)
-            if [[ $# -lt 2 ]]; then
-                warn "--topic 缺少参数"
-                exit 1
-            fi
-            JOINT_TOPIC="$2"
-            shift 2
-            ;;
-        --topic=*)
-            JOINT_TOPIC="${1#*=}"
-            shift
-            ;;
-        --timeout)
-            if [[ $# -lt 2 ]]; then
-                warn "--timeout 缺少参数"
-                exit 1
-            fi
-            CAPTURE_TIMEOUT="$2"
-            shift 2
-            ;;
-        --timeout=*)
-            CAPTURE_TIMEOUT="${1#*=}"
-            shift
-            ;;
-        --service)
-            if [[ $# -lt 2 ]]; then
-                warn "--service 缺少参数"
-                exit 1
-            fi
-            ZERO_G_SERVICE="$2"
-            shift 2
-            ;;
-        --service=*)
-            ZERO_G_SERVICE="${1#*=}"
-            shift
-            ;;
-        --can)
-            if [[ $# -lt 2 ]]; then
-                warn "--can 缺少参数"
-                exit 1
-            fi
-            CAN_CHANNEL="$2"
-            shift 2
-            ;;
-        --can=*)
-            CAN_CHANNEL="${1#*=}"
-            shift
-            ;;
-        --mark-ready)
-            if [[ $# -lt 2 ]]; then
-                warn "--mark-ready 缺少参数"
-                exit 1
-            fi
-            MARK_READY_TARGET="$(resolve_path "$2")"
-            shift 2
-            ;;
-        --mark-ready=*)
-            value="${1#*=}"
-            MARK_READY_TARGET="$(resolve_path "$value")"
-            shift
-            ;;
-        -h|--help)
-            usage
-            exit 0
-            ;;
-        *)
-            warn "未知参数: $1"
-            usage
-            exit 1
-            ;;
-    esac
-done
-
-if [[ -n "${MARK_READY_TARGET}" ]]; then
-    mark_safe_pose_ready_file "${MARK_READY_TARGET}"
-    exit 0
-fi
-
-ensure_command ros2
-
-mkdir -p "${OUTPUT_DIR}"
-source_ros_env
-
-info "检查 robot_driver_node 是否运行..."
-if ! ros2 node list 2>/dev/null | grep -q "/robot_driver"; then
-    warn "robot_driver_node 未运行！"
-
-    # robot_driver 未运行，检查是否有其他进程占用 CAN 接口
-    info "检查 CAN 接口 (${CAN_CHANNEL}) 占用情况..."
-    CAN_USERS=$(sudo lsof 2>/dev/null | grep -i "${CAN_CHANNEL}" | awk '{print $2}' | sort -u || true)
-    I2RT_PIDS=$(ps aux | grep -E "python.*(i2rt|stage1_device)" | grep -v grep | awk '{print $2}' || true)
-
-    if [[ -n "${CAN_USERS}" || -n "${I2RT_PIDS}" ]]; then
-        warn "发现其他进程可能占用了 CAN 接口或 I2RT SDK"
-        if [[ -n "${CAN_USERS}" ]]; then
-            warn "  占用 ${CAN_CHANNEL} 的进程: ${CAN_USERS}"
-        fi
-        if [[ -n "${I2RT_PIDS}" ]]; then
-            warn "  I2RT 相关进程: ${I2RT_PIDS}"
-        fi
-
-        CLEANUP_SCRIPT="${SCRIPT_DIR}/scripts/cleanup_can_interface.sh"
-        if [[ -x "${CLEANUP_SCRIPT}" ]]; then
-            read -rp "是否清理这些进程后再启动 robot_driver? [y/N]: " confirm_cleanup
-            if [[ "${confirm_cleanup}" =~ ^[Yy]$ ]]; then
-                info "清理占用进程..."
-                if ! bash "${CLEANUP_SCRIPT}" "${CAN_CHANNEL}" --force; then
-                    warn "清理失败"
-                    exit 1
-                fi
-                info "清理完成，请先运行: ./src/driver/start_robot_driver.sh"
-            else
-                warn "用户取消清理"
-            fi
-        fi
-    else
-        info "未发现占用 CAN 接口的进程"
+check_joint_states_topic() {
+    info "[Step 2/5] 检查 ${JOINT_TOPIC} 发布状态..."
+    if ! ros2 topic list 2>/dev/null | grep -qx "${JOINT_TOPIC}"; then
+        warn "未发现 ${JOINT_TOPIC} 话题。"
+        exit 1
     fi
 
-    warn "请先启动 robot_driver: ./src/driver/start_robot_driver.sh"
-    exit 1
-fi
+    local topic_info publisher_count
+    if ! topic_info="$(ros2 topic info "${JOINT_TOPIC}" 2>&1)"; then
+        warn "获取 ${JOINT_TOPIC} 信息失败。"
+        printf '%s\n' "${topic_info}"
+        exit 1
+    fi
 
-info "robot_driver_node 运行正常"
+    if ! publisher_count="$(
+        TOPIC_INFO_DATA="${topic_info}" python3 <<'PY'
+import os
+text = os.environ['TOPIC_INFO_DATA']
+for line in text.splitlines():
+    if 'Publisher count' in line:
+        try:
+            print(int(line.split(':', 1)[1].strip()))
+        except (ValueError, IndexError):
+            pass
+        break
+PY
+    )"; then
+        warn "解析 ${JOINT_TOPIC} 发布者数量失败。"
+        exit 1
+    fi
 
-info "切换零重力模式 (${ZERO_G_SERVICE}) ..."
-set +e
-SERVICE_RESULT="$(timeout 5 ros2 service call "${ZERO_G_SERVICE}" std_srvs/srv/SetBool "{data: true}" 2>&1)"
-SERVICE_EXIT=$?
-set -e
-if [[ ${SERVICE_EXIT} -eq 124 ]]; then
-    warn "零重力 service 调用超时！"
-    warn "没有零重力模式无法手动调整机械臂姿态。"
-    exit 1
-elif [[ ${SERVICE_EXIT} -ne 0 ]]; then
-    warn "零重力 service 调用失败 (exit ${SERVICE_EXIT})！"
-    printf '%s\n' "${SERVICE_RESULT}"
-    warn "没有零重力模式无法手动调整机械臂姿态。"
-    exit 1
-elif ! printf '%s' "${SERVICE_RESULT}" | grep -qiE "success[:=][[:space:]]*true"; then
-    warn "零重力 service 返回失败："
-    printf '%s\n' "${SERVICE_RESULT}"
-    warn "请检查 robot_driver_node 日志。"
-    exit 1
-else
-    info "零重力模式已启动。"
-fi
+    if [[ -z "${publisher_count}" ]]; then
+        warn "无法解析 ${JOINT_TOPIC} 发布者数量。"
+        printf '%s\n' "${topic_info}"
+        exit 1
+    fi
 
-info "请将机械臂拖到期望 SAFE_POSE，完成后按回车继续。"
-read -r _
+    if (( publisher_count <= 0 )); then
+        warn "${JOINT_TOPIC} 没有发布者，无法继续。"
+        printf '%s\n' "${topic_info}"
+        exit 1
+    fi
 
-info "正在采集 ${JOINT_TOPIC} ..."
-set +e
-JOINT_STATE_JSON="$(
-SAFE_POSE_TOPIC="${JOINT_TOPIC}" SAFE_POSE_TIMEOUT="${CAPTURE_TIMEOUT}" \
-python3 <<'PY'
+    info "[Step 2/5] 完成：检测到 ${publisher_count} 个发布者。"
+}
+
+enable_zero_gravity_mode() {
+    info "[Step 3/5] 调用 ${ZERO_G_SERVICE} 启动零重力模式..."
+    set +e
+    local service_output
+    service_output="$(timeout 5 ros2 service call "${ZERO_G_SERVICE}" std_srvs/srv/SetBool "{data: true}" 2>&1)"
+    local status=$?
+    set -e
+
+    if [[ ${status} -eq 124 ]]; then
+        warn "零重力 service 调用超时。"
+        exit 1
+    fi
+    if [[ ${status} -ne 0 ]]; then
+        warn "零重力 service 调用失败 (exit ${status})。"
+        printf '%s\n' "${service_output}"
+        exit 1
+    fi
+    if ! printf '%s\n' "${service_output}" | grep -qiE "success[:=][[:space:]]*true"; then
+        warn "零重力 service 返回失败："
+        printf '%s\n' "${service_output}"
+        exit 1
+    fi
+
+    info "[Step 3/5] 完成：零重力模式已启用。"
+}
+
+prompt_user_pose() {
+    info "[Step 4/5] 请手动调整机械臂至安全姿态，完成后按回车继续..."
+    read -r _
+    info "[Step 4/5] 完成：用户已确认姿态。"
+}
+
+capture_and_write_pose() {
+    info "[Step 5/5] 正在捕获 ${JOINT_TOPIC} 并写入 ${OUTPUT_FILE} ..."
+    local capture_json
+    set +e
+    capture_json="$(
+        SAFE_POSE_TOPIC="${JOINT_TOPIC}" \
+        SAFE_POSE_TIMEOUT="${CAPTURE_TIMEOUT}" \
+        SAFE_POSE_REQUIRED="${REQUIRED_JOINTS_STR}" \
+        python3 <<'PY'
 import json
 import os
 import sys
 import time
 import rclpy
 from rclpy.node import Node
-from sensor_msgs.msg import JointState
 from rclpy.task import Future
+from sensor_msgs.msg import JointState
 
-TOPIC = os.environ.get("SAFE_POSE_TOPIC", "/joint_states")
-TIMEOUT = float(os.environ.get("SAFE_POSE_TIMEOUT", "10"))
+topic = os.environ.get("SAFE_POSE_TOPIC", "/joint_states")
+timeout = float(os.environ.get("SAFE_POSE_TIMEOUT", "10"))
+required = [item.strip() for item in os.environ.get("SAFE_POSE_REQUIRED", "").split(',') if item.strip()]
+
+if not required:
+    sys.stderr.write("未指定需要解析的关节名称。\n")
+    sys.exit(3)
 
 class JointStateCapture(Node):
     def __init__(self):
         super().__init__('safe_pose_capture_cli')
         self._future = Future()
-        self.create_subscription(JointState, TOPIC, self._callback, 10)
+        self.create_subscription(JointState, topic, self._callback, 10)
 
     def _callback(self, msg: JointState):
         if not self._future.done():
@@ -327,14 +185,15 @@ executor = rclpy.executors.SingleThreadedExecutor()
 executor.add_node(node)
 start_time = time.time()
 msg = None
+
 try:
     while rclpy.ok():
         executor.spin_once(timeout_sec=0.1)
         if node._future.done():
             msg = node._future.result()
             break
-        if time.time() - start_time > TIMEOUT:
-            node.get_logger().error(f"Timeout waiting for {TOPIC}")
+        if time.time() - start_time > timeout:
+            node.get_logger().error(f"Timeout waiting for {topic}")
             rclpy.shutdown()
             sys.exit(2)
 finally:
@@ -344,120 +203,97 @@ if msg is None:
     rclpy.shutdown()
     sys.exit(1)
 
-print("RAW JointState message:", file=sys.stderr)
-print(msg, file=sys.stderr)
+positions = dict(zip(msg.name, msg.position))
+missing = [name for name in required if name not in positions]
+if missing:
+    sys.stderr.write("缺少以下关节数据: " + ", ".join(missing) + "\n")
+    rclpy.shutdown()
+    sys.exit(3)
 
-data = {
-    "names": list(msg.name),
-    "positions": list(msg.position),
-    "velocities": list(msg.velocity),
-    "efforts": list(msg.effort),
+joint_entries = [{"name": name, "position": float(positions[name])} for name in required]
+
+payload = {
+    "joint_entries": joint_entries,
     "frame_id": msg.header.frame_id,
-    "stamp_sec": msg.header.stamp.sec,
-    "stamp_nanosec": msg.header.stamp.nanosec,
+    "stamp_sec": int(msg.header.stamp.sec),
+    "stamp_nanosec": int(msg.header.stamp.nanosec),
 }
-pretty_json = json.dumps(data, indent=2)
-print("Formatted JointState JSON:", file=sys.stderr)
-print(pretty_json, file=sys.stderr)
-print(json.dumps(data))
+
+print(json.dumps(payload))
 rclpy.shutdown()
 PY
-)"
-CAPTURE_STATUS=$?
-set -e
+    )"
+    local capture_status=$?
+    set -e
 
-if [[ ${CAPTURE_STATUS} -ne 0 ]]; then
-    warn "采集 JointState 失败 (exit ${CAPTURE_STATUS})"
-    case "${CAPTURE_STATUS}" in
-        1)
-            warn "错误原因: JointState 消息为空，Python 捕获脚本返回 1"
-            ;;
-        2)
-            warn "错误原因: 等待 ${JOINT_TOPIC} 超时 (${CAPTURE_TIMEOUT}s)"
-            ;;
-        *)
-            warn "错误原因: Python 捕获脚本异常，详见上方输出"
-            ;;
-    esac
-    exit ${CAPTURE_STATUS}
-fi
+    if [[ ${capture_status} -ne 0 ]]; then
+        warn "捕获 ${JOINT_TOPIC} 失败 (exit ${capture_status})。"
+        exit ${capture_status}
+    fi
+    if [[ -z "${capture_json}" ]]; then
+        warn "未收到任何 JointState 数据。"
+        exit 1
+    fi
 
-if [[ -z "${JOINT_STATE_JSON}" ]]; then
-    warn "未收到 JointState 数据"
-    exit 1
-fi
+    mkdir -p "$(dirname -- "${OUTPUT_FILE}")"
 
-JOINT_STATE_JSON="${JOINT_STATE_JSON}" python3 <<'PY'
+    SAFE_POSE_CAPTURE="${capture_json}" SAFE_POSE_OUTPUT="${OUTPUT_FILE}" SAFE_POSE_TOPIC="${JOINT_TOPIC}" \
+        python3 <<'PY'
 import json
 import os
-from itertools import zip_longest
+from datetime import datetime, timezone
 
-data = json.loads(os.environ['JOINT_STATE_JSON'])
-print("捕获关节姿态:")
-for name, pos in zip_longest(data.get('names', []), data.get('positions', []), fillvalue=0.0):
-    if name is None:
-        continue
-    print(f"  {name}: {pos:.6f} rad")
-print()
-PY
+raw = json.loads(os.environ['SAFE_POSE_CAPTURE'])
+output_path = os.environ['SAFE_POSE_OUTPUT']
+topic = os.environ.get('SAFE_POSE_TOPIC', '/joint_states')
 
-read -rp "确认写入 safe_pose YAML? [y/N]: " confirm
-if [[ ! "${confirm}" =~ ^[Yy]$ ]]; then
-    info "用户取消写入。"
-    exit 0
-fi
+joint_entries = raw.get('joint_entries') or []
+if not joint_entries:
+    raise SystemExit("joint_entries 为空，无法写入。")
 
-TIMESTAMP="$(date +'%Y%m%d_%H%M%S')"
-OUTPUT_FILE="${OUTPUT_DIR}/safe_pose_${TIMESTAMP}.yaml"
-JOINT_STATE_JSON="${JOINT_STATE_JSON}" OUTPUT_FILE="${OUTPUT_FILE}" CAPTURE_TOPIC="${JOINT_TOPIC}" python3 <<'PY'
-import json
-import os
-from datetime import datetime
+now = datetime.now(timezone.utc).isoformat()
+frame_id = raw.get('frame_id') or 'base_link'
 
-data = json.loads(os.environ['JOINT_STATE_JSON'])
-path = os.environ['OUTPUT_FILE']
-topic = os.environ.get('CAPTURE_TOPIC', '/joint_states')
-now = datetime.utcnow().isoformat() + 'Z'
-
-joint_names = data.get('names', [])
-positions = data.get('positions', [])
-frame_id = data.get('frame_id', '')
-
-def fmt_list(values):
-    lines = []
-    for value in values:
-        if isinstance(value, float):
-            lines.append(f"  - {value:.6f}")
-        else:
-            lines.append(f"  - {value}")
-    return "\n".join(lines)
-
-content = [
-    "# SAFE_POSE captured via safe_pose_build.sh",
+lines = [
+    "# SAFE_POSE auto-generated via safe_pose_build.sh",
     f"# Captured at {now}",
-    "joint_names:",
-    fmt_list(joint_names),
-    "positions:",
-    fmt_list(positions),
-    "metadata:",
-    f"  frame_id: {frame_id if frame_id else 'base_link'}",
-    f"  source_topic: {topic}",
-    f"  captured_at: {now}",
-    "  zero_gravity_requested: true",
-    "  ready: true",
-    "  notes: ''",
+    "safe_pose:",
+    "  joints:",
 ]
 
-with open(path, 'w', encoding='utf-8') as f:
-    for line in content:
-        if line:
-            f.write(f"{line}\n")
-        else:
-            f.write("\n")
+for entry in joint_entries:
+    name = entry.get('name', '').strip() or 'unknown_joint'
+    value = float(entry.get('position', 0.0))
+    lines.append(f"    {name}: {value:.6f}")
 
-print(f"已写入 {path}")
+lines.extend([
+    "  metadata:",
+    "    ready: true",
+    f"    captured_at: {now}",
+    f"    source_topic: {topic}",
+    f"    frame_id: {frame_id}",
+    "    zero_gravity_requested: true",
+])
+
+with open(output_path, 'w', encoding='utf-8') as fp:
+    fp.write("\n".join(lines) + "\n")
+
+print(f"写入 {output_path}")
 PY
-mark_safe_pose_ready_file "${OUTPUT_FILE}"
 
-info "SAFE_POSE YAML 已生成并标记为 ready：${OUTPUT_FILE}"
-info "可直接在 driver/config/robot_driver_config.yaml 的 safe_pose_file 字段引用该文件。"
+    info "[Step 5/5] 完成：SAFE_POSE 已写入 ${OUTPUT_FILE}。"
+}
+
+main() {
+    source_ros_env
+    ensure_command ros2
+    ensure_command python3
+
+    check_robot_driver_node
+    check_joint_states_topic
+    enable_zero_gravity_mode
+    prompt_user_pose
+    capture_and_write_pose
+}
+
+main "$@"

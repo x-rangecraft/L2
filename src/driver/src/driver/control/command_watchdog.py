@@ -7,7 +7,7 @@ from typing import Optional
 
 from std_msgs.msg import Empty
 
-from driver.control.motion_controller import MotionController
+from driver.control.joint_controler import JointControler
 from driver.hardware.hardware_commander import HardwareCommander
 from driver.utils.logging_utils import get_logger
 
@@ -16,7 +16,7 @@ class CommandWatchdog:
     def __init__(
         self,
         node,
-        motion_controller: MotionController,
+        motion_controller: JointControler,
         commander: HardwareCommander,
         *,
         timeout_s: float,

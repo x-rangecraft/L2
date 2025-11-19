@@ -12,11 +12,12 @@ from rclpy.node import Node
 from sensor_msgs.msg import JointState
 from std_msgs.msg import Empty
 from std_srvs.srv import Trigger
+from robot_driver.action import JointCommand
 
 from driver.config.parameter_schema import DriverParameters, declare_and_get_parameters
 from driver.config.safe_pose_loader import SafePoseLoader
 from driver.control.command_watchdog import CommandWatchdog
-from driver.control.motion_controller import MotionController
+from driver.control.joint_controler import JointControler
 from driver.control.state_publisher import StatePublisher
 from driver.control.zero_gravity_manager import ZeroGravityManager
 from driver.hardware.hardware_commander import HardwareCommander
@@ -36,7 +37,18 @@ class RobotDriverNode(Node):
             joint_limit_rate=self._params.joint_command.rate_limit,
             robot_description=self._robot_description,
         )
-        self._motion_controller = MotionController(self._params, self._commander)
+        self._zero_gravity_manager = ZeroGravityManager(
+            self,
+            self._commander,
+            service_name=self._params.zero_gravity_service,
+        )
+        self._motion_controller = JointControler(
+            self,
+            self._params,
+            self._commander,
+            zero_gravity_manager=self._zero_gravity_manager,
+            zero_gravity_service=self._params.zero_gravity_service,
+        )
         self._state_publisher = StatePublisher(self, self._commander, self._params)
         self._watchdog = CommandWatchdog(
             self,
@@ -46,7 +58,6 @@ class RobotDriverNode(Node):
         )
 
         self._subscriptions = []
-        self._zero_gravity_manager = None
         self._create_ros_interfaces()
         self._connect_hardware()
 
@@ -82,11 +93,6 @@ class RobotDriverNode(Node):
             )
         )
 
-        self._zero_gravity_manager = ZeroGravityManager(
-            self,
-            self._commander,
-            service_name=self._params.zero_gravity_service,
-        )
         self._self_check_srv = self.create_service(
             Trigger,
             '/robot_driver/service/self_check',
@@ -100,6 +106,14 @@ class RobotDriverNode(Node):
             execute_callback=self._execute_trajectory,
             goal_callback=self._goal_callback,
             cancel_callback=self._cancel_callback,
+        )
+        self._joint_action = ActionServer(
+            self,
+            JointCommand,
+            self._params.joint_command_action,
+            execute_callback=self._execute_joint_action,
+            goal_callback=self._joint_goal_callback,
+            cancel_callback=self._joint_cancel_callback,
         )
 
     def _connect_hardware(self) -> None:
@@ -198,9 +212,36 @@ class RobotDriverNode(Node):
             result.error_string = str(exc)
             return result
 
+    def _joint_goal_callback(self, _goal_request) -> GoalResponse:
+        return GoalResponse.ACCEPT
+
+    def _joint_cancel_callback(self, goal_handle) -> CancelResponse:
+        self._motion_controller.halt_and_safe('joint_action_cancelled')
+        return CancelResponse.ACCEPT
+
+    async def _execute_joint_action(self, goal_handle):
+        try:
+            result = self._motion_controller.execute_joint_action(goal_handle)
+            if result.success:
+                goal_handle.succeed()
+            elif result.result_code == 'CANCELED':
+                goal_handle.canceled()
+            else:
+                goal_handle.abort()
+            return result
+        except Exception as exc:
+            self.get_logger().error('Joint action execution failed: %s', exc)
+            goal_handle.abort()
+            result = JointCommand.Result()
+            result.success = False
+            result.result_code = 'EXCEPTION'
+            result.last_error = str(exc)
+            return result
+
     # ------------------------------------------------------------------ lifecycle
     def destroy_node(self):
         self._trajectory_action.destroy()
+        self._joint_action.destroy()
         self._commander.disconnect()
         return super().destroy_node()
 

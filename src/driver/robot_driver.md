@@ -1,10 +1,10 @@
 # robot_driver.md
 
-该文档用于梳理 `robot_driver_node`（设备下发/上报驱动）的需求、边界与验收标准。
+该文档用于梳理 `robot_driver`（设备下发/上报驱动）的需求、边界与验收标准。
 
 ## 背景
-- `robot_driver_node` 位于 `driver/src/robot_driver_node.py`（仓库路径 `L2/src/driver/src/`），承担机械臂/夹爪等执行器的底层通信、状态采集与命令下发。
-- 上层模块（robot_skill、skill、app 等）依赖该节点提供稳定的实时接口。
+- `robot_driver` 位于 `driver/src/robot_driver.py`（仓库路径 `L2/src/driver/src/`），承担机械臂/夹爪等执行器的底层通信、状态采集与命令下发。
+- 上层模块（robot_skill、app 等）依赖该节点提供稳定的实时接口。
 
 ## 节点职责（目标）
 1. 发布 `/joint_states`
@@ -94,10 +94,11 @@ effort: []
 | `/robot_driver/service/zero_gravity` | Service (`std_srvs/SetBool`) | 零重力模式开关，快速切换机械臂力矩控制状态。 | `ros2 service call /robot_driver/service/zero_gravity std_srvs/srv/SetBool "{data: true}"` |
 | `/robot_driver/service/self_check` | Service (`std_srvs/Trigger`) | 触发自检流程：读取关节状态、回到安全位、校验到位情况。 | `ros2 service call /robot_driver/service/self_check std_srvs/srv/Trigger` |
 | `/robot_driver/action/follow_joint_trajectory` | Action (`control_msgs/action/FollowJointTrajectory`) | 关节轨迹执行器，接收轨迹点序列并执行；支持反馈、取消与抢占。 | `ros2 action send_goal /robot_driver/action/follow_joint_trajectory control_msgs/action/FollowJointTrajectory "{trajectory: {joint_names: ['joint1'], points: [{positions: [0.5], time_from_start: {sec: 1}}]}}" --feedback` |
+| `/robot_driver/action/joint` | Action (`robot_driver/action/JointCommand`) | 点动/单段关节控制语法糖，允许指定任意子集的关节（含 `gripper`）并设置 `speed_scale`、zero-gravity 退出等选项；内部仍复用 `FollowJointTrajectory` 执行链路。 | `ros2 action send_goal /robot_driver/action/joint robot_driver/action/JointCommand "{target: {joint_state: {name: ['joint2','joint3','gripper'], position: [-0.4,0.55,0.018]}, relative: false, speed_scale: 0.6}, options: {timeout: {sec: 5}, label: 'fine_adjust', exit_zero_gravity: true}}" --feedback` |
 | `/robot_driver/action/safety_pose` | Action | 包装：停机→回 SAFE_POSE→等待稳定→校验，可选重新开零重力；内部复用 `/robot_driver/action/follow_joint_trajectory`。 | 设计中 |
 | `/robot_driver/action/reset` | Action | 编排：调用 `safety_pose` 成功后再调用 `zero_gravity`，实现"回安全位并开零重力"。 | 设计中 |
 | `/robot_driver/action/robot` | Action | 笛卡尔控制：空间位姿 → IK → 生成关节轨迹 → 交给 `/robot_driver/action/follow_joint_trajectory` 执行。 | 设计中 |
-| `/robot_driver/action/gripper` | Action (`l2_msgs/action/GripperCommand`) | 夹爪/末端执行器控制，底层复用关节执行器（单通道或映射到 follow_joint_trajectory action）。 | 设计中 |
+| `/robot_driver/action/gripper` | Action (`robot_driver/action/GripperCommand`) | 夹爪/末端执行器控制，底层复用关节执行器（单通道或映射到 follow_joint_trajectory action）。 | 设计中 |
 
 > **注意**：当前笛卡尔控制通过 Topic `/robot_driver/robot_command` 实现，未来会迁移至 `/robot_driver/action/robot`，两者将在过渡期共存；Topic 接口将成为 Action 的语法糖，内部调用 Action client。
 
@@ -128,6 +129,7 @@ effort: []
 4. `/robot_driver/joint_command`（Topic）
    - 实现：对关节控制的轻量封装，单点命令由 `MotionController.handle_joint_command()` 处理并转发给 commander。
    - 当前状态：已实现，直接调用 `HardwareCommander` 的关节控制能力。
+   - Action 版本：`/robot_driver/action/joint`，提供同等能力且支持反馈、抢占、zero-gravity 自动退出与 `contact_state` 触碰检测。
 5. `/robot_driver/robot_command`（Topic）
    - 实现：接收笛卡尔目标，内部通过 `MotionController` 执行 IK + 插值，底层调用 commander。
    - 当前状态：已实现，未来将成为 `/robot_driver/action/robot` 的语法糖。
@@ -143,6 +145,32 @@ effort: []
 
 > 备注：统一的 `FollowJointTrajectory` 让"落位"、"常规轨迹"、"单轴 Debug"都走同一执行链路、共享互斥与反馈，减少重复线程，实现优雅的抢占管理。
 
+### `/robot_driver/action/joint` 参数约定
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `target.joint_state.name` | `string[]` | 要控制的关节名子集，必须与 `/joint_states` 中的名称一致；可以只填需要点动的关节，夹爪统一使用 `gripper`。 |
+| `target.joint_state.position/velocity/effort` | `float[]` | 根据当前 `joint_command_mode` 读取对应字段；示例默认用 position。未提供的字段会被忽略。 |
+| `target.relative` | `bool` | `true` 时在当前姿态上叠加 `joint_state` 中的增量（rad）；`false` 时表示绝对目标。 |
+| `target.speed_scale` | `float` | 0‒1 的限速倍率，乘以参数 `joint_command_rate_limit` 后作为本次 ramp 的最大步长；例如默认 0.5 rad/s × 0.6 = 0.3 rad/s，用于平滑点动。 |
+| `options.timeout` | `builtin_interfaces/Duration` | 软超时；到期尚未完成则抢占并返回失败。 |
+| `options.exit_zero_gravity` | `bool` | 发送前若检测到零重力模式，将先自动关闭（默认 `false`）。 |
+| `options.label` | `string` | 可选标签，写入日志/反馈，便于上层跟踪命令来源。 |
+
+**反馈 / 结果字段**
+
+- `phase`：`queued` → `ramping` → `settling` 状态机，便于 UI/日志展示。
+- `completion_ratio`：0‒1，按目标关节中最大剩余位移比例计算。
+- `current_state`：最新关节状态（含 `name/position/velocity/effort`）。
+- `target_state`：本次命令的目标关节值（与 Goal 对齐，便于比对）。
+- `contact_state`：`map<string, JointContact>`，对所有正在控制的关节输出状态：
+  - `in_contact`：速度趋近 0 且 effort 超阈值时为 `true`，用于判断夹爪/关节是否触碰到物体或发生阻挡；夹爪由 `gripper` 条目报告。
+  - `effort`/`velocity`/`position`：最近一次采样值，便于上层做“握持完成”或“轴被阻塞”判定。
+  - `note`：可选文本，记录限幅、碰撞、contact 触发说明等。
+- `last_error`：若执行中出现限幅/IK 失败等异常，这里给出最后一条可读信息。
+
+Action Result 会携带与最终 Feedback 相同的 `current_state` 与 `contact_state`，方便调用方在结果回调中直接决策（例如检测 `gripper` 是否已经 `in_contact=true` 且 effort 达到阈值）。
+
 ## 实现技术方案（对标 l1_stage1_device）
 1. 启动链路（方案稳定，暂不调整）
    - `driver/start_robot_driver.sh`：仿照 `L1/start_stage1.sh`，完成以下步骤：
@@ -150,16 +178,16 @@ effort: []
      2. 调用 `I2RT/i2rt/scripts/reset_all_can.sh` 强制清总线；
      3. 执行 `python3 -m driver.can_interface_manager --ensure --interface canX` 以确认 gs_usb 接口、比特率；
  4. 设定 `PYTHONPATH`（挂载 I2RT SDK）、ROS 环境、`log/robot_driver/robot_driver.log` 输出，并以 `ros2 launch driver robot_driver.launch.py` 方式拉起节点；
-     5. 统一杀掉旧进程 `robot_driver_node`，保证脚本幂等。
+     5. 统一杀掉旧进程 `robot_driver`，保证脚本幂等。
      6. 使用方式：在仓库根目录运行 `./src/driver/start_robot_driver.sh --can can0` 即可后台启动，若需要实时日志可追加 `--follow-log`，否则默认把输出写入 `log/robot_driver/robot_driver_<timestamp>.log` 后静默运行。
 
 2. 模块分层
    - `can_interface_manager`：借鉴 `l1_stage1_device/cartesian/can_monitor.py` 的思路，封装 gs_usb 设备检测、`ip -details link show` 解析、`I2RT/i2rt/scripts/reset_all_can.sh` 调用与 1 Mbps 配置校验，暴露 `ensure_ready(required=[canX])` API。
    - `hardware_commander`：类似 `CartesianCommander`，包装 I2RT SDK 的 joint/pose 读取、轨迹插值、零重力模式切换（SetZeroGravity）、回零/归位等原语，确保上层 ROS 节点不直接触碰 SDK。
-   - `robot_driver_node`：ROS 2 进程主体，进一步拆成三个内部组件：
+   - `robot_driver`：ROS 2 进程主体，进一步拆成三个内部组件：
      - `state_publisher`：独立 callback group 或 executor，周期性读取 commander 缓存并发布 `/joint_states`、TF 以及 `/robot_driver/diagnostics` 中的运行指标，确保读路径只持有读锁、不阻塞控制线程。
-     - `motion_controller`：承载 `/robot_driver/robot_command`、`/robot_driver/joint_command` 以及 Action 接口（`/robot_driver/robot_command_action`、`/robot_driver/gripper_command_action`），负责命令抢占、IK + 插值、限速、写入 commander。
-     - `command_watchdog`：挂在控制线程侧的子模块，维护 `last_command_stamp`；若 60 s（或 `command_timeout_s`）未收到控制指令则主动调用 `motion_controller` 的安全归位流程，并在确认机械臂已落位 SAFE_POSE 后再触发 `hardware_commander.set_zero_gravity(true)`，也负责 `/robot_driver/safety_stop` 的统一抢占收敛。
+     - `JointControler`：承载 `/robot_driver/robot_command`、`/robot_driver/joint_command` 以及 Action 接口（`/robot_driver/robot_command_action`、`/robot_driver/gripper_command_action`），负责命令抢占、IK + 插值、限速、写入 commander。
+     - `command_watchdog`：挂在控制线程侧的子模块，维护 `last_command_stamp`；若 60 s（或 `command_timeout_s`）未收到控制指令则主动调用 `JointControler` 的安全归位流程，并在确认机械臂已落位 SAFE_POSE 后再触发 `hardware_commander.set_zero_gravity(true)`，也负责 `/robot_driver/safety_stop` 的统一抢占收敛。
 
    3. 指令调度与安全
       - 命令队列：沿用 Stage1 的“单工作线程+可抢占”模型，使用 `queue.Queue` 存储笛卡尔/关节指令，任何新区指令会清空旧队列并打断当前插值；
@@ -219,7 +247,7 @@ effort: []
 | `publish_tf` | bool | `true` | 是否发布 TF 变换 |
 | `tf_base_frame` | string | `base_link` | TF 基坐标系名称 |
 | `tf_tool_frame` | string | `tool0` | TF 工具坐标系名称 |
-| `diag_hardware_id` | string | `robot_driver_node` | 诊断消息中的硬件 ID |
+| `diag_hardware_id` | string | `robot_driver` | 诊断消息中的硬件 ID |
 | `diagnostic_latch_sec` | float | `5.0` | 诊断状态锁存时间（秒） |
 | `cartesian_command_rate_limit` | float | `0.15` | 笛卡尔命令速度限制（m/s） |
 | `joint_command_mode` | string | `position` | 关节直控模式（position/velocity/effort） |
@@ -233,6 +261,7 @@ effort: []
 | `joint_state_topic` | `/joint_states` | 关节状态发布话题 |
 | `diagnostics_topic` | `/robot_driver/diagnostics` | 诊断信息发布话题 |
 | `follow_joint_trajectory_action` | `/robot_driver/action/follow_joint_trajectory` | 关节轨迹 action 接口 |
+| `joint_command_action` | `/robot_driver/action/joint` | 单段关节 action 接口 |
 | `zero_gravity_service` | `/robot_driver/service/zero_gravity` | 零重力服务接口 |
 
 **SAFE_POSE 配置**
@@ -263,12 +292,12 @@ effort: []
 driver/
 ├── src/driver/
 │   ├── app/                 # ROS 入口节点
-│   │   └── robot_driver_node.py       # ROS 2 主节点实现
+│   │   └── robot_driver.py       # ROS 2 主节点实现
 │   ├── config/              # 参数、SAFE_POSE 解析
 │   │   ├── parameter_schema.py        # ROS 参数声明与打包
 │   │   └── safe_pose_loader.py        # SAFE_POSE YAML 解析
 │   ├── control/             # 运动、Watchdog、状态发布、零重力管理
-│   │   ├── motion_controller.py      # 命令处理与轨迹执行
+│   │   ├── joint_controler.py      # 命令处理与轨迹执行
 │   │   ├── command_watchdog.py       # 安全超时与 safety_stop
 │   │   ├── state_publisher.py        # JointState/TF/诊断发布
 │   │   └── zero_gravity_manager.py   # 零重力服务与状态管理
@@ -297,17 +326,17 @@ driver/
 ```
 
 **注意**：
-- 目录结构已完成重构，新代码在各子目录中，部分旧文件（如 `src/driver/robot_driver_node.py` 等）仍存在以保持向后兼容，待清理。
-- 实际运行时使用 `driver.app.robot_driver_node` 作为入口。
+- 目录结构已完成重构，新代码在各子目录中，部分旧文件（如 `src/driver/robot_driver.py` 等）仍存在以保持向后兼容，待清理。
+- 实际运行时使用 `driver.app.robot_driver` 作为入口。
 
 ### 源码模块划分（面向对象）
 **核心节点**
-- `driver.app.robot_driver_node.RobotDriverNode`
+- `driver.app.robot_driver.RobotDriverNode`
   - ROS 2 主节点，负责参数声明、组件装配、ROS 接口注册与生命周期管理。
   - 集成 `MotionController`、`StatePublisher`、`CommandWatchdog`、`ZeroGravityManager` 等组件。
 
 **控制层**
-- `driver.control.motion_controller.MotionController`
+- `driver.control.joint_controler.JointControler`
   - 统一处理 `/robot_driver/robot_command`、`/robot_driver/joint_command` 与 `FollowJointTrajectory` action。
   - 集成命令队列、限速、IK 求解、SAFE_POSE 落位能力。
 - `driver.control.command_watchdog.CommandWatchdog`
@@ -351,8 +380,8 @@ driver/
   - `<buildtool_depend>ament_python</buildtool_depend>`、`<exec_depend>` 覆盖 `rclpy`、`sensor_msgs`、`geometry_msgs`、`trajectory_msgs`、`control_msgs`、`diagnostic_msgs`、`std_srvs`、`std_msgs` 等接口依赖。
   - 声明外部 SDK 依赖（I2RT）和脚本运行所需的 `python3` 模块（如 `pyyaml`）。
 - `setup.py`
-  - 使用 `setuptools.setup()` 注册 `packages=[]`（脚本位于 `src/`），通过 `py_modules=['robot_driver_node']` 或将源码改为包形式；
-  - 配置 `entry_points={'console_scripts': ['robot_driver_node=robot_driver_node:main']}` 方便 `ros2 run driver robot_driver_node`。
+  - 使用 `setuptools.setup()` 注册 `packages=[]`（脚本位于 `src/`），通过 `py_modules=['robot_driver']` 或将源码改为包形式；
+  - 配置 `entry_points={'console_scripts': ['robot_driver=robot_driver:main']}` 方便 `ros2 run driver robot_driver`。
 - `setup.cfg`
   - `data_files` 中安装 `package.xml`、`resource/robot_driver`、`launch/` 与 `config/`；
   - `options.entry_points` 重复声明 console script，确保 `colcon build` 正确生成。
