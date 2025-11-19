@@ -11,13 +11,14 @@ from rclpy.action import ActionServer, CancelResponse, GoalResponse
 from rclpy.node import Node
 from sensor_msgs.msg import JointState
 from std_msgs.msg import Empty
-from std_srvs.srv import SetBool, Trigger
+from std_srvs.srv import Trigger
 
 from driver.config.parameter_schema import DriverParameters, declare_and_get_parameters
 from driver.config.safe_pose_loader import SafePoseLoader
 from driver.control.command_watchdog import CommandWatchdog
 from driver.control.motion_controller import MotionController
 from driver.control.state_publisher import StatePublisher
+from driver.control.zero_gravity_manager import ZeroGravityManager
 from driver.hardware.hardware_commander import HardwareCommander
 from driver.hardware.robot_description_loader import RobotDescriptionLoader
 from driver.utils.logging_utils import get_logger
@@ -45,6 +46,7 @@ class RobotDriverNode(Node):
         )
 
         self._subscriptions = []
+        self._zero_gravity_manager = None
         self._create_ros_interfaces()
         self._connect_hardware()
 
@@ -80,10 +82,10 @@ class RobotDriverNode(Node):
             )
         )
 
-        self._zero_gravity_srv = self.create_service(
-            SetBool,
-            self._params.zero_gravity_service,
-            self._handle_zero_gravity,
+        self._zero_gravity_manager = ZeroGravityManager(
+            self,
+            self._commander,
+            service_name=self._params.zero_gravity_service,
         )
         self._self_check_srv = self.create_service(
             Trigger,
@@ -139,15 +141,6 @@ class RobotDriverNode(Node):
             self.get_logger().error(traceback.format_exc())
 
     # ------------------------------------------------------------------ services
-    def _handle_zero_gravity(self, request: SetBool.Request, response: SetBool.Response):
-        success = self._commander.set_zero_gravity(request.data)
-        response.success = success
-        if success:
-            response.message = f'zero_gravity -> {request.data}'
-        else:
-            response.message = 'Failed to toggle zero_gravity (see logs)'
-        return response
-
     def _handle_self_check(self, _request: Trigger.Request, response: Trigger.Response):
         """Run self-check: verify joints, move through range, return to safe pose."""
         try:

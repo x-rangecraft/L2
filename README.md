@@ -21,9 +21,8 @@
 | 视觉 | `object_perception_2d_node` | 负责 2D Mask 与物体识别/记忆，输出语义分割或检测结果。 |
 |  | `vision_3d_mapper_node` | 将 2D Mask 投影到 3D 点云，生成世界/相机坐标系下的目标姿态。 |
 | 机械臂 | `robot_driver_node` | 读写机械臂控制器：实时采集关节位置/速度/力矩，并对目标关节位姿做插值、限速与安全检查后下发。 |
-|  | `move_controller_group_node` | 根据 3D 感知结果生成轨迹规划，负责逆解、避障与时序控制。 |
+|  | `robot_skill` | 根据 3D 感知结果生成轨迹规划，负责连续指令规划与执行、逆解、时序控制。 |
 |  | `robot_desc_node` | 发布 URDF 与 Mesh 资源，供 RViz/MoveIt 等可视化与规划模块消费。 |
-|  | `robot_skill_node` | 封装常用动作集（抓取、旋转采样等），对上层提供技能级指令。 |
 | TF | `static_tf_config` (Action) | 生成手眼标定与全局静态坐标配置，保障多坐标系一致性。 |
 |  | `static_tf_publisher` (Action) | 广播 `/tf` 与 `/tf_static`，同步机器人各坐标系给可视化、导航、控制栈。 |
 | App | `robot_server` | 面向局域网对外的服务节点，处理任务下发、状态查询、告警通知等 API。 |
@@ -39,7 +38,7 @@ L2/
 │   ├── camera/                  # RealSense 等相机节点的带参启动、调优与多机位管理
 │   ├── description/             # 机器人描述包，含 URDF/Mesh 供 robot_desc_node 发布
 │   ├── driver/                  # 机械臂底层驱动 robot_driver_node 的实现
-│   ├── move_controller/         # 轨迹规划与运动控制逻辑 move_controller_group_node
+│   ├── robot_skill/           # 机器人技能规划与执行逻辑，负责连续指令规划与时序控制
 │   ├── skill/                   # 上层动作/技能封装，提供抓取等复合指令
 │   ├── perception/              # 2D 视觉感知 object_perception_2d_node 及其资源
 │   ├── vision/                  # 3D 映射与高阶视觉推理（消费 camera 包输出的话题）
