@@ -6,8 +6,8 @@ robot_driver:
     command_timeout_s: 600.0
     zero_gravity_default: true
     xyz_only_mode: false
-    log_dir: log/robot_driver
-    safe_pose_file: config/safe_pose_20251114_104828.yaml
+    log_dir: /home/jetson/L2/log/robot_driver
+    safe_pose_file: config/safe_pose_config.yaml
     robot_description_file: robot_description.yaml
     publish_tf: true
     tf_base_frame: base_link
@@ -19,6 +19,7 @@ robot_driver:
     diagnostics_topic: /robot_driver/diagnostics
     follow_joint_trajectory_action: /robot_driver/action/follow_joint_trajectory
     joint_command_action: /robot_driver/action/joint
+    safety_pose_action: /robot_driver/action/safety_pose
     zero_gravity_service: /robot_driver/service/zero_gravity
     can_reset_script: ""
     joint_command_mode: position

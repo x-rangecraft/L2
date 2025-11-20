@@ -41,6 +41,7 @@ class DriverParameters:
     diagnostics_topic: str
     follow_joint_trajectory_action: str
     joint_command_action: str
+    safety_pose_action: str
     zero_gravity_service: str
     can_reset_script: str
     joint_command: JointCommandConfig
@@ -104,6 +105,7 @@ def declare_and_get_parameters(node: Node) -> DriverParameters:
             'follow_joint_trajectory_action', '/robot_driver/action/follow_joint_trajectory'
         ),
         joint_command_action=_declare('joint_command_action', '/robot_driver/action/joint'),
+        safety_pose_action=_declare('safety_pose_action', '/robot_driver/action/safety_pose'),
         zero_gravity_service=_declare('zero_gravity_service', '/robot_driver/service/zero_gravity'),
         can_reset_script=_declare('can_reset_script', ''),
         joint_command=joint_cfg,

@@ -32,20 +32,30 @@ def _candidate_roots(extra: Optional[Iterable[Path]] = None) -> list[Path]:
     if extra:
         roots.extend(Path(p) for p in extra)
 
+    here = Path(__file__).resolve()
+    workspace_root = None
+    for parent in here.parents:
+        if parent.name.lower() == 'l2':
+            workspace_root = parent
+            break
+    if workspace_root:
+        roots.append(workspace_root)
+        roots.append(workspace_root / 'src')
+        roots.append(workspace_root / 'src/driver')
+
+    # Fall back to generic parents (shorter depth first)
+    for idx in (5, 4, 3, 2, 6, 7, 8, 9, 10):
+        try:
+            roots.append(here.parents[idx])
+        except IndexError:
+            continue
+
     if get_package_share_directory:
         try:
             share = Path(get_package_share_directory(PACKAGE_NAME))
             roots.append(share)
         except PackageNotFoundError:
             pass
-
-    here = Path(__file__).resolve()
-    # Prefer workspace root (repo) over package subdirs to avoid nesting like src/driver/src/l2/log
-    for idx in (5, 4, 3, 2):  # tolerant to path depth; skipped if missing
-        try:
-            roots.append(here.parents[idx])
-        except IndexError:
-            continue
 
     roots.append(Path.cwd())
     return _unique(roots)

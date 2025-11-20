@@ -48,8 +48,7 @@ class SafePoseLoader:
         if 'safe_pose' in data:
             data = data['safe_pose']
 
-        joint_names = list(data.get('joint_names', []))
-        positions = [float(x) for x in data.get('positions', [])]
+        joint_names, positions = self._extract_joint_data(data)
         metadata = data.get('metadata', {})
         frame_id = metadata.get('frame_id', 'base_link')
         ready_flag = bool(metadata.get('ready', False))
@@ -83,3 +82,31 @@ class SafePoseLoader:
             ready=self._fallback.ready,
             source='parameter:safe_pose_fallback',
         )
+
+    def _extract_joint_data(self, data) -> tuple[list[str], list[float]]:
+        """Extract joint data supporting legacy (names+positions) and new map formats."""
+        joint_names = list(data.get('joint_names', []))
+        positions = [float(x) for x in data.get('positions', [])]
+        if joint_names and positions:
+            return joint_names, positions
+
+        joints_section = data.get('joints')
+        if isinstance(joints_section, dict):
+            ordered_names = list(joints_section.keys())
+            ordered_positions = [float(joints_section[name]) for name in ordered_names]
+            return ordered_names, ordered_positions
+
+        entries = data.get('joint_entries')
+        if isinstance(entries, list):
+            names: list[str] = []
+            values: list[float] = []
+            for entry in entries:
+                name = str(entry.get('name', '')).strip()
+                if not name:
+                    continue
+                names.append(name)
+                values.append(float(entry.get('position', 0.0)))
+            if names and values:
+                return names, values
+
+        return joint_names, positions

@@ -96,6 +96,30 @@ metadata:
             Path(config_dir / filename).unlink(missing_ok=True)
             Path(config_dir / f"{filename}.ready").unlink(missing_ok=True)
 
+    def test_load_from_joints_map(self):
+        """Support the map-format safe_pose_config.yaml output."""
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.yaml', delete=False) as f:
+            f.write("""
+safe_pose:
+  joints:
+    joint1: 0.123
+    joint2: -0.456
+  metadata:
+    ready: true
+    frame_id: base_link
+""")
+            temp_path = f.name
+
+        try:
+            loader = SafePoseLoader()
+            pose = loader.load(temp_path)
+            self.assertEqual(pose.joint_names, ['joint1', 'joint2'])
+            self.assertEqual(pose.positions, [0.123, -0.456])
+            self.assertTrue(pose.ready)
+            self.assertEqual(pose.frame_id, 'base_link')
+        finally:
+            Path(temp_path).unlink(missing_ok=True)
+
 
 if __name__ == '__main__':
     unittest.main()

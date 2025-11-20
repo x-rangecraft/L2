@@ -95,7 +95,7 @@ effort: []
 | `/robot_driver/service/self_check` | Service (`std_srvs/Trigger`) | 触发自检流程：读取关节状态、回到安全位、校验到位情况。 | `ros2 service call /robot_driver/service/self_check std_srvs/srv/Trigger` |
 | `/robot_driver/action/follow_joint_trajectory` | Action (`control_msgs/action/FollowJointTrajectory`) | 关节轨迹执行器，接收轨迹点序列并执行；支持反馈、取消与抢占。 | `ros2 action send_goal /robot_driver/action/follow_joint_trajectory control_msgs/action/FollowJointTrajectory "{trajectory: {joint_names: ['joint1'], points: [{positions: [0.5], time_from_start: {sec: 1}}]}}" --feedback` |
 | `/robot_driver/action/joint` | Action (`robot_driver/action/JointCommand`) | 点动/单段关节控制语法糖，允许指定任意子集的关节（含 `gripper`）并设置 `speed_scale`、zero-gravity 退出等选项；内部仍复用 `FollowJointTrajectory` 执行链路。 | `ros2 action send_goal /robot_driver/action/joint robot_driver/action/JointCommand "{target: {joint_state: {name: ['joint2','joint3','gripper'], position: [-0.4,0.55,0.018]}, relative: false, speed_scale: 0.6}, options: {timeout: {sec: 5}, label: 'fine_adjust', exit_zero_gravity: true}}" --feedback` |
-| `/robot_driver/action/safety_pose` | Action | 包装：停机→回 SAFE_POSE→等待稳定→校验，可选重新开零重力；内部复用 `/robot_driver/action/follow_joint_trajectory`。 | 设计中 |
+| `/robot_driver/action/safety_pose` | Action (`robot_driver/action/SafetyPose`) | 包装：加载 `safe_pose_config.yaml` → 用固定 JointAction（`relative=false`、`speed_scale=0.8`、`timeout=10s`、`exit_zero_gravity=true`）回 SAFE_POSE，再等待/校验；唯一参数是“是否在结束后重新打开零重力”，结果统一记录 `L2/log/`。 | `ros2 action send_goal /robot_driver/action/safety_pose robot_driver/action/SafetyPose "{enable_zero_gravity_after: true}" --feedback` |
 | `/robot_driver/action/reset` | Action | 编排：调用 `safety_pose` 成功后再调用 `zero_gravity`，实现"回安全位并开零重力"。 | 设计中 |
 | `/robot_driver/action/robot` | Action | 笛卡尔控制：空间位姿 → IK → 生成关节轨迹 → 交给 `/robot_driver/action/follow_joint_trajectory` 执行。 | 设计中 |
 | `/robot_driver/action/gripper` | Action (`robot_driver/action/GripperCommand`) | 夹爪/末端执行器控制，底层复用关节执行器（单通道或映射到 follow_joint_trajectory action）。 | 设计中 |
@@ -115,9 +115,9 @@ effort: []
 在此基础上构建上层接口：
 
 1. `/robot_driver/action/safety_pose`
-   - 流程：`STOP` → 调用 `FollowJointTrajectory` 运行 SAFE_POSE 轨迹 → 等待稳定 → 校验误差，可选恢复零重力。
-   - 用途：看门狗、人工触发、测试脚本，共享同一执行器保证互斥。
-   - 当前状态：功能通过 `MotionController.safe_pose_sequence()` 实现，尚未封装为独立 Action。
+   - 流程：`STOP` → 读取 `safe_pose_config.yaml` → 以固定 JointAction（`relative=false`、`speed_scale=0.8`、`timeout=10s`、`exit_zero_gravity=true`）触发 `/robot_driver/action/joint` → 等待/校验，随后根据 Goal 中 `enable_zero_gravity_after` 决定是否重新打开零重力。
+   - 用途：看门狗、人工触发、测试脚本，共享同一执行器保证互斥，并统一记录在 `L2/log/robot_driver/`。
+   - 当前状态：已实现，Action 类型为 `robot_driver/action/SafetyPose`，由 `robot_driver` 节点直接发布。
 2. `/robot_driver/action/reset`
    - 流程：发送 `safety_pose` goal 成功 → 调用 `ZeroGravityService` 重新开启零重力。
    - 用途：安全停机后的"回位+漂浮"一站式指令。
@@ -177,9 +177,9 @@ Action Result 会携带与最终 Feedback 相同的 `current_state` 与 `contact
      1. 解析 `--can canX`、`--xyz-only`、`--zero-gravity` 等参数；
      2. 调用 `I2RT/i2rt/scripts/reset_all_can.sh` 强制清总线；
      3. 执行 `python3 -m driver.can_interface_manager --ensure --interface canX` 以确认 gs_usb 接口、比特率；
- 4. 设定 `PYTHONPATH`（挂载 I2RT SDK）、ROS 环境、`log/robot_driver/robot_driver.log` 输出，并以 `ros2 launch driver robot_driver.launch.py` 方式拉起节点；
+ 4. 设定 `PYTHONPATH`（挂载 I2RT SDK）、ROS 环境、`L2/log/robot_driver/robot_driver.log` 输出，并以 `ros2 launch driver robot_driver.launch.py` 方式拉起节点；
      5. 统一杀掉旧进程 `robot_driver`，保证脚本幂等。
-     6. 使用方式：在仓库根目录运行 `./src/driver/start_robot_driver.sh --can can0` 即可后台启动，若需要实时日志可追加 `--follow-log`，否则默认把输出写入 `log/robot_driver/robot_driver_<timestamp>.log` 后静默运行。
+     6. 使用方式：在仓库根目录运行 `./src/driver/start_robot_driver.sh --can can0` 即可后台启动，若需要实时日志可追加 `--follow-log`，否则默认把输出写入 `L2/log/robot_driver/robot_driver_<timestamp>.log` 后静默运行。若需调试前台运行，可追加 `--foreground`。
 
 2. 模块分层
    - `can_interface_manager`：借鉴 `l1_stage1_device/cartesian/can_monitor.py` 的思路，封装 gs_usb 设备检测、`ip -details link show` 解析、`I2RT/i2rt/scripts/reset_all_can.sh` 调用与 1 Mbps 配置校验，暴露 `ensure_ready(required=[canX])` API。
@@ -200,10 +200,10 @@ Action Result 会携带与最终 Feedback 相同的 `current_state` 与 `contact
 
 4. 零重力模式钩子
    - 在 Commander 初始化时读取参数 `zero_gravity_default`，并提供 `set_zero_gravity(bool)` API，内部调用 I2RT SDK 的零重力接口（若缺失则通过写寄存器实现），状态变更同步到 `/robot_driver/diagnostics`。
-  - 服务端做互斥处理：切模式期间暂停指令执行，并在成功/失败时写日志到 `log/robot_driver/`。
+  - 服务端做互斥处理：切模式期间暂停指令执行，并在成功/失败时写日志到 `L2/log/robot_driver/`。
 
 5. 日志与诊断
-- 日志滚动策略：`driver/start_robot_driver.sh` 创建 `log/robot_driver/robot_driver_<date>.log`，ROS 节点内部使用 `logging` 模块写同一路径；
+- 日志滚动策略：`driver/start_robot_driver.sh` 创建 `L2/log/robot_driver/robot_driver_<date>.log`，ROS 节点内部使用 `logging` 模块写同一路径；
 - 关键信息（CAN 重连、零重力切换、`/robot_driver/safety_stop` 触发、心跳超时、SAFE_POSE 校验误差）必须双写：一份进入 `/robot_driver/diagnostics`，一份落地日志文件，便于离线排查；
    - 发生异常时自动收集最近一次指令上下文（命令源 topic/action、目标值、IK 耗时）并写入日志。
 
@@ -222,7 +222,7 @@ Action Result 会携带与最终 Feedback 相同的 `current_state` 与 `contact
   1. 启动后立即调用 `/robot_driver/service/zero_gravity` 进入零重力，提示操作者可手动拖动机械臂至期望安全位。
   2. 脚本阻塞等待回车（或 `ctrl+c` 退出），确保操作者完成调姿后再继续。
   3. 收集当前关节状态：通过 `ros2 topic echo /joint_states --once`（或 commander CLI）读取最新的关节名/角度，并打印到终端让操作者确认。
-  4. 操作者确认后，脚本把 `safe_pose_<timestamp>.yaml` 直接写入 `driver/config/`，内容包括 `joint_names`、`positions`、可选末端位姿与备注，便于立即在 `safe_pose_file` 中引用。
+  4. 操作者确认后，脚本把最新结果写入固定文件 `config/safe_pose_config.yaml`，内容包括 `safe_pose.joints`、metadata 与 `.ready` 标记，便于立即在 `safe_pose_file` 中引用。
 - 后续可把生成的 YAML 纳入版本管理或部署包，`command_watchdog` 与 `/robot_driver/safety_stop` 将依赖该 SAFE_POSE 数据。在补充具体参数前，此脚本可反复执行以更新标定结果。
 
 
@@ -241,8 +241,8 @@ Action Result 会携带与最终 Feedback 相同的 `current_state` 与 `contact
 | `command_timeout_s` | float | `600.0` | 命令超时时间（秒），超时后触发安全归位 |
 | `zero_gravity_default` | bool | `true` | 启动时是否默认开启零重力模式 |
 | `xyz_only_mode` | bool | `false` | 笛卡尔控制是否仅修改位置（忽略姿态） |
-| `log_dir` | string | `log/robot_driver` | 日志输出目录（相对于工作区根目录） |
-| `safe_pose_file` | string | `config/safe_pose_20251114_104828.yaml` | SAFE_POSE 配置文件路径 |
+| `log_dir` | string | `/home/jetson/L2/log/robot_driver` | 日志输出目录（相对于工作区根目录） |
+| `safe_pose_file` | string | `config/safe_pose_config.yaml` | SAFE_POSE 配置文件路径 |
 | `robot_description_file` | string | `robot_description.yaml` | 机器人描述文件路径（关节限位等） |
 | `publish_tf` | bool | `true` | 是否发布 TF 变换 |
 | `tf_base_frame` | string | `base_link` | TF 基坐标系名称 |
@@ -263,6 +263,7 @@ Action Result 会携带与最终 Feedback 相同的 `current_state` 与 `contact
 | `follow_joint_trajectory_action` | `/robot_driver/action/follow_joint_trajectory` | 关节轨迹 action 接口 |
 | `joint_command_action` | `/robot_driver/action/joint` | 单段关节 action 接口 |
 | `zero_gravity_service` | `/robot_driver/service/zero_gravity` | 零重力服务接口 |
+| `safety_pose_action` | `/robot_driver/action/safety_pose` | SAFE_POSE Action 接口 |
 
 **SAFE_POSE 配置**
 - `safe_pose_file`：指向具体的 SAFE_POSE YAML 文件
@@ -274,10 +275,12 @@ Action Result 会携带与最终 Feedback 相同的 `current_state` 与 `contact
 **启动脚本参数覆盖**
 `start_robot_driver.sh` 支持以下命令行参数：
 - `--can canX`：指定 CAN 接口（覆盖 `can_channel`）
-- `--zero-gravity`：启动时开启零重力（覆盖 `zero_gravity_default`）
-- `--xyz-only`：启用 xyz_only 模式（覆盖 `xyz_only_mode`）
+- `--zero-gravity` / `--no-zero-gravity`：控制启动后是否默认开启零重力
+- `--xyz-only` / `--no-xyz-only`：控制笛卡尔命令模式
 - `--params <file>`：指定自定义参数文件
-- `--follow-log`：实时显示日志（否则后台运行）
+- `--follow-log`：后台运行时实时显示日志
+- `--foreground`：以前台形式运行，方便调试
+- `--stop`：停止当前正在运行的守护进程
 
 **运行时参数更新**
 部分参数支持通过 `ros2 param set` 动态更新：
@@ -314,7 +317,7 @@ driver/
 ├── config/                  # 默认参数 & SAFE_POSE YAML
 │   ├── robot_driver_config.yaml      # 主配置文件
 │   ├── safe_pose_default.yaml        # 默认安全位
-│   └── safe_pose_*.yaml              # 标定生成的安全位
+│   └── safe_pose_config.yaml         # 最新 SAFE_POSE（safe_pose_build.sh 自动生成）
 ├── launch/                  # launch 入口
 │   └── robot_driver.launch.py        # 启动配置
 ├── tests/                   # 单元测试
@@ -391,7 +394,7 @@ driver/
   - 可选：在 debug 模式下拉起 `ros2 run tf2_ros static_transform_publisher` 或状态可视化节点。
 - `config/robot_driver_config.yaml`
   - 至少包含 `joint_state_rate`、`diagnostics_rate`、`command_timeout_s`、`safe_pose`、`log_dir` 等字段；
-  - 默认引用 `config/safe_pose_default.yaml` 以集中维护姿态数据，可在标定后替换为新的 `safe_pose_*.yaml`。
+  - 默认引用 `config/safe_pose_config.yaml`（由 `safe_pose_build.sh` 维护），必要时可回滚到 `safe_pose_default.yaml`。
 
 ## 待讨论要点
 1. 通信接口

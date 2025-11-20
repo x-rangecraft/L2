@@ -1,0 +1,14 @@
+# Goal
+bool enable_zero_gravity_after
+---
+# Result
+bool success
+string result_code
+string last_error
+float32 max_error
+string joint_action_code
+---
+# Feedback
+string phase
+float32 completion_ratio
+string message

@@ -5,8 +5,6 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PACKAGE_ROOT="${SCRIPT_DIR}"
 WORKSPACE_ROOT="$(cd -- "${PACKAGE_ROOT}/../.." && pwd)"
 DEFAULT_PARAM_FILE="${PACKAGE_ROOT}/config/robot_driver_config.yaml"
-# Prefer shell-matching setup script if available (avoids zsh sourcing bash issues),
-# fallback to standard bash setup.
 if [[ -n "${ZSH_VERSION:-}" && -f "/opt/ros/humble/setup.zsh" ]]; then
     ROS_SETUP="/opt/ros/humble/setup.zsh"
 else
@@ -28,14 +26,12 @@ DAEMON_MODE="daemon"
 DAEMON_CHILD=0
 STOP_ONLY=0
 FOLLOW_LOG=0
-# 镜像日志到标准错误，方便直接看到提示。后台子进程会自动关闭该开关。
 LOG_STDERR_MIRROR=1
 VERBOSE_CONSOLE=0
 declare -a CHILD_ARGS=()
 
 CAN_CHANNEL="can0"
 XYZ_ONLY_MODE="false"
-# 默认在落位 SAFE_POSE 后自动进入零重力模式
 ZERO_GRAVITY_DEFAULT="true"
 PARAM_FILE=""
 
@@ -54,14 +50,12 @@ Options:
   --zero-gravity         启动时默认进入零重力
   --no-zero-gravity      启动时默认关闭零重力（默认）
   --params <file>        指定参数 YAML（默认 driver/config/robot_driver_config.yaml，若存在）
-  --daemon               后台守护运行（默认），命令返回后守护进程继续运行
-  --foreground           前台运行，行为与旧版本相同
+  --daemon               后台守护运行（默认）
+  --foreground           前台运行
   --stop                 停止后台守护进程
-  --follow-log           后台模式下跟随日志输出
+  --follow-log           后台模式下实时查看日志
   --no-follow-log        后台模式下不跟随日志（默认）
   --verbose              控制台打印更多启动进度 / 状态
-  --no-exit-after-safe   前台模式下，不在安全位姿落位后退出脚本
-  --safe-timeout <sec>   等待安全位姿落位的超时时间（默认 120s，前台模式有效）
   -h, --help             显示本帮助
 USAGE
 }
@@ -148,7 +142,13 @@ cleanup_processes() {
 stop_daemon() {
     local pid
     if ! pid="$(read_pid_file)"; then
-        log "robot_driver supervisor is not running (PID file ${PID_FILE} not found)."
+        if pgrep -f robot_driver_node >/dev/null 2>&1 || pgrep -f "ros2 launch robot_driver robot_driver.launch.py" >/dev/null 2>&1; then
+            log "PID file missing but robot_driver processes still running; cleaning up..."
+            cleanup_processes || true
+            log "Residual robot_driver processes cleaned up."
+        else
+            log "robot_driver supervisor is not running (PID file ${PID_FILE} not found)."
+        fi
         return 0
     fi
     if ! kill -0 "${pid}" >/dev/null 2>&1; then
@@ -201,7 +201,7 @@ build_child_args() {
             --daemon|--no-daemon|--foreground|--stop|--follow-log|--no-follow-log|--daemon-child|--verbose|--no-exit-after-safe)
                 ;;
             --safe-timeout)
-                ((i+=1))  # skip value
+                ((i+=1))
                 ;;
             --safe-timeout=*)
                 ;;
@@ -245,7 +245,7 @@ launch_daemon_mode() {
         fi
         exit 0
     fi
-    status_cn "robot_driver 已在后台运行（跳过 SAFE_POSE 监控，日志：${LOG_FILE}）。使用 --follow-log 可实时查看输出。"
+    status_cn "robot_driver 已在后台运行，日志：${LOG_FILE}"
     exit 0
 }
 
@@ -259,9 +259,8 @@ ensure_command() {
 source_if_exists() {
     local file="$1"
     if [[ -f "$file" ]]; then
-        # shellcheck source=/dev/null
-        # Temporarily disable -u to allow ROS setup scripts to reference undefined variables
         set +u
+        # shellcheck source=/dev/null
         source "$file"
         set -u
         return 0
@@ -393,11 +392,6 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# 只有父进程需要镜像到终端；子进程专注写日志文件，避免重复输出
-if [[ ${DAEMON_CHILD} -eq 1 ]]; then
-    LOG_STDERR_MIRROR=0
-fi
-
 if [[ ${STOP_ONLY} -eq 1 ]]; then
     if stop_daemon; then
         exit 0
@@ -444,25 +438,23 @@ fi
 
 source_ros_env
 
-    if [[ -n "${I2RT_PYTHON_ROOT}" ]]; then
-        prepend_pythonpath "${I2RT_PYTHON_ROOT}"
-    fi
-    if [[ -d "${PACKAGE_ROOT}/src" ]]; then
-        prepend_pythonpath "${PACKAGE_ROOT}/src"
-    fi
+if [[ -n "${I2RT_PYTHON_ROOT}" ]]; then
+    prepend_pythonpath "${I2RT_PYTHON_ROOT}"
+fi
+if [[ -d "${PACKAGE_ROOT}/src" ]]; then
+    prepend_pythonpath "${PACKAGE_ROOT}/src"
+fi
 
 log "Using workspace: ${WORKSPACE_ROOT}"
 log "Log file: ${LOG_FILE}"
 log "CAN channel: ${CAN_CHANNEL}"
 log "XYZ-only mode: ${XYZ_ONLY_MODE}"
-log "Zero-gravity default: ${ZERO_GRAVITY_DEFAULT} (SAFE_POSE 完成后自动启用)"
-log "Verbose console: ${VERBOSE_CONSOLE}"
+log "Zero-gravity default: ${ZERO_GRAVITY_DEFAULT}"
 if [[ -n "${PARAM_FILE}" ]]; then
     log "Parameter file: ${PARAM_FILE}"
 else
     log "Parameter file: <none>"
 fi
-log "启动入口：./src/driver/start_robot_driver.sh --can can0（按需替换 can 通道）；若需要实时输出可追加 --follow-log，默认改写日志至 log/robot_driver/robot_driver_<timestamp>.log"
 
 run_can_maintenance() {
     local first_run="$1"
@@ -512,7 +504,6 @@ run_can_maintenance() {
 export ROBOT_DRIVER_LOG_FILE="${LOG_FILE}"
 
 LAUNCH_ARGS=("can_channel:=${CAN_CHANNEL}" "xyz_only_mode:=${XYZ_ONLY_MODE}" "zero_gravity_default:=${ZERO_GRAVITY_DEFAULT}")
-# 默认使用内置配置文件，除非显式传入 --params 覆盖
 if [[ -n "${PARAM_FILE}" ]]; then
     LAUNCH_ARGS+=("params:=${PARAM_FILE}")
 fi
