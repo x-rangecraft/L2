@@ -1,6 +1,8 @@
 """State publisher helpers for robot_driver."""
 from __future__ import annotations
 
+import threading
+import time
 from dataclasses import dataclass
 
 from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
@@ -27,10 +29,30 @@ class StatePublisher:
         self._tf_broadcaster = TransformBroadcaster(node) if params.publish_tf else None
         self._diagnostics_cache = DiagnosticsCache()
 
-        joint_period = 1.0 / max(1e-3, params.joint_state_rate)
+        self._joint_period = 1.0 / max(1e-3, params.joint_state_rate)
+        self._joint_stop = threading.Event()
+        self._joint_thread = threading.Thread(target=self._joint_worker, daemon=True)
+        self._joint_thread.start()
+
         diag_period = 1.0 / max(1e-3, params.diagnostics_rate)
-        self._joint_timer = node.create_timer(joint_period, self._publish_joint_state)
         self._diag_timer = node.create_timer(diag_period, self._publish_diagnostics)
+
+    def shutdown(self) -> None:
+        """Stop background state publishing thread."""
+        self._joint_stop.set()
+        if self._joint_thread.is_alive():
+            self._joint_thread.join(timeout=1.0)
+
+    # ------------------------------------------------------------------ threads
+    def _joint_worker(self) -> None:
+        while not self._joint_stop.is_set():
+            try:
+                self._publish_joint_state()
+            except Exception as exc:  # pragma: no cover - defensive guard
+                self._node.get_logger().error(f'Joint state publisher failed: {exc}')
+            finally:
+                # Wait for the configured period or exit early if stop requested.
+                self._joint_stop.wait(self._joint_period)
 
     # ------------------------------------------------------------------ timers
     def _publish_joint_state(self):

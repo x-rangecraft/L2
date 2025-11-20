@@ -49,7 +49,11 @@ class RobotDriverNode(Node):
             zero_gravity_manager=self._zero_gravity_manager,
             zero_gravity_service=self._params.zero_gravity_service,
         )
-        self._state_publisher = StatePublisher(self, self._commander, self._params)
+        self._state_publisher = StatePublisher(
+            self,
+            self._commander,
+            self._params,
+        )
         self._watchdog = CommandWatchdog(
             self,
             self._motion_controller,
@@ -240,6 +244,7 @@ class RobotDriverNode(Node):
 
     # ------------------------------------------------------------------ lifecycle
     def destroy_node(self):
+        self._state_publisher.shutdown()
         self._trajectory_action.destroy()
         self._joint_action.destroy()
         self._commander.disconnect()
