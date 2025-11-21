@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import math
+import threading
 import time
 import traceback
 
@@ -10,7 +11,6 @@ import rclpy
 from builtin_interfaces.msg import Duration
 from control_msgs.action import FollowJointTrajectory
 from geometry_msgs.msg import PoseStamped
-from rcl_interfaces.msg import SetParametersResult
 from rclpy.action import ActionClient, ActionServer, CancelResponse, GoalResponse
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.node import Node
@@ -21,7 +21,6 @@ from robot_driver.action import JointCommand, SafetyPose
 
 from driver.config.parameter_schema import DriverParameters, declare_and_get_parameters
 from driver.config.safe_pose_loader import SafePoseLoader
-from driver.control.command_watchdog import CommandWatchdog
 from driver.control.joint_controler import JointControler
 from driver.control.state_publisher import StatePublisher
 from driver.control.zero_gravity_manager import ZeroGravityManager
@@ -67,12 +66,6 @@ class RobotDriverNode(Node):
             self._commander,
             self._params,
         )
-        self._watchdog = CommandWatchdog(
-            self,
-            self._motion_controller,
-            self._commander,
-            timeout_s=self._params.command_timeout_s,
-        )
         self._trajectory_group = ReentrantCallbackGroup()
         self._joint_action_group = ReentrantCallbackGroup()
         self._safety_action_group = ReentrantCallbackGroup()
@@ -81,9 +74,6 @@ class RobotDriverNode(Node):
         self._subscriptions = []
         self._create_ros_interfaces()
         self._connect_hardware()
-
-        # Register parameter callback for dynamic updates
-        self.add_on_set_parameters_callback(self._on_parameter_update)
 
     # ------------------------------------------------------------------ setup helpers
     def _create_ros_interfaces(self) -> None:
@@ -109,11 +99,13 @@ class RobotDriverNode(Node):
             self.create_subscription(
                 Empty,
                 '/robot_driver/safety_stop',
-                self._watchdog.handle_safety_stop,
+                self._on_safety_stop,
                 10,
             )
         )
 
+        # Keep the self-check service name for API compatibility, but implement it
+        # as a lightweight stub to avoid duplicating SAFE_POSE logic here.
         self._self_check_srv = self.create_service(
             Trigger,
             '/robot_driver/service/self_check',
@@ -192,40 +184,39 @@ class RobotDriverNode(Node):
             self._logger.error('joint_command handler failed: %s', exc)
             self.get_logger().error(traceback.format_exc())
 
+    def _on_safety_stop(self, _msg: Empty) -> None:
+        """Handle /robot_driver/safety_stop without a dedicated watchdog.
+
+        Run the SAFE_POSE sequence in a background thread so the rclpy executor
+        is not blocked, but do not maintain any periodic timeout logic.
+        """
+
+        def _worker():
+            try:
+                self._logger.warning('Safety stop requested; running SAFE_POSE sequence')
+                self._motion_controller.safe_pose_sequence(
+                    reason='safety_stop',
+                    exit_zero_gravity=True,
+                    wait_time=2.0,
+                    tolerance=0.1,
+                    reenable_zero_gravity=True,
+                )
+            except Exception as exc:  # pragma: no cover - defensive guard
+                self._logger.error('Safety stop sequence failed: %s', exc)
+
+        threading.Thread(target=_worker, daemon=True).start()
+
     # ------------------------------------------------------------------ services
     def _handle_self_check(self, _request: Trigger.Request, response: Trigger.Response):
-        """Run self-check: verify joints, move through range, return to safe pose."""
-        try:
-            self._logger.info('Running self-check sequence')
+        """Lightweight stub for /robot_driver/service/self_check.
 
-            # Step 1: Read current joint state
-            joint_data = self._commander.read_joint_state()
-            if not joint_data.names:
-                response.success = False
-                response.message = 'No joint data available'
-                return response
-
-            # Step 2: Verify we can read positions
-            self._logger.info(f'Self-check: Read {len(joint_data.names)} joints')
-
-            # Step 3: Move to safe pose
-            self._commander.move_to_safe_pose()
-            time.sleep(1.0)
-
-            # Step 4: Verify arrival
-            if self._commander.check_at_safe_pose():
-                response.success = True
-                response.message = f'Self-check passed: {len(joint_data.names)} joints OK, moved to safe pose'
-            else:
-                response.success = False
-                response.message = 'Self-check: Failed to reach safe pose'
-
-            self._logger.info(f'Self-check complete: {response.message}')
-        except Exception as exc:
-            response.success = False
-            response.message = f'Self-check failed: {exc}'
-            self._logger.error(response.message)
-
+        The previous self-check sequence duplicated SAFE_POSE handling; it is now
+        removed to keep the node simpler. The service is left in place so that
+        existing tools do not crash, but it always reports that self-check is
+        disabled.
+        """
+        response.success = False
+        response.message = 'Self-check is disabled; use external diagnostics instead.'
         return response
 
     # ------------------------------------------------------------------ action server
@@ -549,32 +540,6 @@ class RobotDriverNode(Node):
         self._joint_action_client.destroy()
         self._commander.disconnect()
         return super().destroy_node()
-
-    def _on_parameter_update(self, params):
-        """Handle dynamic parameter updates."""
-        result = SetParametersResult()
-        result.successful = True
-        result.reason = ''
-
-        for param in params:
-            param_name = param.name
-            if param_name == 'joint_state_rate':
-                new_rate = param.value
-                self._logger.info(f'Updating joint_state_rate: {new_rate}')
-                # Would need to recreate timer, skip for now
-                result.successful = False
-                result.reason = f'Runtime update of {param_name} not yet supported'
-            elif param_name == 'command_timeout_s':
-                new_timeout = param.value
-                self._logger.info(f'Updating command_timeout_s: {new_timeout}')
-                self._params.command_timeout_s = new_timeout
-                self._watchdog._timeout = new_timeout
-            else:
-                self._logger.warning(f'Unknown parameter for runtime update: {param_name}')
-                result.successful = False
-                result.reason = f'Parameter {param_name} cannot be updated at runtime'
-
-        return result
 
 
 def main(args=None):
