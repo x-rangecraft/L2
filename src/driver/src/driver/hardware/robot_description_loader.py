@@ -53,10 +53,17 @@ class RobotDescriptionLoader:
             self._logger.warning('robot_description_file 未配置，返回空描述。')
             return RobotDescription()
 
-        path = resolve_relative_path(path_str, must_exist=False)
-        if not path.exists():
-            self._logger.warning('Robot description file %s missing; falling back to empty description.', path)
-            return RobotDescription()
+        # robot_description_file 是驱动的基础配置，这里采用 fail-fast 策略：
+        #  - 使用 resolve_relative_path(must_exist=True) 在候选根目录中查找文件；
+        #  - 找不到时直接抛出异常，而不是静默返回空描述，避免后续关节校验全部失败却难以定位。
+        try:
+            path = resolve_relative_path(path_str, must_exist=True)
+        except FileNotFoundError:
+            self._logger.error(
+                'Robot description file %s not found; please check the robot_description_file parameter.',
+                path_str,
+            )
+            raise
 
         try:
             data = yaml.safe_load(path.read_text()) or {}

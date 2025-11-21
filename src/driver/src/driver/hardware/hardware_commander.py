@@ -114,6 +114,18 @@ class HardwareCommander:
         self._sdk_commander = self._maybe_import_sdk()
         self._robot_description = robot_description or RobotDescription()
         self._joint_state = self._initialize_joint_state()
+        # Require a non-empty joint list so that downstream components
+        # (JointControler, SAFE_POSE manager, etc.) can reliably validate
+        # JointState/JointCommand messages. If this is empty it almost always
+        # indicates a configuration issue (e.g. robot_description_file not
+        # pointing to the installed robot_description.yaml), so fail fast.
+        if not self._joint_state.names:
+            self._logger.error(
+                'HardwareCommander initialised with empty joint list; '
+                'ensure robot_description_file points to a YAML that defines joints '
+                '(including the gripper entry, if present).',
+            )
+            raise ValueError('HardwareCommander requires a non-empty joint list from RobotDescription')
         self._joint_index: Dict[str, int] = {name: idx for idx, name in enumerate(self._joint_state.names)}
         self._ee_pose = Pose()
         self._last_read_time = 0.0
@@ -618,7 +630,7 @@ class HardwareCommander:
                     site_name="grasp_site",
                     init_q=current_joints,
                     max_iters=max_iters,
-                    verbose=False
+                    verbose=False,
                 )
 
                 if success:
