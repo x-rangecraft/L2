@@ -19,7 +19,6 @@ else
     LOG_FILE="${LOG_DIR}/robot_driver_$(date +'%Y%m%d_%H%M%S').log"
 fi
 touch "${LOG_FILE}"
-PID_FILE="${LOG_DIR}/robot_driver.pid"
 
 ORIGINAL_ARGS=("$@")
 DAEMON_MODE="daemon"
@@ -81,114 +80,105 @@ status_cn() {
     log "提示(${prefix}): ${msg}"
 }
 
-read_pid_file() {
-    if [[ -f "${PID_FILE}" ]]; then
-        local pid
-        pid="$(tr -d '[:space:]' < "${PID_FILE}")"
-        if [[ "${pid}" =~ ^[0-9]+$ ]]; then
-            printf '%s\n' "${pid}"
-            return 0
-        fi
-    fi
-    return 1
-}
-
-write_pid_file() {
-    printf '%s\n' "$$" > "${PID_FILE}"
-}
-
-cleanup_pid_file_on_exit() {
-    if [[ -f "${PID_FILE}" ]]; then
-        local pid
-        pid="$(tr -d '[:space:]' < "${PID_FILE}")"
-        if [[ "${pid}" = "$$" ]]; then
-            rm -f "${PID_FILE}"
-        fi
-    fi
-}
-
-ensure_no_active_daemon() {
-    local existing_pid
-    if existing_pid="$(read_pid_file)"; then
-        if kill -0 "${existing_pid}" >/dev/null 2>&1; then
-            log "robot_driver supervisor already running as PID ${existing_pid}; use --stop before starting a new instance."
-            exit 0
-        fi
-        log "Removing stale PID file ${PID_FILE} (PID ${existing_pid} not running)"
-        rm -f "${PID_FILE}"
-    fi
-}
-
-wait_for_pid_file() {
-    local timeout=${1:-15}
-    local end=$((SECONDS + timeout))
-    while (( SECONDS < end )); do
-        local pid
-        if pid="$(read_pid_file)"; then
-            printf '%s\n' "${pid}"
-            return 0
-        fi
-        sleep 0.2
-    done
-    return 1
-}
-
 cleanup_processes() {
     log "Killing existing robot_driver processes (if any)..."
-    pkill -f robot_driver_node 2>/dev/null || true
+    # 关闭所有 ros2 launch robot_driver 进程
     pkill -f "ros2 launch robot_driver robot_driver.launch.py" 2>/dev/null || true
+    # 关闭所有 robot_driver 节点进程（两种匹配都保留，尽量覆盖）
+    pkill -f "robot_driver/lib/robot_driver/robot_driver_node.py" 2>/dev/null || true
+    pkill -f robot_driver_node 2>/dev/null || true
+}
+
+cleanup_supervisors() {
+    # Ensure there is at most one start_robot_driver.sh supervisor.
+    # 只匹配真正的守护进程，不会杀掉当前这次 CLI 调用（没有 --daemon-child）。
+    log "Killing existing robot_driver supervisor processes (if any)..."
+    pkill -f "start_robot_driver.sh --daemon-child" 2>/dev/null || true
 }
 
 stop_daemon() {
-    local pid
-    if ! pid="$(read_pid_file)"; then
-        if pgrep -f robot_driver_node >/dev/null 2>&1 || pgrep -f "ros2 launch robot_driver robot_driver.launch.py" >/dev/null 2>&1; then
-            log "PID file missing but robot_driver processes still running; cleaning up..."
-            cleanup_processes || true
-            log "Residual robot_driver processes cleaned up."
-        else
-            log "robot_driver supervisor is not running (PID file ${PID_FILE} not found)."
-        fi
+    status_cn "正在查找需要关闭的 robot_driver 相关进程..."
+
+    # 收集当前所有相关进程（仅用于打印，不靠这些 PID 进行精确杀死）
+    local supervisors launches nodes
+    supervisors="$(pgrep -fa "start_robot_driver.sh --daemon-child" 2>/dev/null || true)"
+    launches="$(pgrep -fa "ros2 launch robot_driver robot_driver.launch.py" 2>/dev/null || true)"
+    nodes="$(pgrep -fa "robot_driver/lib/robot_driver/robot_driver_node.py" 2>/dev/null || true)"
+
+    if [[ -z "${supervisors}${launches}${nodes}" ]]; then
+        status_cn "未找到正在运行的 robot_driver 相关进程" "WARN"
+        log "No robot_driver supervisors or nodes found to stop."
         return 0
     fi
-    if ! kill -0 "${pid}" >/dev/null 2>&1; then
-        log "Stale PID file for PID ${pid}; removing."
-        rm -f "${PID_FILE}"
-        return 0
+
+    status_cn "已找到需要关闭的进程：" "INFO"
+    if [[ -n "${supervisors}" ]]; then
+        while IFS= read -r line; do
+            [[ -z "${line}" ]] && continue
+            status_cn "  supervisor: ${line}"
+        done <<< "${supervisors}"
     fi
-    local pgid
-    pgid="$(ps -o pgid= -p "${pid}" 2>/dev/null | tr -d '[:space:]')" || pgid=""
-    local kill_target="${pid}"
-    if [[ -n "${pgid}" && "${pgid}" =~ ^[0-9]+$ ]]; then
-        kill_target="-${pgid}"
-        log "Stopping robot_driver supervisor PID ${pid} (process group ${pgid})..."
-    else
-        log "Stopping robot_driver supervisor PID ${pid}..."
+    if [[ -n "${launches}" ]]; then
+        while IFS= read -r line; do
+            [[ -z "${line}" ]] && continue
+            status_cn "  launch:     ${line}"
+        done <<< "${launches}"
     fi
-    kill "${kill_target}" >/dev/null 2>&1 || true
-    local waited=0
-    local timeout=15
-    local hard_kill_sent=0
-    while kill -0 "${pid}" >/dev/null 2>&1; do
-        if (( waited >= timeout )); then
-            if (( hard_kill_sent == 0 )); then
-                log "PID ${pid} still running after ${timeout}s; sending SIGKILL."
-                kill -9 "${kill_target}" >/dev/null 2>&1 || true
-                hard_kill_sent=1
-                waited=0
-                timeout=5
-                continue
-            fi
-            log "ERROR: Failed to stop PID ${pid}; please kill it manually."
-            return 1
-        fi
-        sleep 1
-        ((waited+=1))
-    done
+    if [[ -n "${nodes}" ]]; then
+        while IFS= read -r line; do
+            [[ -z "${line}" ]] && continue
+            status_cn "  node:       ${line}"
+        done <<< "${nodes}"
+    fi
+
+    status_cn "正在关闭上述进程..." "INFO"
+    log "Stopping robot_driver supervisor and ROS processes..."
+
+    # Best-effort kill of all daemon-child supervisors and ROS nodes.
+    # 1) 先按惯用启动方式杀掉所有 start_robot_driver.sh --can ... 守护/残留进程
+    pkill -f "start_robot_driver.sh --can" 2>/dev/null || true
+    # 2) 再杀掉带 --daemon-child 标记的守护进程
+    cleanup_supervisors || true
+    # 3) 最后杀掉所有 ros2 launch / robot_driver_node 进程
     cleanup_processes || true
-    rm -f "${PID_FILE}"
-    log "robot_driver supervisor stopped."
-    return 0
+
+    # 等待一小段时间让进程退出
+    sleep 1
+
+    # 再次检查是否还有相关进程存活
+    local still_sup still_launch still_nodes
+    still_sup="$(pgrep -fa "start_robot_driver.sh --daemon-child" 2>/dev/null || true)"
+    still_launch="$(pgrep -fa "ros2 launch robot_driver robot_driver.launch.py" 2>/dev/null || true)"
+    still_nodes="$(pgrep -fa "robot_driver/lib/robot_driver/robot_driver_node.py" 2>/dev/null || true)"
+
+    if [[ -z "${still_sup}${still_launch}${still_nodes}" ]]; then
+        status_cn "robot_driver 相关进程已全部关闭" "INFO"
+        log "robot_driver stopped."
+        return 0
+    fi
+
+    status_cn "部分进程仍在运行，请手动检查：" "WARN"
+    if [[ -n "${still_sup}" ]]; then
+        while IFS= read -r line; do
+            [[ -z "${line}" ]] && continue
+            status_cn "  supervisor: ${line}" "WARN"
+        done <<< "${still_sup}"
+    fi
+    if [[ -n "${still_launch}" ]]; then
+        while IFS= read -r line; do
+            [[ -z "${line}" ]] && continue
+            status_cn "  launch:     ${line}" "WARN"
+        done <<< "${still_launch}"
+    fi
+    if [[ -n "${still_nodes}" ]]; then
+        while IFS= read -r line; do
+            [[ -z "${line}" ]] && continue
+            status_cn "  node:       ${line}" "WARN"
+        done <<< "${still_nodes}"
+    fi
+
+    log "WARNING: some robot_driver processes may still be running; please check with ps."
+    return 1
 }
 
 build_child_args() {
@@ -215,26 +205,38 @@ build_child_args() {
 }
 
 launch_daemon_mode() {
-    ensure_no_active_daemon
+    # Before starting a new supervisor, proactively clean up any stray
+    # daemon-child supervisors from previous runs to guarantee a single
+    # supervisor and a single /robot_driver instance.
+    cleanup_supervisors
     build_child_args
     status_cn "正在后台启动 robot_driver，日志输出：${LOG_FILE}"
     log "Starting robot_driver supervisor in daemon mode (log: ${LOG_FILE})"
-    if command -v setsid >/dev/null 2>&1; then
-        env ROBOT_DRIVER_LOG_FILE_OVERRIDE="${LOG_FILE}" \
-            setsid nohup "$0" "${CHILD_ARGS[@]}" </dev/null >/dev/null 2>&1 &
-    else
-        log "WARNING: 'setsid' command not found; daemon will remain in current session."
-        env ROBOT_DRIVER_LOG_FILE_OVERRIDE="${LOG_FILE}" \
-            nohup "$0" "${CHILD_ARGS[@]}" </dev/null >/dev/null 2>&1 &
+
+    # 直接通过 nohup 后台启动子脚本，并使用 $! 精确获取守护进程 PID，
+    # 避免依赖模糊的 pgrep 匹配。
+    env ROBOT_DRIVER_LOG_FILE_OVERRIDE="${LOG_FILE}" \
+        nohup "$0" "${CHILD_ARGS[@]}" </dev/null >/dev/null 2>&1 &
+    local daemon_pid=$!
+    disown "${daemon_pid}" 2>/dev/null || true
+
+    # 固定每 1s 检查一次，最多等待 10s；10s 内守护进程仍不存在则视为启动失败。
+    local waited=0
+    local timeout=10
+    while (( waited < timeout )); do
+        if kill -0 "${daemon_pid}" >/dev/null 2>&1; then
+            break
+        fi
+        sleep 1
+        ((waited+=1))
+    done
+    if ! kill -0 "${daemon_pid}" >/dev/null 2>&1; then
+        status_cn "后台守护进程启动失败 (PID=${daemon_pid} 在 ${timeout}s 内未存活)" "ERROR"
+        log "ERROR: Daemon-child supervisor PID ${daemon_pid} is not alive ${timeout}s after start."
+        exit 1
     fi
-    local launcher_pid=$!
-    disown "${launcher_pid}" 2>/dev/null || true
-    local daemon_pid
-    if daemon_pid="$(wait_for_pid_file 10)"; then
-        status_cn "后台守护进程 PID=${daemon_pid} 已启动"
-    else
-        status_cn "后台守护进程 PID 暂不可见，请手动检查" "WARN"
-    fi
+
+    status_cn "后台守护进程 PID=${daemon_pid} 已启动"
     if [[ ${FOLLOW_LOG} -eq 1 ]]; then
         if command -v tail >/dev/null 2>&1; then
             status_cn "进入实时日志跟随模式，按 Ctrl+C 可退出（驱动持续运行）"
@@ -413,14 +415,11 @@ fi
 ensure_command ros2
 ensure_command python3
 ensure_command pkill
+ensure_command nohup
 
 if [[ ${DAEMON_CHILD} -eq 0 && "${DAEMON_MODE}" = "daemon" ]]; then
     launch_daemon_mode
 fi
-
-ensure_no_active_daemon
-trap cleanup_pid_file_on_exit EXIT
-write_pid_file
 
 status_cn "开始启动 robot_driver（CAN=${CAN_CHANNEL}，零重力默认=${ZERO_GRAVITY_DEFAULT}）"
 
@@ -547,13 +546,13 @@ while true; do
         break
     fi
 
+    # 关闭自动重启逻辑：仅记录一次退出原因后直接退出监督循环。
     if [[ ${EXIT_CODE} -eq 0 ]]; then
-        log "ros2 launch exited cleanly (code 0). Restarting in ${RESTART_DELAY_SUCCESS}s."
-        sleep ${RESTART_DELAY_SUCCESS}
+        log "ros2 launch exited cleanly (code 0). Auto-restart disabled; supervisor exiting."
     else
-        log "WARNING: ros2 launch exited with code ${EXIT_CODE}; restarting in ${RESTART_DELAY_FAILURE}s"
-        sleep ${RESTART_DELAY_FAILURE}
+        log "WARNING: ros2 launch exited with code ${EXIT_CODE}; auto-restart disabled; supervisor exiting."
     fi
+    break
 done
 
 log "robot_driver supervisor stopped"
