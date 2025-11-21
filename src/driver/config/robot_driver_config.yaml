@@ -25,6 +25,13 @@ robot_driver:
     joint_command_mode: position
     joint_command_rate_limit: 0.5
     enable_joint_velocity_fuse: false
+    # Gripper (夹爪) 相关配置，供 /robot_driver/action/gripper 使用。
+    # 这些参数与具体硬件绑定，上层 Action 调用只需关心 width_m（米）。
+    gripper.max_width_m: 0.094             # 夹爪最大开口宽度（单位：米），当前实测约 94mm
+    gripper.open_width_default_m: 0.06     # 默认“打开”目标宽度（例如 60mm，可按现场调整）
+    gripper.grip_width_max_m: 0.094        # GRIP 模式下允许的最大闭合行程（通常等于 max_width_m）
+    gripper.no_object_margin_ratio: 0.1    # 用于区分“夹到物体”与“空抓到极限”的行程裕度比例
+    gripper.contact_effort_threshold: 5.0  # 若需为 gripper 单独调节接触力矩阈值，可使用此值覆盖默认
     safe_pose_fallback:
       joint_names:
         - joint1

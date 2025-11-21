@@ -27,6 +27,7 @@ from driver.hardware.hardware_commander import HardwareCommander
 from driver.hardware.robot_description_loader import RobotDescriptionLoader
 from driver.safety.safe_pose_manager import SafePoseManager
 from driver.utils.logging_utils import get_logger
+from driver.app.gripper_action import GripperAction
 
 _SAFE_POSE_SPEED_SCALE = 0.8
 _SAFE_POSE_TIMEOUT_S = 10.0
@@ -140,6 +141,12 @@ class RobotDriverNode(Node):
             JointCommand,
             self._params.joint_command_action,
             callback_group=self._joint_client_group,
+        )
+        # Dedicated gripper action wrapper; exposes /robot_driver/action/gripper
+        # while internally reusing the JointCommand action.
+        self._gripper_action = GripperAction(
+            node=self,
+            joint_client=self._joint_action_client,
         )
         self._safety_pose_action = ActionServer(
             self,
@@ -529,6 +536,7 @@ class RobotDriverNode(Node):
         self._trajectory_action.destroy()
         self._joint_action.destroy()
         self._safety_pose_action.destroy()
+        self._gripper_action.destroy()
         self._joint_action_client.destroy()
         self._commander.disconnect()
         return super().destroy_node()

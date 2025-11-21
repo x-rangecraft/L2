@@ -1,0 +1,36 @@
+# Goal
+uint8 command
+uint8 COMMAND_OPEN=0    # 打开夹爪
+uint8 COMMAND_GRIP=1    # 夹取物体（向关闭方向，带“是否夹到物体”判断）
+uint8 COMMAND_MOVE=2    # 移动到指定开口宽度（不带“夹取”语义）
+
+float32 width_m         # 目标开口宽度（米），0=完全闭合，max_width_m=完全打开
+                        # - OPEN: 若 <=0，则使用参数中的默认开口宽度；>0 时覆盖默认值
+                        # - GRIP: 通常填 0 或不填，表示“本次夹取允许的最小宽度使用默认值”
+                        #         也可以填一个 >0 的值，限制最小闭合宽度（例如保留 5mm 缝隙）
+                        # - MOVE: 必填，表示目标开口宽度
+
+float32 speed_scale     # [0,1]，复用 JointCommand 的 speed_scale，用于限速
+bool   stop_on_contact  # 为 true 时在“判定为夹到物体”后尝试停止继续闭合
+
+builtin_interfaces/Duration timeout
+string label            # 可选标签，用于日志与调试
+---
+# Result
+bool   success
+string result_code      # 'SUCCESS' / 'TIMEOUT' / 'JOINT_FAILED' / 'NO_OBJECT' / 'OBJECT_GRASPED' 等
+string last_error
+
+bool   object_attached  # 是否认为夹到了物体（上层最关心的布尔结论）
+bool   in_contact       # 最终是否检测到接触（原始信号层面）
+
+float32 final_width_m    # 最终开口宽度（米）
+float32 contact_position # 发生接触时的 gripper 关节位置（与 JointContact.position 一致，一般为米，若无接触可设为 NaN）
+float32 contact_effort   # 发生接触时的 effort（若无接触则为 0）
+---
+# Feedback
+string  phase             # 'queued' / 'moving' / 'contact' / 'complete'
+float32 completion_ratio  # 0~1 粗略进度
+float32 current_width_m   # 当前开口宽度（米，来源于 JointContact.position 或 JointState）
+bool    in_contact        # 当前是否检测到接触
+
