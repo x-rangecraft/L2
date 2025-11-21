@@ -1,7 +1,6 @@
 """ROS 2 entry point for robot_driver."""
 from __future__ import annotations
 
-import asyncio
 import math
 import threading
 import time
@@ -274,7 +273,6 @@ class RobotDriverNode(Node):
         return CancelResponse.ACCEPT
 
     async def _execute_safety_pose_action(self, goal_handle):
-        self._ensure_event_loop()
         goal = goal_handle.request
         enable_zero_gravity_after = bool(goal.enable_zero_gravity_after)
         label = 'safety_pose'
@@ -329,7 +327,7 @@ class RobotDriverNode(Node):
             result.joint_action_code = 'UNSENT'
             return result
 
-        if not await self._wait_for_joint_server(timeout):
+        if not self._joint_action_client.wait_for_server(timeout_sec=timeout):
             self._logger.error('Safety pose action%s: joint action server unavailable', label_tag)
             goal_handle.abort()
             result = SafetyPose.Result()
@@ -384,22 +382,7 @@ class RobotDriverNode(Node):
         feedback.message = 'Joint action running'
         goal_handle.publish_feedback(feedback)
 
-        joint_result_future = joint_goal_handle.get_result_async()
-        while not joint_result_future.done():
-            if goal_handle.is_cancel_requested:
-                self._logger.warning('Safety pose action%s cancel requested; canceling joint goal', label_tag)
-                await joint_goal_handle.cancel_goal_async()
-                goal_handle.canceled()
-                result = SafetyPose.Result()
-                result.success = False
-                result.result_code = 'CANCELED'
-                result.last_error = 'Safety pose goal canceled'
-                result.max_error = float('nan')
-                result.joint_action_code = 'CANCELED'
-                return result
-            await asyncio.sleep(0.1)
-
-        joint_result = await joint_result_future
+        joint_result = await joint_goal_handle.get_result_async()
         action_result = joint_result.result
         max_error = self._compute_max_error(action_result.final_state, action_result.target_state)
         feedback.phase = 'settling'
@@ -412,7 +395,7 @@ class RobotDriverNode(Node):
         goal_handle.publish_feedback(feedback)
 
         if settle_time > 0:
-            await asyncio.sleep(settle_time)
+            time.sleep(settle_time)
 
         final_max_error = max_error if math.isfinite(max_error) else float('nan')
         tolerance_check = True
@@ -481,15 +464,6 @@ class RobotDriverNode(Node):
         goal_handle.succeed()
         return result
 
-    # ------------------------------------------------------------------ lifecycle
-    async def _wait_for_joint_server(self, timeout_sec: float) -> bool:
-        deadline = time.monotonic() + max(timeout_sec, 1.0)
-        while time.monotonic() < deadline:
-            if self._joint_action_client.wait_for_server(timeout_sec=0.0):
-                return True
-            await asyncio.sleep(0.1)
-        return False
-
     @staticmethod
     def _float_to_duration(value: float) -> Duration:
         msg = Duration()
@@ -523,14 +497,6 @@ class RobotDriverNode(Node):
         if len(state.name) > limit:
             summary += ', ...'
         return summary
-
-    @staticmethod
-    def _ensure_event_loop() -> None:
-        try:
-            asyncio.get_running_loop()
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
 
     def destroy_node(self):
         self._state_publisher.shutdown()
