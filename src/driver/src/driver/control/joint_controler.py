@@ -737,14 +737,16 @@ class JointControler:
             position = state.positions[idx] if idx < len(state.positions) else 0.0
             velocity = state.velocities[idx] if idx < len(state.velocities) else 0.0
             effort = state.efforts[idx] if idx < len(state.efforts) else 0.0
-            in_contact = abs(velocity) <= self._CONTACT_VELOCITY_EPS and abs(effort) >= self._CONTACT_EFFORT_THRESHOLD
+            temp_mos = state.temp_mos[idx] if idx < len(state.temp_mos) else float('nan')
+            temp_rotor = state.temp_rotor[idx] if idx < len(state.temp_rotor) else float('nan')
             contact = JointContact()
             contact.name = name
-            contact.in_contact = in_contact
             contact.effort = float(effort)
             contact.velocity = float(velocity)
             contact.position = float(position)
-            contact.note = 'contact detected; holding torque' if in_contact else ''
+            contact.temp_mos = float(temp_mos)
+            contact.temp_rotor = float(temp_rotor)
+            contact.note = ''
             contacts.append(contact)
         return contacts
 

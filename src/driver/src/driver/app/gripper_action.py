@@ -60,6 +60,14 @@ class GripperAction:
             )
             self._cfg.max_width_m = 0.094
 
+        # Optional local contact heuristic for internal GRIP logic; this is
+        # not exposed via JointContact.in_contact any more, but still useful
+        # for deciding when to stop squeezing.
+        self._contact_effort_threshold = float(
+            node.declare_parameter('gripper.contact_effort_threshold', 5.0).value
+        )
+        self._contact_velocity_eps = 1e-3
+
         self._cb_group = ReentrantCallbackGroup()
         self._action = ActionServer(
             node,
@@ -394,7 +402,7 @@ class GripperAction:
 
             if contact is not None:
                 width = self._clamp_width(contact.position)
-                in_contact = bool(contact.in_contact)
+                in_contact = self._detect_contact(contact)
             else:
                 width = shared['last_width']
                 in_contact = shared['last_in_contact']
@@ -527,11 +535,11 @@ class GripperAction:
         return result
 
     # ------------------------------------------------------------------ extraction helpers
-    @staticmethod
     def _extract_gripper_from_result(
+        self,
         jc_result: JointCommand.Result,
     ) -> tuple[float, bool, Optional[JointContact]]:
-        """Extract (width, in_contact, contact_msg) for the 'gripper' joint."""
+        """Extract (width, contact_like, contact_msg) for the 'gripper' joint."""
         final_width = 0.0
         in_contact = False
         contact_msg: Optional[JointContact] = None
@@ -551,7 +559,7 @@ class GripperAction:
             for c in jc_result.contact_state:
                 if c.name == 'gripper':
                     contact_msg = c
-                    in_contact = bool(c.in_contact)
+                    in_contact = self._detect_contact(c)
                     break
         except Exception:
             contact_msg = None
@@ -559,3 +567,12 @@ class GripperAction:
 
         return final_width, in_contact, contact_msg
 
+    # ------------------------------------------------------------------ local contact heuristic
+    def _detect_contact(self, contact: JointContact) -> bool:
+        """Local contact heuristic based on velocity/effort for GRIP logic."""
+        try:
+            vel = float(contact.velocity)
+            eff = float(contact.effort)
+        except Exception:
+            return False
+        return abs(vel) <= self._contact_velocity_eps and abs(eff) >= self._contact_effort_threshold

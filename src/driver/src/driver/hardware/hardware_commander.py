@@ -22,6 +22,8 @@ class JointStateData:
     positions: List[float] = field(default_factory=list)
     velocities: List[float] = field(default_factory=list)
     efforts: List[float] = field(default_factory=list)
+    temp_mos: List[float] = field(default_factory=list)
+    temp_rotor: List[float] = field(default_factory=list)
 
 
 @dataclass
@@ -165,6 +167,8 @@ class HardwareCommander:
             positions=zeros[:],
             velocities=zeros[:],
             efforts=zeros[:],
+            temp_mos=zeros[:],
+            temp_rotor=zeros[:],
         )
 
     # ------------------------------------------------------------------ lifecycle
@@ -488,6 +492,8 @@ class HardwareCommander:
                 positions=list(self._joint_state.positions),
                 velocities=list(self._joint_state.velocities),
                 efforts=list(self._joint_state.efforts),
+                temp_mos=list(self._joint_state.temp_mos),
+                temp_rotor=list(self._joint_state.temp_rotor),
             )
 
     def set_joint_state(self, data: JointStateData) -> None:
@@ -577,22 +583,54 @@ class HardwareCommander:
 
         try:
             with self._lock:
-                joint_pos = self._robot.get_joint_pos()
-                # Update positions (assume joint_pos matches our joint order)
-                for i in range(min(len(joint_pos), len(self._joint_state.positions))):
-                    self._joint_state.positions[i] = float(joint_pos[i])
+                # Prefer using the higher-level observation API, which exposes
+                # joint_pos / joint_vel / joint_eff and (optionally) temperatures.
+                obs = None
+                if hasattr(self._robot, 'get_observations'):
+                    try:
+                        obs = self._robot.get_observations()
+                    except Exception as exc:
+                        self._logger.debug('get_observations() failed: %s', exc)
+                        obs = None
 
-                # Try to get velocities if available
-                if hasattr(self._robot, 'get_joint_vel'):
-                    joint_vel = self._robot.get_joint_vel()
-                    for i in range(min(len(joint_vel), len(self._joint_state.velocities))):
-                        self._joint_state.velocities[i] = float(joint_vel[i])
+                if obs is not None:
+                    joint_pos = obs.get('joint_pos')
+                    joint_vel = obs.get('joint_vel')
+                    joint_eff = obs.get('joint_eff')
+                    temp_mos = obs.get('temp_mos')
+                    temp_rotor = obs.get('temp_rotor')
 
-                # Try to get efforts/currents if available
-                if hasattr(self._robot, 'get_joint_torque'):
-                    joint_torque = self._robot.get_joint_torque()
-                    for i in range(min(len(joint_torque), len(self._joint_state.efforts))):
-                        self._joint_state.efforts[i] = float(joint_torque[i])
+                    if joint_pos is not None:
+                        for i in range(min(len(joint_pos), len(self._joint_state.positions))):
+                            self._joint_state.positions[i] = float(joint_pos[i])
+                    if joint_vel is not None:
+                        for i in range(min(len(joint_vel), len(self._joint_state.velocities))):
+                            self._joint_state.velocities[i] = float(joint_vel[i])
+                    if joint_eff is not None:
+                        for i in range(min(len(joint_eff), len(self._joint_state.efforts))):
+                            self._joint_state.efforts[i] = float(joint_eff[i])
+                    if temp_mos is not None:
+                        # Temperatures are optional; clamp to our joint count.
+                        for i in range(min(len(temp_mos), len(self._joint_state.temp_mos))):
+                            self._joint_state.temp_mos[i] = float(temp_mos[i])
+                    if temp_rotor is not None:
+                        for i in range(min(len(temp_rotor), len(self._joint_state.temp_rotor))):
+                            self._joint_state.temp_rotor[i] = float(temp_rotor[i])
+                else:
+                    # Fallback to legacy per-field getters if observations are unavailable.
+                    joint_pos = self._robot.get_joint_pos()
+                    for i in range(min(len(joint_pos), len(self._joint_state.positions))):
+                        self._joint_state.positions[i] = float(joint_pos[i])
+
+                    if hasattr(self._robot, 'get_joint_vel'):
+                        joint_vel = self._robot.get_joint_vel()
+                        for i in range(min(len(joint_vel), len(self._joint_state.velocities))):
+                            self._joint_state.velocities[i] = float(joint_vel[i])
+
+                    if hasattr(self._robot, 'get_joint_torque'):
+                        joint_torque = self._robot.get_joint_torque()
+                        for i in range(min(len(joint_torque), len(self._joint_state.efforts))):
+                            self._joint_state.efforts[i] = float(joint_torque[i])
 
                 self._last_read_time = now
         except Exception as exc:
