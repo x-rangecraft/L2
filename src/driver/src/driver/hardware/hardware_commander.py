@@ -14,7 +14,6 @@ from geometry_msgs.msg import Pose
 from driver.hardware.can_interface_manager import ensure_ready
 from driver.hardware.robot_description_loader import RobotDescription
 from driver.utils.logging_utils import get_logger
-from driver.config.safe_pose_loader import SafePose
 
 
 @dataclass
@@ -99,7 +98,6 @@ class HardwareCommander:
 
     def __init__(
         self,
-        safe_pose: SafePose,
         *,
         joint_limit_rate: float = 0.5,
         gripper_type: Optional[str] = None,
@@ -107,7 +105,6 @@ class HardwareCommander:
     ):
         self._logger = get_logger(__name__)
         self._lock = threading.RLock()
-        self._safe_pose = safe_pose
         self._zero_gravity = False
         self._joint_limit_rate = joint_limit_rate
         self._can_channel = 'can0'
@@ -138,20 +135,25 @@ class HardwareCommander:
             return None
 
     def _initialize_joint_state(self) -> JointStateData:
-        names = list(self._safe_pose.joint_names)
-        positions = list(self._safe_pose.positions)
+        """Initialise the in-memory joint state mirror.
+
+        SAFE_POSE semantics are intentionally not used here so that this class
+        remains a thin abstraction over the underlying hardware.  The initial
+        joint layout is derived from the robot description (if available) and
+        all positions/velocities/efforts start at zero.
+        """
+        names: List[str] = []
         if self._robot_description:
-            for joint_name in self._robot_description.joint_names():
-                if joint_name not in names:
-                    names.append(joint_name)
-                    positions.append(0.0)
+            names = list(self._robot_description.joint_names())
 
         count = len(names)
-        if len(positions) < count:
-            positions.extend([0.0] * (count - len(positions)))
-
         zeros = [0.0] * count
-        return JointStateData(names=names, positions=positions, velocities=zeros[:], efforts=zeros[:])
+        return JointStateData(
+            names=names,
+            positions=zeros[:],
+            velocities=zeros[:],
+            efforts=zeros[:],
+        )
 
     # ------------------------------------------------------------------ lifecycle
     def connect(self, can_channel: str, *, reset_script: Optional[str] = None) -> None:
@@ -333,61 +335,6 @@ class HardwareCommander:
         except Exception as exc:
             self._logger.error('Failed to command cartesian pose: %s', exc)
 
-    def move_to_safe_pose(self) -> bool:
-        """Move to SAFE_POSE. If hardware is present, ramp joints smoothly instead of a step."""
-        if not self.safe_pose_available():
-            self._logger.warning(
-                'SAFE_POSE unavailable (ready flag missing); skipping move_to_safe_pose.'
-            )
-            return False
-
-        # If没有硬件（仿真/单测），沿用旧逻辑以保持行为
-        if not self._robot:
-            self.command_joint_positions(
-                self._safe_pose.joint_names,
-                self._safe_pose.positions,
-                rate_limit=self._joint_limit_rate,
-            )
-            self._logger.info('Moved to SAFE_POSE (simulation) using %s', self._safe_pose.source or '<unknown>')
-            return True
-
-        try:
-            current = np.array(self._robot.get_joint_pos(), dtype=float)
-        except Exception as exc:
-            self._logger.warning('Failed to read current joint pos (%s); performing step move', exc)
-            self.command_joint_positions(
-                self._safe_pose.joint_names,
-                self._safe_pose.positions,
-                rate_limit=self._joint_limit_rate,
-            )
-            return False
-
-        target = current.copy()
-        for name, target_val in zip(self._safe_pose.joint_names, self._safe_pose.positions):
-            idx = self._joint_index.get(name)
-            if idx is None or idx >= len(target):
-                self._logger.warning('Unknown joint %s in SAFE_POSE; skipping', name)
-                continue
-            target[idx] = self._clamp_joint_target(name, float(target_val))
-
-        ramp_ok, ramp_duration, ramp_steps, max_delta, _ = self._execute_joint_ramp(
-            current,
-            target,
-            label='SAFE_POSE',
-            min_duration=0.4,
-            max_duration=6.0,
-        )
-        if not ramp_ok:
-            return False
-
-        self._logger.info(
-            'Moved to SAFE_POSE (ramped %.2fs, %d steps, max Δ=%.3f rad) using %s',
-            ramp_duration,
-            ramp_steps,
-            max_delta,
-            self._safe_pose.source or '<unknown>',
-        )
-        return True
 
     def _ramp_from_current_to_target(
         self,
@@ -481,37 +428,6 @@ class HardwareCommander:
                 self._joint_state.efforts[i] = 0.0
 
         return True, ramp_duration, ramp_steps, max_delta, False
-
-    def check_at_safe_pose(self, tolerance: float = 0.05) -> bool:
-        """Check if robot is at SAFE_POSE within tolerance using fresh telemetry."""
-
-        max_err = self.safe_pose_max_error()
-        if math.isinf(max_err):
-            return False
-        return max_err <= tolerance
-
-    def safe_pose_max_error(self) -> float:
-        """Return max |error| in radians between current joints and SAFE_POSE.
-
-        If SAFE_POSE unavailable or joint mapping missing, returns math.inf so callers
-        can log a meaningful failure reason.
-        """
-        if not self.safe_pose_available():
-            return math.inf
-
-        # Refresh state from hardware before computing error
-        self._update_state_from_hardware()
-
-        with self._lock:
-            max_err = 0.0
-            for i, name in enumerate(self._safe_pose.joint_names):
-                idx = self._joint_index.get(name)
-                if idx is None or idx >= len(self._joint_state.positions):
-                    return math.inf
-                err = abs(self._joint_state.positions[idx] - self._safe_pose.positions[i])
-                if err > max_err:
-                    max_err = err
-            return max_err
 
     # ------------------------------------------------------------------ helpers
     def _cache_default_gains(self) -> None:
@@ -717,4 +633,9 @@ class HardwareCommander:
             self._logger.error('IK solving failed: %s', exc)
             return False, None
     def safe_pose_available(self) -> bool:
-        return bool(self._safe_pose.ready) and bool(self._safe_pose.joint_names) and bool(self._safe_pose.positions)
+        """Deprecated shim kept for backwards compatibility.
+
+        SAFE_POSE semantics have been moved to :class:`SafePoseManager`.  This
+        method always returns ``False`` and should not be used in new code.
+        """
+        return False

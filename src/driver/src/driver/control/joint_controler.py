@@ -21,7 +21,7 @@ from robot_driver.msg import JointContact
 
 from driver.config.parameter_schema import DriverParameters
 from driver.hardware.hardware_commander import HardwareCommander, JointStateData
-from driver.safety.safe_pose_executor import run_safe_pose_sequence
+from driver.safety.safe_pose_manager import SafePoseManager
 from driver.utils.logging_utils import get_logger
 
 if TYPE_CHECKING:
@@ -50,6 +50,7 @@ class JointControler:
         *,
         zero_gravity_manager: Optional["ZeroGravityManager"] = None,
         zero_gravity_service: Optional[str] = None,
+        safe_pose_manager: Optional[SafePoseManager] = None,
     ):
         self._node = node
         self._params = params
@@ -79,6 +80,7 @@ class JointControler:
         # the previous ramp without blocking the ROS executor.
         self._robot_command_thread: Optional[threading.Thread] = None
         self._robot_command_stop = threading.Event()
+        self._safe_pose_manager = safe_pose_manager
 
     # ------------------------------------------------------------------ zero-gravity helpers
     def _zero_gravity_enabled(self) -> bool:
@@ -415,11 +417,17 @@ class JointControler:
                     self._logger.warning('Joint action%s failed to re-enable zero-gravity', label_tag)
 
     def halt_and_safe(self, reason: str = '') -> bool:
+        """Stop current motion and attempt to move towards SAFE_POSE."""
         self._logger.warning('Halting motion: %s', reason)
         self._commander.stop_motion(reason)
-        moved = self._commander.move_to_safe_pose()
-        if not moved:
-            self._logger.warning('SAFE_POSE unavailable; skipping move_to_safe_pose sequence')
+        moved = False
+        manager = self._safe_pose_manager
+        if manager is not None:
+            moved = manager.move_to_safe_pose()
+            if not moved:
+                self._logger.warning('SAFE_POSE unavailable; skipping move_to_safe_pose sequence')
+        else:
+            self._logger.warning('SafePoseManager not configured; skipping move_to_safe_pose sequence')
         self._mark_activity()
         return moved
 
@@ -433,19 +441,57 @@ class JointControler:
         reenable_zero_gravity: bool = False,
         on_complete: Optional[Callable[[bool, float], None]] = None,
     ) -> bool:
-        """Run the shared SAFE_POSE executor and return whether it completed successfully."""
+        """Run SAFE_POSE sequence and return whether it completed successfully."""
 
-        return run_safe_pose_sequence(
-            commander=self._commander,
-            halt_and_safe=self.halt_and_safe,
-            logger=self._logger,
-            reason=reason,
-            exit_zero_gravity=exit_zero_gravity,
-            wait_time=wait_time,
-            tolerance=tolerance,
-            reenable_zero_gravity=reenable_zero_gravity,
-            on_complete=on_complete,
+        manager = self._safe_pose_manager
+        if manager is None:
+            self._logger.warning('SafePoseManager not configured; SAFE_POSE sequence skipped')
+            if on_complete:
+                on_complete(False, float('inf'))
+            return False
+
+        # Optionally exit zero-gravity before moving.
+        if exit_zero_gravity and self._zero_gravity_enabled():
+            self._logger.info('Exiting zero-gravity before SAFE_POSE sequence')
+            if not self._toggle_zero_gravity(False, ' [safe_pose]'):
+                self._logger.warning('Failed to exit zero-gravity; SAFE_POSE motion may not occur')
+
+        self._logger.info(
+            'SAFE_POSE sequence started, reason=%s',
+            reason or '<unknown>',
         )
+        moved = self.halt_and_safe(reason)
+        if not moved:
+            self._logger.warning('SAFE_POSE movement did not complete; skipping pose verification.')
+            if on_complete:
+                on_complete(False, float('inf'))
+            return False
+
+        if wait_time > 0:
+            self._logger.info('Waiting %.1fs for SAFE_POSE arrival', wait_time)
+            time.sleep(wait_time)
+
+        status = manager.check_at_safe_pose(tolerance=tolerance)
+        if not status.in_pose:
+            self._logger.warning(
+                'Robot may not be at SAFE_POSE; max |Δ|=%.3f rad (tolerance %.3f).',
+                status.max_error,
+                tolerance,
+            )
+            if on_complete:
+                on_complete(False, status.max_error)
+            return False
+
+        self._logger.info('SAFE_POSE reached (max |Δ|=%.3f rad)', status.max_error)
+
+        if reenable_zero_gravity:
+            self._logger.info('Re-enabling zero-gravity after SAFE_POSE')
+            if not self._toggle_zero_gravity(True, ' [safe_pose]'):
+                self._logger.warning('Failed to re-enable zero-gravity after SAFE_POSE')
+
+        if on_complete:
+            on_complete(True, status.max_error)
+        return True
 
     # ------------------------------------------------------------------ helpers
     def _validate_robot_command(self, msg: PoseStamped) -> bool:

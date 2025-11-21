@@ -25,6 +25,7 @@ from driver.control.state_publisher import StatePublisher
 from driver.control.zero_gravity_manager import ZeroGravityManager
 from driver.hardware.hardware_commander import HardwareCommander
 from driver.hardware.robot_description_loader import RobotDescriptionLoader
+from driver.safety.safe_pose_manager import SafePoseManager
 from driver.utils.logging_utils import get_logger
 
 _SAFE_POSE_SPEED_SCALE = 0.8
@@ -40,11 +41,8 @@ class RobotDriverNode(Node):
         super().__init__('robot_driver')
         self._params: DriverParameters = declare_and_get_parameters(self)
         self._logger = get_logger('robot_driver_node')
-        self._safe_pose_loader = SafePoseLoader(self._params.safe_pose_fallback)
-        self._safe_pose = self._safe_pose_loader.load(self._params.safe_pose_file)
         self._robot_description = RobotDescriptionLoader().load(self._params.robot_description_file)
         self._commander = HardwareCommander(
-            self._safe_pose,
             joint_limit_rate=self._params.joint_command.rate_limit,
             robot_description=self._robot_description,
         )
@@ -53,12 +51,20 @@ class RobotDriverNode(Node):
             self._commander,
             service_name=self._params.zero_gravity_service,
         )
+        # SAFE_POSE management is handled by a dedicated manager so that
+        # HardwareCommander remains a thin hardware abstraction.
+        self._safe_pose_manager = SafePoseManager(
+            self._commander,
+            SafePoseLoader(self._params.safe_pose_fallback),
+            self._params.safe_pose_file,
+        )
         self._motion_controller = JointControler(
             self,
             self._params,
             self._commander,
             zero_gravity_manager=self._zero_gravity_manager,
             zero_gravity_service=self._params.zero_gravity_service,
+            safe_pose_manager=self._safe_pose_manager,
         )
         self._state_publisher = StatePublisher(
             self,
@@ -149,20 +155,9 @@ class RobotDriverNode(Node):
         try:
             reset_script = self._params.can_reset_script or None
             self._commander.connect(self._params.can_channel, reset_script=reset_script)
-            reached_safe_pose = False
-            if self._safe_pose.ready:
-                reached_safe_pose = self._motion_controller.safe_pose_sequence(
-                    reason='startup',
-                    exit_zero_gravity=False,
-                    wait_time=2.0,
-                    tolerance=0.1,
-                    reenable_zero_gravity=self._params.zero_gravity_default,
-                )
-            else:
-                self._logger.warning('SAFE_POSE not marked ready; skipping initial move.')
-
-            if self._params.zero_gravity_default and not reached_safe_pose:
-                self._logger.warning('Zero-gravity default requested but SAFE_POSE verification failed; skipping zero-gravity.')
+            # 启动阶段不再自动回 SAFE_POSE；是否执行 SAFE_POSE 由外部脚本
+            # （例如 start_robot_driver.sh 调用 /robot_driver/action/safety_pose）
+            # 进行编排，便于开发阶段频繁重启和调试。
         except Exception as exc:  # pragma: no cover
             self._logger.error('Failed to connect hardware: %s', exc)
             self.get_logger().error(traceback.format_exc())
@@ -293,7 +288,7 @@ class RobotDriverNode(Node):
 
         self._logger.info('Safety pose action%s: loading %s', label_tag, config_path)
         try:
-            safe_pose = self._safe_pose_loader.load(config_path)
+            safe_pose = self._safe_pose_manager.reload(config_path)
         except Exception as exc:
             self._logger.error('Safety pose action%s failed to load config: %s', label_tag, exc)
             goal_handle.abort()
@@ -325,6 +320,37 @@ class RobotDriverNode(Node):
             result.last_error = 'SAFE_POSE file not ready (.ready marker missing)'
             result.max_error = float('nan')
             result.joint_action_code = 'UNSENT'
+            return result
+
+        # 如果已经在安全位姿附近，则无需重复发送关节动作，只根据参数选择是否打开零重力。
+        status = self._safe_pose_manager.check_at_safe_pose(tolerance=tolerance)
+        if status.in_pose:
+            self._logger.info(
+                'Safety pose action%s: already at SAFE_POSE (max |Δ|=%.4f rad)',
+                label_tag,
+                status.max_error,
+            )
+            result = SafetyPose.Result()
+            result.max_error = float(status.max_error)
+            result.last_error = ''
+            result.joint_action_code = 'NOOP'
+
+            if enable_zero_gravity_after:
+                if not self._zero_gravity_manager.enable():
+                    self._logger.error('Safety pose action%s failed to enable zero-gravity', label_tag)
+                    result.success = False
+                    result.result_code = 'ZERO_GRAVITY_FAILED'
+                    result.last_error = 'Failed to enable zero gravity after SAFE_POSE'
+                    goal_handle.abort()
+                    return result
+
+            result.success = True
+            result.result_code = 'SUCCESS'
+            feedback.phase = 'complete'
+            feedback.completion_ratio = 1.0
+            feedback.message = 'SAFE_POSE already reached'
+            goal_handle.publish_feedback(feedback)
+            goal_handle.succeed()
             return result
 
         if not self._joint_action_client.wait_for_server(timeout_sec=timeout):

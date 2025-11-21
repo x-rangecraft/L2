@@ -21,7 +21,6 @@ fi
 touch "${LOG_FILE}"
 
 ORIGINAL_ARGS=("$@")
-DAEMON_MODE="daemon"
 DAEMON_CHILD=0
 STOP_ONLY=0
 FOLLOW_LOG=0
@@ -46,11 +45,7 @@ Options:
   --can <canX>           指定 CAN 通道，默认 can0
   --xyz-only             仅在 XYZ 空间规划姿态（true）
   --no-xyz-only          恢复全姿态控制（默认）
-  --zero-gravity         启动时默认进入零重力
-  --no-zero-gravity      启动时默认关闭零重力（默认）
   --params <file>        指定参数 YAML（默认 driver/config/robot_driver_config.yaml，若存在）
-  --daemon               后台守护运行（默认）
-  --foreground           前台运行
   --stop                 停止后台守护进程
   --follow-log           后台模式下实时查看日志
   --no-follow-log        后台模式下不跟随日志（默认）
@@ -188,7 +183,7 @@ build_child_args() {
     while (( i < total )); do
         local arg="${ORIGINAL_ARGS[i]}"
         case "${arg}" in
-            --daemon|--no-daemon|--foreground|--stop|--follow-log|--no-follow-log|--daemon-child|--verbose|--no-exit-after-safe)
+            --daemon|--stop|--follow-log|--no-follow-log|--daemon-child|--verbose|--no-exit-after-safe)
                 ;;
             --safe-timeout)
                 ((i+=1))
@@ -201,7 +196,8 @@ build_child_args() {
         esac
         ((i+=1))
     done
-    CHILD_ARGS+=("--daemon-child" "--foreground")
+    # 子进程只通过 --daemon-child 标记自己为守护实例，不再支持前台模式
+    CHILD_ARGS+=("--daemon-child")
 }
 
 launch_daemon_mode() {
@@ -335,14 +331,6 @@ while [[ $# -gt 0 ]]; do
             XYZ_ONLY_MODE="false"
             shift
             ;;
-        --zero-gravity)
-            ZERO_GRAVITY_DEFAULT="true"
-            shift
-            ;;
-        --no-zero-gravity)
-            ZERO_GRAVITY_DEFAULT="false"
-            shift
-            ;;
         --params)
             ensure_value_present "--params" "$#"
             PARAM_FILE="$(resolve_path "$2")"
@@ -354,11 +342,7 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --daemon)
-            DAEMON_MODE="daemon"
-            shift
-            ;;
-        --no-daemon|--foreground)
-            DAEMON_MODE="foreground"
+            # 兼容旧参数：当前版本始终以后台守护模式运行，此参数保持为 no-op
             shift
             ;;
         --follow-log)
@@ -417,7 +401,8 @@ ensure_command python3
 ensure_command pkill
 ensure_command nohup
 
-if [[ ${DAEMON_CHILD} -eq 0 && "${DAEMON_MODE}" = "daemon" ]]; then
+if [[ ${DAEMON_CHILD} -eq 0 ]]; then
+    # 主入口始终以后台守护模式启动，当前进程只负责拉起守护子进程然后退出
     launch_daemon_mode
 fi
 
