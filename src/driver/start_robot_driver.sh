@@ -23,6 +23,7 @@ touch "${LOG_FILE}"
 ORIGINAL_ARGS=("$@")
 DAEMON_CHILD=0
 STOP_ONLY=0
+FORCE_STOP=0
 FOLLOW_LOG=0
 LOG_STDERR_MIRROR=1
 VERBOSE_CONSOLE=0
@@ -47,6 +48,7 @@ Options:
   --no-xyz-only          恢复全姿态控制（默认）
   --params <file>        指定参数 YAML（默认 driver/config/robot_driver_config.yaml，若存在）
   --stop                 停止后台守护进程
+  --force                配合 --stop 使用：SafetyPose 失败时仍然强制关闭进程
   --follow-log           后台模式下实时查看日志
   --no-follow-log        后台模式下不跟随日志（默认）
   --verbose              控制台打印更多启动进度 / 状态
@@ -183,7 +185,7 @@ build_child_args() {
     while (( i < total )); do
         local arg="${ORIGINAL_ARGS[i]}"
         case "${arg}" in
-            --daemon|--stop|--follow-log|--no-follow-log|--daemon-child|--verbose|--no-exit-after-safe)
+            --daemon|--stop|--force|--follow-log|--no-follow-log|--daemon-child|--verbose|--no-exit-after-safe)
                 ;;
             --safe-timeout)
                 ((i+=1))
@@ -233,6 +235,12 @@ launch_daemon_mode() {
     fi
 
     status_cn "后台守护进程 PID=${daemon_pid} 已启动"
+    # 在后台守护进程就绪后，尝试通过 SafetyPose 动作将机械臂回到安全位姿并打开零重力。
+    # 启动阶段这是“软约束”：失败时仅打印提示，不影响守护进程存活。
+    if ! call_safety_pose "startup" "true"; then
+        status_cn "启动完成，但通过 SafetyPose 回到安全位姿失败，请检查机械臂状态和日志" "WARN"
+    fi
+
     if [[ ${FOLLOW_LOG} -eq 1 ]]; then
         if command -v tail >/dev/null 2>&1; then
             status_cn "进入实时日志跟随模式，按 Ctrl+C 可退出（驱动持续运行）"
@@ -310,6 +318,202 @@ prepend_pythonpath() {
     fi
 }
 
+call_safety_pose() {
+    local stage="$1"       # "startup" or "shutdown"
+    local enable_zero="$2" # "true" or "false"
+
+    status_cn "通过 SafetyPose 动作让机械臂回到安全位姿（阶段：${stage}，enable_zero_gravity_after=${enable_zero}）"
+
+    local exit_code=0
+    set +e
+    (
+        # 子 shell：加载 ROS 环境后调用 SafetyPose action client。
+        # 若加载失败或动作执行失败，仅影响本子 shell 的退出码，方便外层根据
+        # --force 决定是否继续强制关闭。
+        source_ros_env
+        SAFETY_POSE_STAGE="${stage}" SAFETY_POSE_ENABLE_ZERO_GRAVITY_AFTER="${enable_zero}" \
+            python3 - <<'PY'
+import math
+import os
+import sys
+import traceback
+
+import rclpy
+from rclpy.action import ActionClient
+from rclpy.node import Node
+
+from robot_driver.action import SafetyPose
+
+
+SERVER_TIMEOUT = 60.0
+RESULT_TIMEOUT = 120.0
+
+
+def _parse_bool(value, default=False):
+    if value is None:
+        return default
+    value = str(value).strip().lower()
+    if value in ('1', 'true', 'yes', 'y', 'on'):
+        return True
+    if value in ('0', 'false', 'no', 'n', 'off'):
+        return False
+    return default
+
+
+class SafetyPoseClient(Node):
+    def __init__(self, stage, enable_zero_gravity_after):
+        super().__init__('safety_pose_client')
+        self._stage = stage
+        self._enable_zero_gravity_after = bool(enable_zero_gravity_after)
+        self._client = ActionClient(self, SafetyPose, '/robot_driver/action/safety_pose')
+
+    def run(self):
+        stage = self._stage
+        enable_zero = self._enable_zero_gravity_after
+        print(
+            f"[SafetyPose] stage={stage} enable_zero_gravity_after={enable_zero}",
+            flush=True,
+        )
+
+        self.get_logger().info(
+            f"SafetyPose client ({stage}): waiting for action server..."
+        )
+        if not self._client.wait_for_server(timeout_sec=SERVER_TIMEOUT):
+            msg = (
+                f"SafetyPose server '/robot_driver/action/safety_pose' not available "
+                f"within {SERVER_TIMEOUT:.1f}s"
+            )
+            print(f"[SafetyPose] ERROR: {msg}", file=sys.stderr, flush=True)
+            return 1
+
+        goal_msg = SafetyPose.Goal()
+        goal_msg.enable_zero_gravity_after = enable_zero
+
+        self.get_logger().info(
+            f"SafetyPose client ({stage}): sending goal enable_zero_gravity_after={enable_zero}"
+        )
+        send_future = self._client.send_goal_async(goal_msg)
+
+        try:
+            rclpy.spin_until_future_complete(self, send_future, timeout_sec=RESULT_TIMEOUT)
+        except Exception:
+            print("[SafetyPose] ERROR: exception while waiting for goal acceptance", file=sys.stderr)
+            traceback.print_exc()
+            return 1
+
+        if not send_future.done():
+            msg = (
+                f"Timed out waiting for SafetyPose goal acceptance "
+                f"after {RESULT_TIMEOUT:.1f}s"
+            )
+            print(f"[SafetyPose] ERROR: {msg}", file=sys.stderr, flush=True)
+            return 1
+
+        goal_handle = send_future.result()
+        if goal_handle is None or not getattr(goal_handle, 'accepted', False):
+            print("[SafetyPose] ERROR: goal rejected by server", file=sys.stderr, flush=True)
+            return 1
+
+        result_future = goal_handle.get_result_async()
+        try:
+            rclpy.spin_until_future_complete(self, result_future, timeout_sec=RESULT_TIMEOUT)
+        except Exception:
+            print("[SafetyPose] ERROR: exception while waiting for result", file=sys.stderr)
+            traceback.print_exc()
+            return 1
+
+        if not result_future.done():
+            msg = (
+                f"Timed out waiting for SafetyPose result "
+                f"after {RESULT_TIMEOUT:.1f}s"
+            )
+            print(f"[SafetyPose] ERROR: {msg}", file=sys.stderr, flush=True)
+            return 1
+
+        action_result = result_future.result()
+        result_msg = getattr(action_result, 'result', None)
+        if result_msg is None:
+            print("[SafetyPose] ERROR: result message missing", file=sys.stderr, flush=True)
+            return 1
+
+        max_error = getattr(result_msg, 'max_error', float('nan'))
+        try:
+            max_error_val = float(max_error)
+            if math.isfinite(max_error_val):
+                max_error_str = f"{max_error_val:.6f}"
+            else:
+                max_error_str = "nan"
+        except Exception:
+            max_error_str = "nan"
+
+        result_code = getattr(result_msg, 'result_code', '')
+        last_error = getattr(result_msg, 'last_error', '')
+
+        print(
+            "[SafetyPose] DONE: success=%s result_code=%s max_error=%s last_error=%s"
+            % (
+                bool(getattr(result_msg, 'success', False)),
+                result_code or "''",
+                max_error_str,
+                last_error or "''",
+            ),
+            flush=True,
+        )
+
+        return 0 if bool(getattr(result_msg, 'success', False)) else 1
+
+
+def main():
+    stage = os.environ.get('SAFETY_POSE_STAGE', 'startup')
+    enable_str = os.environ.get('SAFETY_POSE_ENABLE_ZERO_GRAVITY_AFTER', 'true')
+    enable_zero = _parse_bool(enable_str, default=True)
+
+    try:
+        rclpy.init(args=None)
+    except Exception:
+        print("[SafetyPose] ERROR: failed to initialize rclpy", file=sys.stderr)
+        traceback.print_exc()
+        return 1
+
+    node = SafetyPoseClient(stage, enable_zero)
+    try:
+        return node.run()
+    except KeyboardInterrupt:
+        print("[SafetyPose] interrupted by user", file=sys.stderr)
+        return 1
+    except Exception:
+        print("[SafetyPose] ERROR: unexpected exception in client", file=sys.stderr)
+        traceback.print_exc()
+        return 1
+    finally:
+        try:
+            node.destroy_node()
+        except Exception:
+            pass
+        try:
+            rclpy.shutdown()
+        except Exception:
+            pass
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+PY
+    )
+    exit_code=$?
+    set -e
+
+    if [[ ${exit_code} -ne 0 ]]; then
+        status_cn "通过 SafetyPose 回到安全位姿失败（阶段：${stage}）" "ERROR"
+        log "ERROR: SafetyPose action failed during ${stage} stage (exit code ${exit_code})"
+        return ${exit_code}
+    fi
+
+    status_cn "SafetyPose 执行完成，机械臂已在安全位姿（阶段：${stage}）"
+    log "SafetyPose action succeeded during ${stage} stage"
+    return 0
+}
+
 CAN_CHANNEL_PATTERN='^can[0-9]+$'
 
 while [[ $# -gt 0 ]]; do
@@ -362,6 +566,10 @@ while [[ $# -gt 0 ]]; do
             STOP_ONLY=1
             shift
             ;;
+        --force)
+            FORCE_STOP=1
+            shift
+            ;;
         --daemon-child)
             DAEMON_CHILD=1
             shift
@@ -378,7 +586,42 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+if [[ ${FORCE_STOP} -eq 1 && ${STOP_ONLY} -eq 0 ]]; then
+    log "ERROR: --force must be used together with --stop"
+    usage
+    exit 1
+fi
+
 if [[ ${STOP_ONLY} -eq 1 ]]; then
+    # 停机流程：优先通过 SafetyPose 动作让机械臂回到安全位姿并关闭零重力。
+    # 只有 SafetyPose 成功（或使用 --force 时允许失败）才会真正停止进程。
+
+    # 检查是否有正在运行的相关进程；若没有，则认为已经关闭，直接返回。
+    supervisors="$(pgrep -fa "start_robot_driver.sh --daemon-child" 2>/dev/null || true)"
+    launches="$(pgrep -fa "ros2 launch robot_driver robot_driver.launch.py" 2>/dev/null || true)"
+    nodes="$(pgrep -fa "robot_driver/lib/robot_driver/robot_driver_node.py" 2>/dev/null || true)"
+
+    if [[ -z "${supervisors}${launches}${nodes}" ]]; then
+        status_cn "未找到正在运行的 robot_driver 相关进程，认为已关闭" "INFO"
+        log "No running robot_driver processes detected; skipping SafetyPose and stop."
+        exit 0
+    fi
+
+    ensure_command python3
+
+    if ! call_safety_pose "shutdown" "false"; then
+        if [[ ${FORCE_STOP} -eq 0 ]]; then
+            status_cn "关闭失败：SafetyPose 动作未能让机械臂安全落位，未执行关闭操作" "ERROR"
+            log "ERROR: SafetyPose shutdown sequence failed; not stopping processes (no --force)."
+            exit 1
+        fi
+        status_cn "SafetyPose 失败，但启用了 --force，将强制关闭 robot_driver 相关进程（存在安全风险，请确认机械臂状态）" "WARN"
+        log "WARNING: SafetyPose shutdown failed; proceeding to force-stop due to --force."
+    else
+        status_cn "已通过 SafetyPose 确认机械臂回到安全位姿并关闭零重力，开始关闭进程..." "INFO"
+        log "SafetyPose shutdown sequence succeeded; stopping robot_driver processes."
+    fi
+
     if stop_daemon; then
         exit 0
     else
