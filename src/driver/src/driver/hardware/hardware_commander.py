@@ -632,10 +632,3 @@ class HardwareCommander:
         except Exception as exc:
             self._logger.error('IK solving failed: %s', exc)
             return False, None
-    def safe_pose_available(self) -> bool:
-        """Deprecated shim kept for backwards compatibility.
-
-        SAFE_POSE semantics have been moved to :class:`SafePoseManager`.  This
-        method always returns ``False`` and should not be used in new code.
-        """
-        return False
