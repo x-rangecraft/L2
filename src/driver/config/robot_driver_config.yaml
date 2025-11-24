@@ -19,6 +19,7 @@ robot_driver:
     diagnostics_topic: /robot_driver/diagnostics
     follow_joint_trajectory_action: /robot_driver/action/follow_joint_trajectory
     joint_command_action: /robot_driver/action/joint
+    robot_command_action: /robot_driver/action/robot
     safety_pose_action: /robot_driver/action/safety_pose
     zero_gravity_service: /robot_driver/service/zero_gravity
     can_reset_script: ""

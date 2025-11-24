@@ -1,0 +1,24 @@
+# Goal
+geometry_msgs/PoseStamped target
+float32 speed_scale
+builtin_interfaces/Duration timeout
+string label
+---
+# Result
+bool success
+string result_code
+string last_error
+sensor_msgs/JointState final_state
+sensor_msgs/JointState target_state
+robot_driver/JointContact[] contact_state
+geometry_msgs/PoseStamped final_pose
+---
+# Feedback
+string phase
+float32 completion_ratio
+builtin_interfaces/Duration remaining_time
+sensor_msgs/JointState current_state
+sensor_msgs/JointState target_state
+robot_driver/JointContact[] contact_state
+geometry_msgs/PoseStamped current_pose
+string last_error

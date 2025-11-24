@@ -11,6 +11,7 @@ from driver.utils.path_utils import resolve_relative_path
 
 _LOGGER: Optional[logging.Logger] = None
 _GRIPPER_LOGGER: Optional[logging.Logger] = None
+_ACTION_ROBOT_LOGGER: Optional[logging.Logger] = None
 
 
 def get_logger(name: str = 'robot_driver', log_dir: str = 'log/robot_driver') -> logging.Logger:
@@ -96,4 +97,38 @@ def get_gripper_logger(
     logger.info('Gripper log initialized. Output file: %s', log_path)
 
     _GRIPPER_LOGGER = logger
+    return logger
+
+
+def get_action_robot_logger(
+    name: str = 'action_robot',
+    log_dir: str = 'log/action_robot',
+    filename: str = 'action_robot.log',
+) -> logging.Logger:
+    """Dedicated logger for /robot_driver/action/robot executions."""
+    global _ACTION_ROBOT_LOGGER
+    if _ACTION_ROBOT_LOGGER:
+        return _ACTION_ROBOT_LOGGER
+
+    base_dir = resolve_relative_path(log_dir, must_exist=False)
+    base_dir.mkdir(parents=True, exist_ok=True)
+    log_path = base_dir / filename
+    if log_path.exists():
+        try:
+            log_path.unlink()
+        except OSError:
+            pass
+
+    logger = logging.getLogger(name)
+    logger.setLevel(logging.INFO)
+
+    formatter = logging.Formatter('%(asctime)s [%(levelname)s] %(name)s: %(message)s')
+    file_handler = logging.FileHandler(log_path)
+    file_handler.setFormatter(formatter)
+    logger.addHandler(file_handler)
+
+    logger.propagate = False
+    logger.info('Action robot log initialized. Output file: %s', log_path)
+
+    _ACTION_ROBOT_LOGGER = logger
     return logger

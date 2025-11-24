@@ -37,6 +37,7 @@
 | --- | --- | --- | --- |
 | `/joint_states` | `sensor_msgs/JointState` | 30 Hz（可配置） | 仅包含标准位置/速度/力矩（或电流）字段，确保与 MoveIt、RViz、Foxglove 兼容。 |
 | `/robot_driver/diagnostics` | `diagnostic_msgs/DiagnosticArray` | 1 Hz | 汇报命令执行状态、心跳/安全态、零重力模式、CAN 健康、温度/电流/自检等扩展信息，集中展示机械臂健康数据。 |
+| `/robot_driver/end_effector_pose` | `geometry_msgs/PoseStamped` | 与 `/joint_states` 同频率 | 实时发布末端 FK 结果，frame 固定 `base_link`，供可视化/抓取对齐使用；与 `/robot_driver/action/robot` 反馈的 pose 保持数据来源一致。 |
 
 ### 订阅的 Topic
 | 话题 | 类型 | 说明 |
@@ -94,10 +95,10 @@ effort: []
 | `/robot_driver/service/zero_gravity` | Service (`std_srvs/SetBool`) | 零重力模式开关，快速切换机械臂力矩控制状态。 | `ros2 service call /robot_driver/service/zero_gravity std_srvs/srv/SetBool "{data: true}"` |
 | `/robot_driver/service/self_check` | Service (`std_srvs/Trigger`) | 触发自检流程：读取关节状态、回到安全位、校验到位情况。 | `ros2 service call /robot_driver/service/self_check std_srvs/srv/Trigger` |
 | `/robot_driver/action/follow_joint_trajectory` | Action (`control_msgs/action/FollowJointTrajectory`) | 关节轨迹执行器，接收轨迹点序列并执行；支持反馈、取消与抢占。 | `ros2 action send_goal /robot_driver/action/follow_joint_trajectory control_msgs/action/FollowJointTrajectory "{trajectory: {joint_names: ['joint1'], points: [{positions: [0.5], time_from_start: {sec: 1}}]}}" --feedback` |
-| `/robot_driver/action/joint` | Action (`robot_driver/action/JointCommand`) | 点动/单段关节控制语法糖，允许指定任意子集的关节（含 `gripper`）并设置 `speed_scale`、zero-gravity 退出等选项；内部仍复用 `FollowJointTrajectory` 执行链路。 | `ros2 action send_goal /robot_driver/action/joint robot_driver/action/JointCommand "{target: {joint_state: {name: ['joint2','joint3','gripper'], position: [-0.4,0.55,0.018]}, relative: false, speed_scale: 0.6}, options: {timeout: {sec: 5}, label: 'fine_adjust', exit_zero_gravity: true}}" --feedback` |
-| `/robot_driver/action/safety_pose` | Action (`robot_driver/action/SafetyPose`) | 包装：加载 `safe_pose_config.yaml` → 用固定 JointAction（`relative=false`、`speed_scale=0.8`、`timeout=10s`、`exit_zero_gravity=true`）回 SAFE_POSE，再等待/校验；唯一参数是“是否在结束后重新打开零重力”，结果统一记录 `L2/log/`。 | `ros2 action send_goal /robot_driver/action/safety_pose robot_driver/action/SafetyPose "{enable_zero_gravity_after: true}" --feedback` |
+| `/robot_driver/action/joint` | Action (`robot_driver/action/JointCommand`) | 点动/单段关节控制语法糖，允许指定任意子集的关节（含 `gripper`）并设置 `speed_scale` 等选项；自动在需要时退出/恢复零重力，内部仍复用 `FollowJointTrajectory` 执行链路。 | `ros2 action send_goal /robot_driver/action/joint robot_driver/action/JointCommand "{target: {joint_state: {name: ['joint2','joint3','gripper'], position: [-0.4,0.55,0.018]}, relative: false, speed_scale: 0.6}, options: {timeout: {sec: 5}, label: 'fine_adjust'}}" --feedback` |
+| `/robot_driver/action/safety_pose` | Action (`robot_driver/action/SafetyPose`) | 包装：加载 `safe_pose_config.yaml` → 用固定 JointAction（`relative=false`、`speed_scale=0.8`、`timeout=10s`）回 SAFE_POSE，再等待/校验；执行前自动确保零重力关闭，唯一参数是“是否在结束后重新打开零重力”，结果统一记录 `L2/log/`。 | `ros2 action send_goal /robot_driver/action/safety_pose robot_driver/action/SafetyPose "{enable_zero_gravity_after: true}" --feedback` |
 | `/robot_driver/action/reset` | Action | 编排：调用 `safety_pose` 成功后再调用 `zero_gravity`，实现"回安全位并开零重力"。 | 设计中 |
-| `/robot_driver/action/robot` | Action | 笛卡尔控制：空间位姿 → IK → 生成关节轨迹 → 交给 `/robot_driver/action/follow_joint_trajectory` 执行。 | 设计中 |
+| `/robot_driver/action/robot` | Action (`robot_driver/action/RobotCommand`) | 笛卡尔控制：接收 `PoseStamped`（frame=`base_link`）→ `KinematicsSolver` 求 IK → 构造 `/robot_driver/action/joint` goal 执行；反馈/结果附带末端 FK pose。`speed_scale` 默认 0.9，软超时默认 15 s，并在执行前自动退出零重力。 | `ros2 action send_goal /robot_driver/action/robot robot_driver/action/RobotCommand "{target: {header: {frame_id: base_link}, pose: {position: {x: 0.35, y: 0.0, z: 0.32}, orientation: {x: 0.0, y: 0.707, z: 0.0, w: 0.707}}}" --feedback` |
 | `/robot_driver/action/gripper` | Action (`robot_driver/action/GripperCommand`) | 夹爪/末端执行器控制，底层复用关节执行器（单通道或映射到 follow_joint_trajectory action）。 | 设计中 |
 
 > **注意**：当前笛卡尔控制通过 Topic `/robot_driver/robot_command` 实现，未来会迁移至 `/robot_driver/action/robot`，两者将在过渡期共存；Topic 接口将成为 Action 的语法糖，内部调用 Action client。
@@ -115,7 +116,7 @@ effort: []
 在此基础上构建上层接口：
 
 1. `/robot_driver/action/safety_pose`
-   - 流程：`STOP` → 读取 `safe_pose_config.yaml` → 以固定 JointAction（`relative=false`、`speed_scale=0.8`、`timeout=10s`、`exit_zero_gravity=true`）触发 `/robot_driver/action/joint` → 等待/校验，随后根据 Goal 中 `enable_zero_gravity_after` 决定是否重新打开零重力。
+   - 流程：`STOP` → 读取 `safe_pose_config.yaml` → 以固定 JointAction（`relative=false`、`speed_scale=0.8`、`timeout=10s`）触发 `/robot_driver/action/joint`，动作前强制关闭零重力 → 等待/校验，随后根据 Goal 中 `enable_zero_gravity_after` 决定是否重新打开零重力。
    - 用途：看门狗、人工触发、测试脚本，共享同一执行器保证互斥，并统一记录在 `L2/log/robot_driver/`。
    - 当前状态：已实现，Action 类型为 `robot_driver/action/SafetyPose`，由 `robot_driver` 节点直接发布。
 2. `/robot_driver/action/reset`
@@ -123,9 +124,9 @@ effort: []
    - 用途：安全停机后的"回位+漂浮"一站式指令。
    - 当前状态：规划中，将复用 `safety_pose` action 与 `zero_gravity` service。
 3. `/robot_driver/action/robot`
-   - 流程：接收笛卡尔目标 → IK 求解 → 生成关节轨迹 → 调用 `FollowJointTrajectory`。
-   - 用途：高层运动接口，便于 MoveIt/脚本统一调用。
-   - 当前状态：功能通过 Topic `/robot_driver/robot_command` 实现（由 `MotionController.handle_robot_command()` 处理），未来将迁移为 Action 接口。
+   - 流程：接收笛卡尔目标 → `KinematicsSolver` 求 IK → 构造 `/robot_driver/action/joint` goal（强制退出零重力、限速插值）→ 透传 JointCommand 反馈/结果并附加末端 FK pose。
+   - 用途：高层抓取/落位接口，便于 MoveIt/脚本统一调用；Topic `/robot_driver/robot_command` 将在过渡期内通过 thin wrapper 调用该 Action。
+   - 当前状态：Action 已实现；Topic 版本仍保留但内部改为调用 Action（规划中）。
 4. `/robot_driver/joint_command`（Topic）
    - 实现：对关节控制的轻量封装，单点命令由 `MotionController.handle_joint_command()` 处理并转发给 commander。
    - 当前状态：已实现，直接调用 `HardwareCommander` 的关节控制能力。
@@ -154,7 +155,6 @@ effort: []
 | `target.relative` | `bool` | `true` 时在当前姿态上叠加 `joint_state` 中的增量（rad）；`false` 时表示绝对目标。 |
 | `target.speed_scale` | `float` | 0‒1 的限速倍率，乘以参数 `joint_command_rate_limit` 后作为本次 ramp 的最大步长；例如默认 0.5 rad/s × 0.6 = 0.3 rad/s，用于平滑点动。 |
 | `options.timeout` | `builtin_interfaces/Duration` | 软超时；到期尚未完成则抢占并返回失败。 |
-| `options.exit_zero_gravity` | `bool` | 发送前若检测到零重力模式，将先自动关闭（默认 `false`）。 |
 | `options.label` | `string` | 可选标签，写入日志/反馈，便于上层跟踪命令来源。 |
 
 **反馈 / 结果字段**

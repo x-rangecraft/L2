@@ -6,7 +6,7 @@ import threading
 import time
 from copy import deepcopy
 from dataclasses import dataclass, field
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
 from geometry_msgs.msg import Pose
@@ -75,6 +75,37 @@ def _quaternion_to_matrix(qx: float, qy: float, qz: float, qw: float) -> np.ndar
         [2*(xy + wz), 1 - 2*(xx + zz), 2*(yz - wx)],
         [2*(xz - wy), 2*(yz + wx), 1 - 2*(xx + yy)]
     ])
+
+
+def _matrix_to_quaternion(matrix: np.ndarray) -> Tuple[float, float, float, float]:
+    """Convert 3x3 rotation matrix to quaternion."""
+    trace = float(matrix[0, 0] + matrix[1, 1] + matrix[2, 2])
+    if trace > 0.0:
+        s = math.sqrt(trace + 1.0) * 2.0
+        qw = 0.25 * s
+        qx = (matrix[2, 1] - matrix[1, 2]) / s
+        qy = (matrix[0, 2] - matrix[2, 0]) / s
+        qz = (matrix[1, 0] - matrix[0, 1]) / s
+    else:
+        if matrix[0, 0] > matrix[1, 1] and matrix[0, 0] > matrix[2, 2]:
+            s = math.sqrt(1.0 + matrix[0, 0] - matrix[1, 1] - matrix[2, 2]) * 2.0
+            qx = 0.25 * s
+            qy = (matrix[0, 1] + matrix[1, 0]) / s
+            qz = (matrix[0, 2] + matrix[2, 0]) / s
+            qw = (matrix[2, 1] - matrix[1, 2]) / s
+        elif matrix[1, 1] > matrix[2, 2]:
+            s = math.sqrt(1.0 + matrix[1, 1] - matrix[0, 0] - matrix[2, 2]) * 2.0
+            qx = (matrix[0, 1] + matrix[1, 0]) / s
+            qy = 0.25 * s
+            qz = (matrix[1, 2] + matrix[2, 1]) / s
+            qw = (matrix[0, 2] - matrix[2, 0]) / s
+        else:
+            s = math.sqrt(1.0 + matrix[2, 2] - matrix[0, 0] - matrix[1, 1]) * 2.0
+            qx = (matrix[0, 2] + matrix[2, 0]) / s
+            qy = (matrix[1, 2] + matrix[2, 1]) / s
+            qz = 0.25 * s
+            qw = (matrix[1, 0] - matrix[0, 1]) / s
+    return float(qx), float(qy), float(qz), float(qw)
 
 
 def _pose_to_target(pose: Pose) -> CartesianTarget:
@@ -507,6 +538,50 @@ class HardwareCommander:
     def read_end_effector_pose(self) -> Pose:
         with self._lock:
             return deepcopy(self._ee_pose)
+
+    def get_joint_names(self) -> List[str]:
+        with self._lock:
+            return list(self._joint_state.names)
+
+    def compute_fk_pose(self, joint_positions: Optional[Sequence[float]] = None) -> Optional[Pose]:
+        """Compute FK pose for the first 6 joints using the SDK kinematics, if available."""
+        kinematics = self._kinematics
+        if kinematics is None:
+            return None
+
+        joint_array: Optional[np.ndarray] = None
+        if joint_positions is not None:
+            joint_array = np.array(list(joint_positions), dtype=float)
+        else:
+            try:
+                if self._robot:
+                    joint_array = np.array(self._robot.get_joint_pos(), dtype=float)
+            except Exception as exc:
+                self._logger.debug('Failed to read robot joints for FK: %s', exc)
+
+        if joint_array is None or not joint_array.size:
+            state = self.read_joint_state()
+            joint_array = np.array(state.positions, dtype=float)
+
+        if joint_array.size < 6:
+            return None
+
+        try:
+            matrix = kinematics.fk(joint_array[:6], "grasp_site")
+        except Exception as exc:
+            self._logger.error('Failed to compute FK pose: %s', exc)
+            return None
+
+        pose = Pose()
+        pose.position.x = float(matrix[0, 3])
+        pose.position.y = float(matrix[1, 3])
+        pose.position.z = float(matrix[2, 3])
+        qx, qy, qz, qw = _matrix_to_quaternion(matrix[:3, :3])
+        pose.orientation.x = qx
+        pose.orientation.y = qy
+        pose.orientation.z = qz
+        pose.orientation.w = qw
+        return pose
 
     # ------------------------------------------------------------------ helpers
     def _apply_joint_delta(self, mapping: Dict[str, float], rate_limit: float) -> None:

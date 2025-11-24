@@ -24,6 +24,7 @@ set(action_files
   "action/JointCommand.action"
   "action/SafetyPose.action"
   "action/GripperCommand.action"
+  "action/RobotCommand.action"
 )
 
 rosidl_generate_interfaces(${PROJECT_NAME}

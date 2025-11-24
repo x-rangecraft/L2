@@ -16,7 +16,7 @@ from rclpy.node import Node
 from sensor_msgs.msg import JointState
 from std_msgs.msg import Empty
 from std_srvs.srv import Trigger
-from robot_driver.action import JointCommand, SafetyPose
+from robot_driver.action import JointCommand, RobotCommand, SafetyPose
 
 from driver.config.parameter_schema import DriverParameters, declare_and_get_parameters
 from driver.config.safe_pose_loader import SafePoseLoader
@@ -24,9 +24,10 @@ from driver.control.joint_controler import JointControler
 from driver.control.state_publisher import StatePublisher
 from driver.control.zero_gravity_manager import ZeroGravityManager
 from driver.hardware.hardware_commander import HardwareCommander
+from driver.hardware.kinematics_solver import KinematicsSolver
 from driver.hardware.robot_description_loader import RobotDescriptionLoader
 from driver.safety.safe_pose_manager import SafePoseManager
-from driver.utils.logging_utils import get_logger
+from driver.utils.logging_utils import get_action_robot_logger, get_logger
 from driver.app.gripper_action import GripperAction
 
 _SAFE_POSE_SPEED_SCALE = 0.8
@@ -35,6 +36,8 @@ _SAFE_POSE_EXIT_ZERO_GRAVITY = True
 _SAFE_POSE_RELATIVE = False
 _SAFE_POSE_SETTLE_TIME = 1.5
 _SAFE_POSE_TOLERANCE = 0.05
+_ROBOT_ACTION_DEFAULT_SPEED = 0.9
+_ROBOT_ACTION_DEFAULT_TIMEOUT = 15.0
 
 
 class RobotDriverNode(Node):
@@ -67,15 +70,28 @@ class RobotDriverNode(Node):
             zero_gravity_service=self._params.zero_gravity_service,
             safe_pose_manager=self._safe_pose_manager,
         )
+        self._robot_action_logger = get_action_robot_logger(
+            name='action_robot',
+            log_dir='log/action_robot',
+            filename='action_robot.log',
+        )
+        self._kinematics_solver = KinematicsSolver(
+            self._commander,
+            base_frame=self._params.tf_base_frame,
+        )
         self._state_publisher = StatePublisher(
             self,
             self._commander,
             self._params,
+            kinematics_solver=self._kinematics_solver,
         )
         self._trajectory_group = ReentrantCallbackGroup()
         self._joint_action_group = ReentrantCallbackGroup()
         self._safety_action_group = ReentrantCallbackGroup()
+        self._robot_action_group = ReentrantCallbackGroup()
         self._joint_client_group = ReentrantCallbackGroup()
+        self._robot_goal_lock = threading.Lock()
+        self._robot_joint_goals: dict[int, ActionClient.GoalHandle] = {}
 
         self._subscriptions = []
         self._create_ros_interfaces()
@@ -135,6 +151,15 @@ class RobotDriverNode(Node):
             goal_callback=self._joint_goal_callback,
             cancel_callback=self._joint_cancel_callback,
             callback_group=self._joint_action_group,
+        )
+        self._robot_action = ActionServer(
+            self,
+            RobotCommand,
+            self._params.robot_command_action,
+            execute_callback=self._execute_robot_action,
+            goal_callback=self._robot_goal_callback,
+            cancel_callback=self._robot_cancel_callback,
+            callback_group=self._robot_action_group,
         )
         self._joint_action_client = ActionClient(
             self,
@@ -267,6 +292,179 @@ class RobotDriverNode(Node):
             result.last_error = str(exc)
             return result
 
+    def _robot_goal_callback(self, _goal_request) -> GoalResponse:
+        return GoalResponse.ACCEPT
+
+    def _robot_cancel_callback(self, goal_handle) -> CancelResponse:
+        self._logger.warning('Robot action cancel requested.')
+        with self._robot_goal_lock:
+            joint_handle = self._robot_joint_goals.get(id(goal_handle))
+        if joint_handle is not None:
+            try:
+                joint_handle.cancel_goal_async()
+            except Exception as exc:
+                self._logger.error('Failed to forward cancel to JointCommand: %s', exc)
+        return CancelResponse.ACCEPT
+
+    async def _execute_robot_action(self, goal_handle):
+        goal = goal_handle.request
+        label = goal.label or 'robot'
+        label_tag = f' [{label}]' if label else ''
+        pose_stamped = goal.target
+        frame_id = pose_stamped.header.frame_id or self._params.tf_base_frame
+        if frame_id and frame_id != self._params.tf_base_frame:
+            msg = (
+                f'Robot action target frame "{frame_id}" does not match base frame '
+                f'"{self._params.tf_base_frame}"'
+            )
+            self._logger.error(msg + label_tag)
+            return self._robot_action_abort(goal_handle, msg, 'UNSUPPORTED_FRAME')
+
+        if not self._motion_controller.validate_robot_pose(pose_stamped):
+            msg = 'Robot action goal failed validation'
+            self._logger.error(msg + label_tag)
+            return self._robot_action_abort(goal_handle, msg, 'INVALID_GOAL')
+
+        speed_scale = self._sanitize_speed_scale(goal.speed_scale)
+        timeout_msg, timeout_s = self._resolve_timeout(goal.timeout)
+        start_time = time.monotonic()
+        self._robot_action_logger.info(
+            'Goal%s frame=%s pos=(%.3f, %.3f, %.3f) quat=(%.4f, %.4f, %.4f, %.4f) '
+            'speed_scale=%.2f timeout=%.2fs',
+            label_tag,
+            frame_id,
+            pose_stamped.pose.position.x,
+            pose_stamped.pose.position.y,
+            pose_stamped.pose.position.z,
+            pose_stamped.pose.orientation.x,
+            pose_stamped.pose.orientation.y,
+            pose_stamped.pose.orientation.z,
+            pose_stamped.pose.orientation.w,
+            speed_scale,
+            timeout_s,
+        )
+
+        ik_ok, joint_target, ik_error = self._kinematics_solver.solve_ik(pose_stamped.pose)
+        if not ik_ok or joint_target is None:
+            msg = ik_error or 'Failed to solve IK for target pose'
+            self._logger.error('Robot action%s: %s', label_tag, msg)
+            self._robot_action_logger.error('Goal%s failed IK: %s', label_tag, msg)
+            return self._robot_action_abort(goal_handle, msg, 'IK_FAILED')
+
+        feedback = RobotCommand.Feedback()
+        feedback.phase = 'planning'
+        feedback.completion_ratio = 0.0
+        feedback.remaining_time = timeout_msg
+        feedback.current_state = self._read_joint_state()
+        feedback.target_state = joint_target
+        feedback.contact_state = []
+        pose_msg, _ = self._kinematics_solver.compute_fk_pose(
+            stamp=self.get_clock().now().to_msg(),
+            joint_state=self._commander.read_joint_state(),
+        )
+        feedback.current_pose = pose_msg
+        feedback.last_error = ''
+        goal_handle.publish_feedback(feedback)
+
+        if not self._joint_action_client.wait_for_server(timeout_sec=2.0):
+            msg = 'JointCommand action server unavailable for robot action'
+            self._logger.error(msg + label_tag)
+            self._robot_action_logger.error('Goal%s aborted: %s', label_tag, msg)
+            return self._robot_action_abort(goal_handle, msg, 'JOINT_SERVER_UNAVAILABLE')
+
+        joint_goal = JointCommand.Goal()
+        joint_goal.target.joint_state = joint_target
+        joint_goal.target.relative = False
+        joint_goal.target.speed_scale = float(speed_scale)
+        joint_goal.options.timeout = timeout_msg
+        joint_goal.options.label = label or 'robot'
+
+        def _forward_joint_feedback(feedback_msg):
+            jc_fb = feedback_msg.feedback
+            fb = RobotCommand.Feedback()
+            fb.phase = f'joint/{jc_fb.phase}'
+            fb.completion_ratio = jc_fb.completion_ratio
+            fb.remaining_time = jc_fb.remaining_time
+            fb.current_state = jc_fb.current_state
+            fb.target_state = jc_fb.target_state
+            fb.contact_state = jc_fb.contact_state
+            pose_from_fb, _ = self._kinematics_solver.compute_fk_pose(
+                stamp=self.get_clock().now().to_msg(),
+                joint_msg=jc_fb.current_state,
+            )
+            fb.current_pose = pose_from_fb
+            fb.last_error = jc_fb.last_error
+            goal_handle.publish_feedback(fb)
+
+        send_future = self._joint_action_client.send_goal_async(
+            joint_goal,
+            feedback_callback=_forward_joint_feedback,
+        )
+        joint_goal_handle = await send_future
+        if not joint_goal_handle.accepted:
+            msg = 'JointCommand rejected robot action goal'
+            self._logger.error(msg + label_tag)
+            self._robot_action_logger.error('Goal%s rejected by JointCommand', label_tag)
+            return self._robot_action_abort(goal_handle, msg, 'JOINT_REJECTED', target_state=joint_target)
+
+        key = id(goal_handle)
+        with self._robot_goal_lock:
+            self._robot_joint_goals[key] = joint_goal_handle
+
+        feedback.phase = 'waiting_joint'
+        feedback.completion_ratio = 0.05
+        feedback.remaining_time = timeout_msg
+        goal_handle.publish_feedback(feedback)
+
+        try:
+            joint_result = await joint_goal_handle.get_result_async()
+        finally:
+            with self._robot_goal_lock:
+                self._robot_joint_goals.pop(key, None)
+        jc_result: JointCommand.Result = joint_result.result
+        final_pose, _ = self._kinematics_solver.compute_fk_pose(
+            stamp=self.get_clock().now().to_msg(),
+            joint_msg=jc_result.final_state,
+        )
+
+        result = RobotCommand.Result()
+        result.success = jc_result.success
+        result.result_code = jc_result.result_code or ''
+        result.last_error = jc_result.last_error or ''
+        result.final_state = jc_result.final_state
+        result.target_state = joint_target
+        result.contact_state = list(jc_result.contact_state)
+        result.final_pose = final_pose
+
+        duration = time.monotonic() - start_time
+        self._robot_action_logger.info(
+            'Goal%s completed result=%s success=%s duration=%.2fs error=%s',
+            label_tag,
+            result.result_code,
+            result.success,
+            duration,
+            result.last_error,
+        )
+
+        final_feedback = RobotCommand.Feedback()
+        final_feedback.phase = 'complete'
+        final_feedback.completion_ratio = 1.0 if jc_result.success else 0.0
+        final_feedback.remaining_time = self._float_to_duration(0.0)
+        final_feedback.current_state = jc_result.final_state
+        final_feedback.target_state = joint_target
+        final_feedback.contact_state = list(jc_result.contact_state)
+        final_feedback.current_pose = final_pose
+        final_feedback.last_error = jc_result.last_error or ''
+        goal_handle.publish_feedback(final_feedback)
+
+        if jc_result.success:
+            goal_handle.succeed()
+        elif jc_result.result_code == 'CANCELED':
+            goal_handle.canceled()
+        else:
+            goal_handle.abort()
+        return result
+
     def _safety_goal_callback(self, _goal_request) -> GoalResponse:
         return GoalResponse.ACCEPT
 
@@ -371,6 +569,11 @@ class RobotDriverNode(Node):
             result.joint_action_code = 'UNSENT'
             return result
 
+        if exit_zero_gravity:
+            self._logger.info('Safety pose action%s: disabling zero-gravity before joint motion', label_tag)
+            if not self._zero_gravity_manager.disable():
+                self._logger.warning('Safety pose action%s: failed to disable zero-gravity', label_tag)
+
         joint_goal = JointCommand.Goal()
         joint_goal.target.joint_state = JointState()
         joint_goal.target.joint_state.name = list(safe_pose.joint_names)
@@ -378,7 +581,6 @@ class RobotDriverNode(Node):
         joint_goal.target.relative = _SAFE_POSE_RELATIVE
         joint_goal.target.speed_scale = speed_scale
         joint_goal.options.timeout = self._float_to_duration(timeout)
-        joint_goal.options.exit_zero_gravity = exit_zero_gravity
         joint_goal.options.label = label
 
         def _forward_joint_feedback(feedback_msg):
@@ -497,6 +699,57 @@ class RobotDriverNode(Node):
         goal_handle.succeed()
         return result
 
+    def _robot_action_abort(
+        self,
+        goal_handle,
+        message: str,
+        code: str,
+        *,
+        target_state: JointState | None = None,
+    ) -> RobotCommand.Result:
+        self._robot_action_logger.error('Robot action aborted: code=%s error=%s', code, message)
+        result = RobotCommand.Result()
+        result.success = False
+        result.result_code = code
+        result.last_error = message
+        result.final_state = self._read_joint_state()
+        result.target_state = target_state or JointState()
+        result.contact_state = []
+        pose_msg, _ = self._kinematics_solver.compute_fk_pose(
+            stamp=self.get_clock().now().to_msg(),
+            joint_state=self._commander.read_joint_state(),
+        )
+        result.final_pose = pose_msg
+        goal_handle.abort()
+        return result
+
+    def _sanitize_speed_scale(self, value: float) -> float:
+        if not math.isfinite(value) or value <= 0.0:
+            return _ROBOT_ACTION_DEFAULT_SPEED
+        return max(0.05, min(1.0, value))
+
+    def _resolve_timeout(self, duration_msg: Duration) -> tuple[Duration, float]:
+        total = self._duration_to_float(duration_msg)
+        if total > 0.0:
+            return duration_msg, total
+        fallback = self._float_to_duration(_ROBOT_ACTION_DEFAULT_TIMEOUT)
+        return fallback, _ROBOT_ACTION_DEFAULT_TIMEOUT
+
+    def _read_joint_state(self) -> JointState:
+        data = self._commander.read_joint_state()
+        msg = JointState()
+        msg.name = list(data.names)
+        msg.position = list(data.positions)
+        msg.velocity = list(data.velocities)
+        msg.effort = list(data.efforts)
+        return msg
+
+    @staticmethod
+    def _duration_to_float(duration: Duration) -> float:
+        if duration is None:
+            return 0.0
+        return float(duration.sec) + float(duration.nanosec) / 1e9
+
     @staticmethod
     def _float_to_duration(value: float) -> Duration:
         msg = Duration()
@@ -536,6 +789,7 @@ class RobotDriverNode(Node):
         self._trajectory_action.destroy()
         self._joint_action.destroy()
         self._safety_pose_action.destroy()
+        self._robot_action.destroy()
         self._gripper_action.destroy()
         self._joint_action_client.destroy()
         self._commander.disconnect()

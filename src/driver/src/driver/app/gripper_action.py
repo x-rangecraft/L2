@@ -240,7 +240,6 @@ class GripperAction:
         joint_goal.target.relative = False
         joint_goal.target.speed_scale = float(speed_scale)
         joint_goal.options.timeout = goal.timeout
-        joint_goal.options.exit_zero_gravity = False
         joint_goal.options.label = goal.label or 'gripper_open'
 
         fb_msg = GripperCommand.Feedback()
@@ -334,7 +333,6 @@ class GripperAction:
         joint_goal.target.relative = False
         joint_goal.target.speed_scale = float(speed_scale)
         joint_goal.options.timeout = goal.timeout
-        joint_goal.options.exit_zero_gravity = False
         joint_goal.options.label = goal.label or 'gripper_move'
 
         fb_msg = GripperCommand.Feedback()
@@ -424,7 +422,6 @@ class GripperAction:
         joint_goal.target.relative = False
         joint_goal.target.speed_scale = float(speed_scale)
         joint_goal.options.timeout = goal.timeout
-        joint_goal.options.exit_zero_gravity = False
         joint_goal.options.label = goal.label or 'gripper_grip'
 
         # Shared state between feedback callback and awaiter.

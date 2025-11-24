@@ -6,12 +6,13 @@ import time
 from dataclasses import dataclass
 
 from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
-from geometry_msgs.msg import TransformStamped
+from geometry_msgs.msg import PoseStamped, TransformStamped
 from sensor_msgs.msg import JointState
 from tf2_ros import TransformBroadcaster
 
 from driver.config.parameter_schema import DriverParameters
 from driver.hardware.hardware_commander import HardwareCommander
+from driver.hardware.kinematics_solver import KinematicsSolver
 
 
 @dataclass
@@ -19,14 +20,28 @@ class DiagnosticsCache:
     last_publish_time: float = 0.0
 
 
+_EE_POSE_TOPIC = '/robot_driver/end_effector_pose'
+
+
 class StatePublisher:
-    def __init__(self, node, commander: HardwareCommander, params: DriverParameters):
+    def __init__(
+        self,
+        node,
+        commander: HardwareCommander,
+        params: DriverParameters,
+        *,
+        kinematics_solver: KinematicsSolver | None = None,
+    ):
         self._node = node
         self._commander = commander
         self._params = params
+        self._solver = kinematics_solver
         self._joint_pub = node.create_publisher(JointState, params.joint_state_topic, 10)
         self._diag_pub = node.create_publisher(DiagnosticArray, params.diagnostics_topic, 10)
         self._tf_broadcaster = TransformBroadcaster(node) if params.publish_tf else None
+        self._ee_pose_pub = (
+            node.create_publisher(PoseStamped, _EE_POSE_TOPIC, 10) if self._solver else None
+        )
         self._diagnostics_cache = DiagnosticsCache()
 
         self._joint_period = 1.0 / max(1e-3, params.joint_state_rate)
@@ -57,8 +72,17 @@ class StatePublisher:
     # ------------------------------------------------------------------ timers
     def _publish_joint_state(self):
         data = self._commander.read_joint_state()
+        stamp = self._node.get_clock().now().to_msg()
+        pose_msg: PoseStamped | None = None
+        if self._solver is not None:
+            pose_msg, _ = self._solver.compute_fk_pose(
+                stamp=stamp,
+                joint_state=data,
+            )
+            if self._ee_pose_pub:
+                self._ee_pose_pub.publish(pose_msg)
         msg = JointState()
-        msg.header.stamp = self._node.get_clock().now().to_msg()
+        msg.header.stamp = stamp
         msg.header.frame_id = self._params.tf_base_frame
         msg.name = list(data.names)
         msg.position = list(data.positions)
@@ -67,18 +91,22 @@ class StatePublisher:
         self._joint_pub.publish(msg)
 
         if self._tf_broadcaster:
-            pose = self._commander.read_end_effector_pose()
+            if pose_msg is None:
+                pose_msg = PoseStamped()
+                pose_msg.header.frame_id = self._params.tf_base_frame
+                pose_msg.header.stamp = msg.header.stamp
+                pose_msg.pose = self._commander.read_end_effector_pose()
             tf_msg = TransformStamped()
             tf_msg.header.stamp = msg.header.stamp
             tf_msg.header.frame_id = self._params.tf_base_frame
             tf_msg.child_frame_id = self._params.tf_tool_frame
-            tf_msg.transform.translation.x = pose.position.x
-            tf_msg.transform.translation.y = pose.position.y
-            tf_msg.transform.translation.z = pose.position.z
-            tf_msg.transform.rotation.x = pose.orientation.x
-            tf_msg.transform.rotation.y = pose.orientation.y
-            tf_msg.transform.rotation.z = pose.orientation.z
-            tf_msg.transform.rotation.w = pose.orientation.w
+            tf_msg.transform.translation.x = pose_msg.pose.position.x
+            tf_msg.transform.translation.y = pose_msg.pose.position.y
+            tf_msg.transform.translation.z = pose_msg.pose.position.z
+            tf_msg.transform.rotation.x = pose_msg.pose.orientation.x
+            tf_msg.transform.rotation.y = pose_msg.pose.orientation.y
+            tf_msg.transform.rotation.z = pose_msg.pose.orientation.z
+            tf_msg.transform.rotation.w = pose_msg.pose.orientation.w
             self._tf_broadcaster.sendTransform(tf_msg)
 
     def _publish_diagnostics(self):

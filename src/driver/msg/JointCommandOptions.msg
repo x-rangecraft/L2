@@ -1,3 +1,2 @@
 builtin_interfaces/Duration timeout
-bool exit_zero_gravity
 string label

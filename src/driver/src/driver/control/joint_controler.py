@@ -197,6 +197,10 @@ class JointControler:
         self._robot_command_thread.start()
         self._preempt_event.set()  # Signal any ongoing motion to preempt
 
+    def validate_robot_pose(self, msg: PoseStamped) -> bool:
+        """Expose robot_command validation for action-based callers."""
+        return self._validate_robot_command(msg)
+
     def handle_joint_command(self, msg: JointState) -> None:
         # Basic parameter validation (format + numeric range)
         if not self._validate_joint_command(msg):
@@ -306,15 +310,11 @@ class JointControler:
         target_state_msg = self._joint_state_from_mapping(targets)
 
         zero_gravity_was_on = self._zero_gravity_enabled()
-        disable_reason = ' (auto-exit)'
-        if goal.options.exit_zero_gravity and not zero_gravity_was_on:
-            disable_reason = ' (requested)'
-        reenable_zero_gravity = zero_gravity_was_on and not goal.options.exit_zero_gravity
         disabled_zero_gravity = False
-        if zero_gravity_was_on or goal.options.exit_zero_gravity:
-            self._logger.info('Joint action%s: exiting zero-gravity%s', label_tag, disable_reason)
-            disabled_zero_gravity = self._exit_zero_gravity_if_needed(label_tag, force=goal.options.exit_zero_gravity)
-            if not disabled_zero_gravity and zero_gravity_was_on:
+        if zero_gravity_was_on:
+            self._logger.info('Joint action%s: exiting zero-gravity (auto)', label_tag)
+            disabled_zero_gravity = self._exit_zero_gravity_if_needed(label_tag)
+            if not disabled_zero_gravity:
                 self._logger.warning('Joint action%s could not exit zero-gravity; motion may not occur', label_tag)
 
         self._preempt_active_joint_ramp()
@@ -411,7 +411,7 @@ class JointControler:
             self._logger.info('Joint action%s completed (%d joints, %.2fs)', label_tag, len(joint_names), total_duration)
             return self._finalize_joint_action(True, 'SUCCESS', '', target_state_msg, snapshot=final_snapshot)
         finally:
-            if reenable_zero_gravity and disabled_zero_gravity:
+            if zero_gravity_was_on and disabled_zero_gravity:
                 self._logger.info('Joint action%s: restoring zero-gravity mode', label_tag)
                 if not self._toggle_zero_gravity(True, label_tag):
                     self._logger.warning('Joint action%s failed to re-enable zero-gravity', label_tag)
