@@ -87,22 +87,14 @@
 
 ## 3. 接口定义
 
-### 3.1 输入接口
-
-| 话题/服务 | 消息类型 | 说明 |
-|-----------|---------|------|
-| `/vision/detected_objects` | 待定 | 视觉模块检测到的物体位姿 |
-| `/joint_states` | `sensor_msgs/JointState` | 当前关节状态，用于判断是否到位 |
-| `/tf` | TF2 | 坐标系变换 |
-
-### 3.2 输出接口
+### 3.1 输出接口
 
 | 话题/服务 | 消息类型 | 说明 |
 |-----------|---------|------|
 | `/robot_driver/robot_command` | `geometry_msgs/PoseStamped` | 笛卡尔位姿指令（主要接口） |
 | `/robot_driver/gripper_command` | 待定 | 夹爪控制指令 |
 
-### 3.3 笛卡尔位姿指令格式
+### 3.2 笛卡尔位姿指令格式
 
 ```yaml
 header:
@@ -117,7 +109,7 @@ pose:
 - 末端到 base_link 原点距离 r ≈ [0.04, 0.73] m
 - 若启用 `xyz_only_mode` 则忽略姿态，沿用当前值
 
-### 3.4 Driver 行为说明
+### 3.3 Driver 行为说明
 
 - IK 求解后在关节空间插值
 - 根据当前-目标关节最大夹角自动计算 ramp 速度（0.25–5 s）

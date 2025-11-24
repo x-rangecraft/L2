@@ -15,7 +15,7 @@
    - 支持关节空间与笛卡尔空间的目标位姿/姿态指令，负责插值、限速与安全联锁后再写入 CAN。
 4. 安全态归位
    - 监控指令心跳：超过 60 s 未收到上游指令即执行安全归位（`SAFE_POSE`），归位完成后默认切换至零重力模式，方便人工干预。
-   - 订阅 `/robot_driver/safety_stop`，收到后立即执行安全回归流程但不自动切换零重力（留给人工决定）。
+   - 订阅 `/robot_driver/safety_stop`，收到后立即通过 `/robot_driver/action/safety_pose` 执行安全回归流程，并按照 Action Goal 参数（当前为 `enable_zero_gravity_after=true`）切换零重力模式。
 5. 零重力模式开关
    - 暴露接口（service/action）以启用或关闭零重力模式，并同步更新状态上报与安全限制。
    - 若节点处于零重力模式且收到新的运动指令，需先自动退出零重力模式，再恢复常规控制链路。
@@ -42,11 +42,11 @@
 ### 订阅的 Topic
 | 话题 | 类型 | 说明 |
 | --- | --- | --- |
-| `/robot_driver/robot_command` | `geometry_msgs/PoseStamped` | 机械臂基坐标系（默认 `base_link`）下的笛卡尔目标，`Pose.position` 为 XYZ，`orientation` 提供单位四元数；驱动执行 IK → 关节插值，并参考 SAFE_POSE 同款 ramp 逻辑自动按位移估算 0.25–5 s 的平滑运动。 |
-| `/robot_driver/safety_stop` | `std_msgs/Empty` | 收到立即抢占当前运动、执行安全归位，但不切换零重力模式。 |
-| `/robot_driver/joint_command` | `sensor_msgs/JointState` | 直接指定一个或多个关节位置/速度/力矩；用于调试、标定或单轴测试，节点始终订阅该话题。 |
+| `/robot_driver/robot_command` | `geometry_msgs/PoseStamped` | 机械臂基坐标系（默认 `base_link`）下的笛卡尔目标，`Pose.position` 为 XYZ，`orientation` 提供单位四元数；**内部作为 `/robot_driver/action/robot` 的语法糖**：节点在回调中直接构造 `RobotCommand` Action Goal 并发送，执行链路与 Action 完全一致。 |
+| `/robot_driver/safety_stop` | `std_msgs/Empty` | 收到立即抢占当前运动、通过 **`/robot_driver/action/safety_pose`** 执行 SAFE_POSE 流程，并在动作完成后按 Action Goal 参数切换零重力模式（当前实现为 `enable_zero_gravity_after=true`）。 |
+| `/robot_driver/joint_command` | `sensor_msgs/JointState` | 直接指定一个或多个关节位置/速度/力矩；用于调试、标定或单轴测试，节点始终订阅该话题。**内部作为 `/robot_driver/action/joint` 的语法糖**：回调中构造 `JointCommand` Action Goal（`target.joint_state`=消息、`relative=false`、`speed_scale=1.0`）并发送。 |
 
-> 以上三个 topic 名称固定，不再暴露 ROS 参数，节点在启动后会一直订阅它们。
+> 以上三个 topic 名称固定，不再暴露 ROS 参数，节点在启动后会一直订阅它们；它们仅作为 Action 的兼容层，真正的运动逻辑都统一走对应 Action。
 
 `/robot_driver/robot_command` 示例：
 
@@ -71,7 +71,7 @@ pose:
   - 驱动在 `_quaternion_to_matrix()` 中会自动对四元数做归一化（除非传入全 0），因此只要是合法四元数即可；
   - 代码层面无额外“角度范围”限制，真正的限制来自关节位置极限与几何可达性——某些位置 + 姿态组合虽然消息可以发出，但可能求不出 IK 解；
   - 若在配置中启用 `xyz_only_mode=true`，则会忽略消息中的 `orientation`，只修改末端位置，姿态沿用当前值。
-- 驱动会根据“当前关节-目标关节”最大夹角自动算 ramp 速度（同 `/robot_driver/safety_stop`），无需填写时间戳；若仍以 10–30 Hz 推送命令，最新命令会抢占旧命令。
+- 通过 Action 链路，驱动会根据“当前关节-目标关节”最大夹角自动算 ramp 速度（同 SAFE_POSE 逻辑），默认 `speed_scale=0.9`、软超时 15 s；Topic 调用与 Action 调用的行为完全一致。
 
 `/robot_driver/joint_command` 示例（position 模式）：
 
@@ -101,7 +101,7 @@ effort: []
 | `/robot_driver/action/robot` | Action (`robot_driver/action/RobotCommand`) | 笛卡尔控制：接收 `PoseStamped`（frame=`base_link`）→ `KinematicsSolver` 求 IK → 构造 `/robot_driver/action/joint` goal 执行；反馈/结果附带末端 FK pose。`speed_scale` 默认 0.9，软超时默认 15 s，并在执行前自动退出零重力。 | `ros2 action send_goal /robot_driver/action/robot robot_driver/action/RobotCommand "{target: {header: {frame_id: base_link}, pose: {position: {x: 0.35, y: 0.0, z: 0.32}, orientation: {x: 0.0, y: 0.707, z: 0.0, w: 0.707}}}" --feedback` |
 | `/robot_driver/action/gripper` | Action (`robot_driver/action/GripperCommand`) | 夹爪/末端执行器控制，底层复用关节执行器（单通道或映射到 follow_joint_trajectory action）。 | 设计中 |
 
-> **注意**：当前笛卡尔控制通过 Topic `/robot_driver/robot_command` 实现，未来会迁移至 `/robot_driver/action/robot`，两者将在过渡期共存；Topic 接口将成为 Action 的语法糖，内部调用 Action client。
+> **注意**：当前 `/robot_driver/robot_command`、`/robot_driver/joint_command` 与 `/robot_driver/safety_stop` Topic 均已实现为对应 Action（`robot` / `joint` / `safety_pose`）的语法糖，内部通过 Action client 调用统一的执行链路；如需结果/反馈或细粒度控制，推荐直接使用 Action 接口。
 
 ### 接口分层（结构调整规划）
 底层暴露 *两个* 原语接口，其他 Topic/Action 均在其之上包装：
@@ -125,23 +125,23 @@ effort: []
    - 当前状态：规划中，将复用 `safety_pose` action 与 `zero_gravity` service。
 3. `/robot_driver/action/robot`
    - 流程：接收笛卡尔目标 → `KinematicsSolver` 求 IK → 构造 `/robot_driver/action/joint` goal（强制退出零重力、限速插值）→ 透传 JointCommand 反馈/结果并附加末端 FK pose。
-   - 用途：高层抓取/落位接口，便于 MoveIt/脚本统一调用；Topic `/robot_driver/robot_command` 将在过渡期内通过 thin wrapper 调用该 Action。
-   - 当前状态：Action 已实现；Topic 版本仍保留但内部改为调用 Action（规划中）。
+   - 用途：高层抓取/落位接口，便于 MoveIt/脚本统一调用；Topic `/robot_driver/robot_command` 已作为 thin wrapper 调用该 Action。
+   - 当前状态：Action 已实现，Topic 版本也已实现为 Action 语法糖，内部仅转发到 `/robot_driver/action/robot`。
 4. `/robot_driver/joint_command`（Topic）
-   - 实现：对关节控制的轻量封装，单点命令由 `MotionController.handle_joint_command()` 处理并转发给 commander。
-   - 当前状态：已实现，直接调用 `HardwareCommander` 的关节控制能力。
+   - 实现：对关节控制的轻量封装，回调中直接构造 `JointCommand` Action Goal 并发送到 `/robot_driver/action/joint`；`target.joint_state` 取自消息，`relative=false`，`speed_scale=1.0`，超时由 Action 侧配置或调用方显式指定。
+   - 当前状态：已实现，作为 `/robot_driver/action/joint` 的语法糖；如果需要结果/反馈或自定义 `speed_scale`/`timeout`，建议直接调用 Action。
    - Action 版本：`/robot_driver/action/joint`，提供同等能力且支持反馈、抢占、zero-gravity 自动退出与 `contact_state` 触碰检测。
 5. `/robot_driver/robot_command`（Topic）
-   - 实现：接收笛卡尔目标，内部通过 `MotionController` 执行 IK + 插值，底层调用 commander。
-   - 当前状态：已实现，未来将成为 `/robot_driver/action/robot` 的语法糖。
+   - 实现：接收笛卡尔目标后直接构造 `RobotCommand` Action Goal 并发送到 `/robot_driver/action/robot`，由 Action 链路完成 IK + 插值与零重力管理。
+   - 当前状态：已实现，作为 `/robot_driver/action/robot` 的语法糖。
 6. `/robot_driver/safety_stop`（Topic）
-   - 实现：最高优先级触发，收到消息立即调用 `CommandWatchdog.handle_safety_stop()` 抢占当前运动并执行安全归位。
-   - 当前状态：已实现，由 `CommandWatchdog` 统一管理安全停机逻辑。
+   - 实现：最高优先级触发，收到消息后由节点直接发送 `SafetyPose` Action Goal（`enable_zero_gravity_after=true`）到 `/robot_driver/action/safety_pose`，执行 SAFE_POSE + 零重力切换；CommandWatchdog 则用于心跳超时时复用同一 SAFE_POSE 策略。
+   - 当前状态：已实现，Topic 与超时逻辑共享同一 SAFE_POSE 配置与零重力策略。
 
 优先级/互斥策略：
 - `Action > Topic`：同一能力若同时提供 Action 与 Topic（例如 follow_joint_trajectory/robot），Action 请求优先；Topic 层未来将成为 Action 的语法糖。
 - `最新命令抢占旧命令`：同一接口上，新命令会通过 `threading.Event` 机制抢占旧命令并从当前姿态续跑，保持单执行链路。
-- `safety_stop` 最高优先级：触发后通过 `CommandWatchdog` 立即抢占其它一切运动，执行安全归位流程。
+- `safety_stop` 最高优先级：触发后通过 SafetyPose Action 立即抢占其它一切运动，执行安全归位流程。
 - `gripper`：规划为 `/robot_driver/action/gripper`，底层也将通过 `FollowJointTrajectory`（或映射到特定关节）执行，确保所有执行互斥策略一致。
 
 > 备注：统一的 `FollowJointTrajectory` 让"落位"、"常规轨迹"、"单轴 Debug"都走同一执行链路、共享互斥与反馈，减少重复线程，实现优雅的抢占管理。
@@ -340,11 +340,11 @@ driver/
 
 **控制层**
 - `driver.control.joint_controler.JointControler`
-  - 统一处理 `/robot_driver/robot_command`、`/robot_driver/joint_command` 与 `FollowJointTrajectory` action。
-  - 集成命令队列、限速、IK 求解、SAFE_POSE 落位能力。
+  - 统一处理 `/robot_driver/action/joint` 与 `FollowJointTrajectory` Action，并为 `/robot_driver/action/robot`、`/robot_driver/action/safety_pose` 提供关节执行与 SAFE_POSE 能力。
+  - 集成命令队列、限速、IK 求解（笛卡尔 Action 通过单独组件完成 IK 后复用关节执行）、SAFE_POSE 落位能力。
 - `driver.control.command_watchdog.CommandWatchdog`
-  - 基于 `MotionController` 的活动心跳实现安全超时与 `/robot_driver/safety_stop` 处理。
-  - 触发 SAFE_POSE 流程并管理零重力自动切换。
+  - 基于 `JointControler` 的活动心跳实现安全超时处理。
+  - 超时时触发 SAFE_POSE 流程并管理零重力自动切换，其策略与 `/robot_driver/action/safety_pose` 保持一致；`/robot_driver/safety_stop` 则由节点直接发送 SafetyPose Action goal。
 - `driver.control.state_publisher.StatePublisher`
   - 周期读取 `HardwareCommander` 的缓存，发布 `/joint_states`、诊断与 TF。
 - `driver.control.zero_gravity_manager.ZeroGravityManager`

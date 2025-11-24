@@ -94,7 +94,11 @@ class RobotDriverNode(Node):
         self._joint_action_group = ReentrantCallbackGroup()
         self._safety_action_group = ReentrantCallbackGroup()
         self._robot_action_group = ReentrantCallbackGroup()
+        # Dedicated callback groups for action clients so topic wrappers can
+        # safely forward commands to actions without blocking other callbacks.
         self._joint_client_group = ReentrantCallbackGroup()
+        self._robot_client_group = ReentrantCallbackGroup()
+        self._safety_client_group = ReentrantCallbackGroup()
         self._robot_goal_lock = threading.Lock()
         self._robot_joint_goals: dict[int, ActionClient.GoalHandle] = {}
 
@@ -172,6 +176,18 @@ class RobotDriverNode(Node):
             self._params.joint_command_action,
             callback_group=self._joint_client_group,
         )
+        self._robot_action_client = ActionClient(
+            self,
+            RobotCommand,
+            self._params.robot_command_action,
+            callback_group=self._robot_client_group,
+        )
+        self._safety_pose_client = ActionClient(
+            self,
+            SafetyPose,
+            self._params.safety_pose_action,
+            callback_group=self._safety_client_group,
+        )
         # Dedicated gripper action wrapper; exposes /robot_driver/action/gripper
         # while internally reusing the JointCommand action.
         self._gripper_action = GripperAction(
@@ -202,40 +218,135 @@ class RobotDriverNode(Node):
 
     # ------------------------------------------------------------------ subscribers
     def _on_robot_command(self, msg: PoseStamped) -> None:
+        """Thin wrapper: forward /robot_driver/robot_command to RobotCommand action.
+
+        This keeps the Topic API as a compatibility layer while ensuring all
+        motion logic goes through /robot_driver/action/robot.
+        """
         try:
-            self._motion_controller.handle_robot_command(msg)
+            if not self._robot_action_client.wait_for_server(timeout_sec=0.0):
+                self._logger.error(
+                    'robot_command topic: RobotCommand action server %s unavailable',
+                    self._params.robot_command_action,
+                )
+                return
+
+            goal = RobotCommand.Goal()
+            # PoseStamped carries both frame_id and pose; reuse it directly.
+            goal.target = msg
+            # Let action use its default speed/timeout handling; only tag source.
+            goal.label = 'topic_robot_command'
+
+            def _goal_response_cb(future) -> None:
+                try:
+                    goal_handle = future.result()
+                except Exception as exc:  # pragma: no cover - defensive guard
+                    self._logger.error('robot_command topic: failed to send RobotCommand goal: %s', exc)
+                    return
+                if goal_handle is None or not getattr(goal_handle, 'accepted', False):
+                    self._logger.error('robot_command topic: RobotCommand goal rejected by action server')
+
+            send_future = self._robot_action_client.send_goal_async(goal)
+            send_future.add_done_callback(_goal_response_cb)
         except Exception as exc:  # pragma: no cover - defensive guard
             self._logger.error('robot_command handler failed: %s', exc)
             self.get_logger().error(traceback.format_exc())
 
     def _on_joint_command(self, msg: JointState) -> None:
+        """Thin wrapper: forward /robot_driver/joint_command to JointCommand action.
+
+        Topic interface stays always-on for tooling, but execution is unified
+        through /robot_driver/action/joint.
+        """
         try:
-            self._motion_controller.handle_joint_command(msg)
+            if not self._joint_action_client.wait_for_server(timeout_sec=0.0):
+                self._logger.error(
+                    'joint_command topic: JointCommand action server %s unavailable',
+                    self._params.joint_command_action,
+                )
+                return
+
+            goal = JointCommand.Goal()
+            goal.target.joint_state = msg
+            # /robot_driver/joint_command historically uses absolute targets.
+            goal.target.relative = False
+            # Use full configured rate; callers needing slower motion should
+            # switch to the action API and set speed_scale explicitly.
+            goal.target.speed_scale = 1.0
+            goal.options.label = 'topic_joint_command'
+
+            def _goal_response_cb(future) -> None:
+                try:
+                    goal_handle = future.result()
+                except Exception as exc:  # pragma: no cover - defensive guard
+                    self._logger.error('joint_command topic: failed to send JointCommand goal: %s', exc)
+                    return
+                if goal_handle is None or not getattr(goal_handle, 'accepted', False):
+                    self._logger.error('joint_command topic: JointCommand goal rejected by action server')
+
+            send_future = self._joint_action_client.send_goal_async(goal)
+            send_future.add_done_callback(_goal_response_cb)
         except Exception as exc:  # pragma: no cover - defensive guard
             self._logger.error('joint_command handler failed: %s', exc)
             self.get_logger().error(traceback.format_exc())
 
     def _on_safety_stop(self, _msg: Empty) -> None:
-        """Handle /robot_driver/safety_stop without a dedicated watchdog.
+        """Handle /robot_driver/safety_stop by triggering SafetyPose action.
 
-        Run the SAFE_POSE sequence in a background thread so the rclpy executor
-        is not blocked, but do not maintain any periodic timeout logic.
+        This mirrors the SAFE_POSE sequence but routes it through the unified
+        /robot_driver/action/safety_pose interface so that all SAFE_POSE logic
+        lives in a single place.
         """
-
-        def _worker():
-            try:
-                self._logger.warning('Safety stop requested; running SAFE_POSE sequence')
-                self._motion_controller.safe_pose_sequence(
-                    reason='safety_stop',
-                    exit_zero_gravity=True,
-                    wait_time=2.0,
-                    tolerance=0.1,
-                    reenable_zero_gravity=True,
+        try:
+            self._logger.warning('Safety stop requested; sending SafetyPose action goal')
+            if not self._safety_pose_client.wait_for_server(timeout_sec=0.0):
+                self._logger.error(
+                    'Safety stop: SafetyPose action server %s unavailable',
+                    self._params.safety_pose_action,
                 )
-            except Exception as exc:  # pragma: no cover - defensive guard
-                self._logger.error('Safety stop sequence failed: %s', exc)
+                return
 
-        threading.Thread(target=_worker, daemon=True).start()
+            goal = SafetyPose.Goal()
+            # After safety stop we expect zero-gravity to be enabled again.
+            goal.enable_zero_gravity_after = True
+
+            def _goal_response_cb(future) -> None:
+                try:
+                    goal_handle = future.result()
+                except Exception as exc:  # pragma: no cover - defensive guard
+                    self._logger.error('Safety stop: failed to send SafetyPose goal: %s', exc)
+                    return
+                if goal_handle is None or not getattr(goal_handle, 'accepted', False):
+                    self._logger.error('Safety stop: SafetyPose goal rejected by action server')
+                    return
+
+                result_future = goal_handle.get_result_async()
+
+                def _result_cb(result_future) -> None:
+                    try:
+                        action_result = result_future.result()
+                    except Exception as exc:  # pragma: no cover - defensive guard
+                        self._logger.error('Safety stop: exception waiting for SafetyPose result: %s', exc)
+                        return
+                    result_msg = getattr(action_result, 'result', None)
+                    if result_msg is None:
+                        self._logger.error('Safety stop: SafetyPose result message missing')
+                        return
+                    self._logger.warning(
+                        'Safety stop completed: success=%s result_code=%s max_error=%.4f last_error=%s',
+                        bool(getattr(result_msg, 'success', False)),
+                        getattr(result_msg, 'result_code', '') or '',
+                        float(getattr(result_msg, 'max_error', float('nan'))),
+                        getattr(result_msg, 'last_error', '') or '',
+                    )
+
+                result_future.add_done_callback(_result_cb)
+
+            send_future = self._safety_pose_client.send_goal_async(goal)
+            send_future.add_done_callback(_goal_response_cb)
+        except Exception as exc:  # pragma: no cover - defensive guard
+            self._logger.error('Safety stop handler failed: %s', exc)
+            self.get_logger().error(traceback.format_exc())
 
     # ------------------------------------------------------------------ services
     def _handle_self_check(self, _request: Trigger.Request, response: Trigger.Response):
