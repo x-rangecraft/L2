@@ -1,0 +1,66 @@
+skill_id: record_object
+description: "Record object by pick, inspect, and place"
+steps:
+  - id: go_safe_pose
+    desc: "回到安全位姿"
+    type: safety_pose
+    params:
+      enable_zero_gravity_after: false
+  - id: move_pre_grasp
+    desc: "移动至预抓取位姿"
+    type: cartesian_move
+    params:
+      target_pose:
+        position: {x: 0.44570661670496153, y: 0.22144147902240613, z: 0.059982425100292835}
+        orientation: {x: -0.21784444448478357, y: 0.8025009675152103, z: 0.17739868623565766, w: 0.5263703081159964}
+  - id: open_gripper
+    desc: "张开夹爪"
+    type: gripper
+    params:
+      command: 0
+      speed_scale: 0.9
+  - id: move_grasp
+    desc: "移动到抓取位置"
+    type: cartesian_move
+    params:
+      target_pose:
+        position: {x: 0.5087268451888356, y: 0.2754820850432299, z: 0.05726576362856198}
+        orientation: {x: -0.22637323645745716, y: 0.7723385537517967, z: 0.18285557071612654, w: 0.5646345335369048}
+  - id: close_gripper
+    desc: "夹住目标"
+    type: gripper
+    params:
+      command: 1
+      speed_scale: 0.9
+  - id: move_observe
+    desc: "移动到观察位"
+    type: cartesian_move
+    params:
+      target_pose:
+        position: {x: 0.03586991293867343, y: 0.3111905019299687, z: 0.4428649697650363}
+        orientation: {x: -0.5268686399645887, y: -0.15210254136154186, z: -0.20206340031608086, w: 0.8114460150779765}
+  - id: sweep_joint6
+    desc: "观察：关节6 往返扫描"
+    type: joint_move
+    params:
+      joint_index: 5
+      positions: [-2.14, 2.14, -2.14]
+      speed_scale: 0.5
+  - id: move_place
+    desc: "放置到原位置"
+    type: cartesian_move
+    params:
+      target_pose:
+        position: {x: 0.5087268451888356, y: 0.2754820850432299, z: 0.05726576362856198}
+        orientation: {x: -0.22637323645745716, y: 0.7723385537517967, z: 0.18285557071612654, w: 0.5646345335369048}
+  - id: release_gripper
+    desc: "松开夹爪"
+    type: gripper
+    params:
+      command: 0
+      speed_scale: 0.9
+  - id: go_safe_pose_final
+    desc: "回到安全位姿"
+    type: safety_pose
+    params:
+      enable_zero_gravity_after: false

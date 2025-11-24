@@ -233,3 +233,45 @@ def compute_lift_pose(grasp_pose: Pose, lift_height: float = 0.15) -> Pose:
 - 当前阶段暂不考虑外部障碍规避，主要关注任务序列执行
 - 关节位置/速度限制由 robot_driver 保证（各关节速度上限约 10 rad/s）
 - 轨迹平滑由 robot_driver 保证
+
+## 8. 实施方案与目录规划
+
+为保证 `robot_skill` 可以快速接入现有 ROS2/colcon 工作流，规划如下目录与文件骨架（与 `robot_driver` 风格保持一致）：
+
+```
+src/robot_skill/
+├── CMakeLists.txt                  # ament_cmake 包装，方便 colcon build
+├── package.xml                     # 声明依赖（rclpy、geometry_msgs 等）
+├── setup.py / setup.cfg            # Python 节点安装入口
+├── resource/robot_skill            # ament 索引用占位文件
+├── config/robot_skill_config.yaml  # 节点参数（位姿偏置、超时等）
+├── launch/robot_skill.launch.py    # 启动 rclpy 节点并加载参数
+├── scripts/robot_skill_node.py     # `#!/usr/bin/env python3` 启动脚本
+├── src/robot_skill/
+│   ├── __init__.py
+│   ├── node.py                     # Node 类封装（订阅视觉 / 发布 driver 指令）
+│   └── state_machine.py            # 抓取/放置等技能状态机骨架
+├── skill_sets/                     # 技能配置目录（通用动作 + 具体技能）
+├── tests/                          # pytest：参数解析、状态机流转
+└── start_robot_skill.sh            # 启停包装脚本
+```
+
+### 8.1 start_robot_skill.sh 设计
+
+- **功能定位**：统一拉起/关闭 `robot_skill` 节点，简化与 driver 一致的日志、环境设置体验。
+- **命令参数**：仅保留 `--start`（默认）与 `--stop`，其中 `--stop` 负责清理通过 launch 或脚本启动的节点；默认行为为启动节点。
+- **实现要点**：
+  - 自动检测当前 Shell，选择 `/opt/ros/humble/setup.{bash|zsh}` 并 source；同时 source 工作区 `install/setup.bash`。
+  - 日志输出统一写入 `log/robot_skill/robot_skill_YYYYmmdd_HHMMSS.log`，便于排查。
+  - `--start` 流程中调用 `ros2 launch robot_skill robot_skill.launch.py`；`--stop` 流程通过 `pkill -f` 方式关闭历史进程并提示状态。
+  - 预留扩展位：后续如需守护/参数切换，可在脚本中继续补全。
+
+该目录及脚本将在本迭代中创建，形成最小可运行的 `robot_skill` 节点骨架，后续可逐步填入实际技能逻辑。
+
+### 8.2 技能配置与 SkillSequence Action
+
+- 在 `skill_sets/` 目录中维护：
+  - `general_skill.yaml`：定义通用动作库 `common_actions`，每个动作包含 `id`、`type`（如 `safety_pose`、`cartesian_move`、`gripper`、`joint_move` 等）、`desc`、默认 `params`（速度、Pose、夹爪命令等）。
+  - 具体技能文件（例如 `record_object.yaml`）：按步骤列出需要执行的动作。步骤可以通过 `action` 字段引用 `common_actions` 中的模板，并使用 `params_override`（或同名字段）覆盖个别参数；也可直接自定义 `type + params`。
+- 节点加载技能时先解析 `general_skill.yaml`，再读取目标技能文件，将通用动作与技能步骤合并为最终执行序列，按顺序调用 `/robot_driver/action/robot`、`/joint`、`/gripper`、`/safety_pose` 等 action。
+- 对外暴露 `/robot_skill/action/skill_sequence`（action 名 `SkillSequence`）：Goal 包含 `skill_id`（对应技能文件）、`targets[]`（可选目标位姿数组）、`context_id`（任务标识）；Result 提供 `success`、`error_code`、`message`、`steps_executed`；Feedback 输出 `step_index`、`step_id`、`step_desc`、`progress`、`detail`。这一接口让上层仅需传技能 ID，底层即可串行执行预定义动作集并实时反馈。
