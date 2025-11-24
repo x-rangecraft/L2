@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import math
+import time
+from collections import deque
 from dataclasses import dataclass
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Deque
 
 from rclpy.action import ActionServer, ActionClient
 from rclpy.callback_groups import ReentrantCallbackGroup
@@ -12,7 +14,7 @@ from rclpy.node import Node
 from robot_driver.action import JointCommand, GripperCommand
 from robot_driver.msg import JointContact
 
-from driver.utils.logging_utils import get_logger
+from driver.utils.logging_utils import get_logger, get_gripper_logger
 
 
 @dataclass
@@ -39,6 +41,12 @@ class GripperAction:
         self._node = node
         self._joint_client = joint_client
         self._logger = get_logger('gripper_action')
+        # 独立的夹爪调试日志，只写文件，不刷控制台。
+        self._gripper_logger = get_gripper_logger(
+            name='gripper_action_debug',
+            log_dir='log',
+            filename='gripper_action.log',
+        )
 
         # Read gripper-related parameters from the node. These are treated as
         # device-level configuration; Action callers only see width_m in meters.
@@ -60,13 +68,42 @@ class GripperAction:
             )
             self._cfg.max_width_m = 0.094
 
-        # Optional local contact heuristic for internal GRIP logic; this is
-        # not exposed via JointContact.in_contact any more, but still useful
-        # for deciding when to stop squeezing.
-        self._contact_effort_threshold = float(
-            node.declare_parameter('gripper.contact_effort_threshold', 5.0).value
+        # 滑动窗口 + 差值启发式参数，用于 GRIP 模式下的“是否夹到物体”判定。
+        # 这些参数只在 GripperAction 内部使用，不改变 JointAction 的基础数据结构。
+        self._window_size = int(
+            node.declare_parameter('gripper.contact_window_size', 3).value
         )
-        self._contact_velocity_eps = 1e-3
+        # 自由闭合阶段：速度较大时的最小速度和允许的最大力矩
+        self._free_velocity_min = float(
+            node.declare_parameter('gripper.free_velocity_min', 0.2).value
+        )
+        # 力矩抬升与速度下降的阈值（相对于自由闭合阶段的基线）
+        self._effort_jump_threshold = float(
+            node.declare_parameter('gripper.effort_jump_threshold', 0.2).value
+        )
+        self._velocity_drop_threshold = float(
+            node.declare_parameter('gripper.velocity_drop_threshold', 1.5).value
+        )
+        # 接触确认时的绝对阈值
+        self._effort_min_for_contact = float(
+            node.declare_parameter('gripper.effort_min_for_contact', 0.3).value
+        )
+        self._velocity_after_threshold = float(
+            node.declare_parameter('gripper.velocity_after_threshold', 0.05).value
+        )
+        # 用于空抓/极限判定的宽度阈值（米）；未配置时由 no_object_margin_ratio 推导。
+        self._p_close_threshold_m = float(
+            node.declare_parameter('gripper.p_close_threshold_m', 0.0).value
+        )
+        if self._p_close_threshold_m <= 0.0:
+            # 例如行程 0.094m * 0.1 ≈ 0.0094m
+            self._p_close_threshold_m = max(
+                0.0, min(self._cfg.no_object_margin_ratio, 1.0)
+            ) * self._cfg.max_width_m
+
+        # 滑动窗口：存储最近若干帧的 |effort| / |velocity| / width_m。
+        # 窗口至少保留 2 个样本以便计算差值。
+        self._history: Deque[Dict[str, float]] = deque(maxlen=max(self._window_size, 2))
 
         self._cb_group = ReentrantCallbackGroup()
         self._action = ActionServer(
@@ -93,6 +130,22 @@ class GripperAction:
         if not math.isfinite(width_m):
             return 0.0
         return max(0.0, min(width_m, self._cfg.max_width_m))
+
+    def _width_to_normalized(self, width_m: float) -> float:
+        """Map physical width (m) to normalized gripper command [0,1]."""
+        w = self._clamp_width(width_m)
+        if self._cfg.max_width_m <= 0.0:
+            return 0.0
+        return max(0.0, min(1.0, w / self._cfg.max_width_m))
+
+    def _normalized_to_width(self, normalized: float) -> float:
+        """Map normalized gripper command [0,1] back to physical width (m)."""
+        try:
+            x = float(normalized)
+        except Exception:
+            return 0.0
+        x = max(0.0, min(1.0, x))
+        return x * self._cfg.max_width_m
 
     # ------------------------------------------------------------------ callbacks
     def _goal_cb(self, _goal_request) -> int:
@@ -182,7 +235,8 @@ class GripperAction:
         # Build JointCommand goal that only touches the 'gripper' joint.
         joint_goal = JointCommand.Goal()
         joint_goal.target.joint_state.name = ['gripper']
-        joint_goal.target.joint_state.position = [target_width]
+        # JointCommand 侧使用归一化 gripper 命令空间 [0,1]。
+        joint_goal.target.joint_state.position = [self._width_to_normalized(target_width)]
         joint_goal.target.relative = False
         joint_goal.target.speed_scale = float(speed_scale)
         joint_goal.options.timeout = goal.timeout
@@ -276,7 +330,7 @@ class GripperAction:
 
         joint_goal = JointCommand.Goal()
         joint_goal.target.joint_state.name = ['gripper']
-        joint_goal.target.joint_state.position = [target_width]
+        joint_goal.target.joint_state.position = [self._width_to_normalized(target_width)]
         joint_goal.target.relative = False
         joint_goal.target.speed_scale = float(speed_scale)
         joint_goal.options.timeout = goal.timeout
@@ -366,7 +420,7 @@ class GripperAction:
 
         joint_goal = JointCommand.Goal()
         joint_goal.target.joint_state.name = ['gripper']
-        joint_goal.target.joint_state.position = [target_width]
+        joint_goal.target.joint_state.position = [self._width_to_normalized(target_width)]
         joint_goal.target.relative = False
         joint_goal.target.speed_scale = float(speed_scale)
         joint_goal.options.timeout = goal.timeout
@@ -381,7 +435,6 @@ class GripperAction:
             'contact_effort': 0.0,
             'cancel_requested': False,
             'last_width': 0.0,
-            'last_in_contact': False,
         }
 
         fb_msg = GripperCommand.Feedback()
@@ -390,6 +443,19 @@ class GripperAction:
         fb_msg.current_width_m = self._cfg.max_width_m
         fb_msg.in_contact = False
         goal_handle.publish_feedback(fb_msg)
+
+        debug_contact = 'debug' in (goal.label or '').lower()
+        if debug_contact:
+            # 每次 debug GRIP 前，清空一次调试日志文件，避免无限增长。
+            for handler in getattr(self._gripper_logger, 'handlers', []):
+                base = getattr(handler, 'baseFilename', None)
+                if base:
+                    try:
+                        with open(base, 'w'):
+                            pass
+                    except OSError:
+                        pass
+                    break
 
         def _on_joint_feedback(feedback_msg):
             """Translate JointCommand feedback into gripper feedback and detect grasp."""
@@ -401,14 +467,37 @@ class GripperAction:
                     break
 
             if contact is not None:
-                width = self._clamp_width(contact.position)
-                in_contact = self._detect_contact(contact)
+                # contact.position 对于 gripper 来说是归一化 [0,1]，需要映射为物理宽度。
+                width = self._clamp_width(self._normalized_to_width(contact.position))
+                # 更新滑动窗口历史，并在 debug 模式下记录原始样本
+                self._update_history(width, contact.effort, contact.velocity, debug_contact)
             else:
                 width = shared['last_width']
-                in_contact = shared['last_in_contact']
 
             shared['last_width'] = width
-            shared['last_in_contact'] = in_contact
+
+            # 基于滑动窗口检测接触模式
+            in_contact = self._detect_contact_window(debug_contact)
+
+            # 在 debug 模式下，把本次 feedback 的 contact_state 全量写入日志文件，便于离线分析。
+            if debug_contact:
+                self._gripper_logger.info(
+                    'feedback: phase=%s completion=%.3f current_width=%.4f',
+                    feedback.phase,
+                    feedback.completion_ratio,
+                    width,
+                )
+                for c in feedback.contact_state:
+                    try:
+                        self._gripper_logger.info(
+                            '  contact: name=%s e=%.4f v=%.4f p=%.4f',
+                            c.name,
+                            float(c.effort),
+                            float(c.velocity),
+                            float(c.position),
+                        )
+                    except Exception:
+                        self._gripper_logger.info('  contact: name=%s (parse error)', c.name)
 
             # Publish simplified gripper feedback.
             fb = GripperCommand.Feedback()
@@ -544,22 +633,21 @@ class GripperAction:
         in_contact = False
         contact_msg: Optional[JointContact] = None
 
-        # Try to extract final width from final_state JointState.
+        # Try to extract final width from final_state JointState（归一化 → 物理宽度）。
         try:
             state = jc_result.final_state
             if state.name and 'gripper' in state.name:
                 idx = state.name.index('gripper')
                 if idx < len(state.position):
-                    final_width = float(state.position[idx])
+                    final_width = self._normalized_to_width(state.position[idx])
         except Exception:
             final_width = 0.0
 
-        # Extract contact info, if available.
+        # Extract contact info, if available (基础信息，仅用于记录，contact 判定由窗口逻辑驱动)。
         try:
             for c in jc_result.contact_state:
                 if c.name == 'gripper':
                     contact_msg = c
-                    in_contact = self._detect_contact(c)
                     break
         except Exception:
             contact_msg = None
@@ -567,12 +655,97 @@ class GripperAction:
 
         return final_width, in_contact, contact_msg
 
-    # ------------------------------------------------------------------ local contact heuristic
-    def _detect_contact(self, contact: JointContact) -> bool:
-        """Local contact heuristic based on velocity/effort for GRIP logic."""
+    # ------------------------------------------------------------------ local contact heuristic with sliding window
+    def _update_history(self, width_m: float, effort: float, velocity: float, debug: bool = False) -> None:
+        """Append a new gripper sample into the sliding window.
+
+        如果 ``debug`` 为 True，会在 ``gripper_action.log`` 中记录原始样本，用于离线分析。
+        """
         try:
-            vel = float(contact.velocity)
-            eff = float(contact.effort)
+            e = abs(float(effort))
+            v = abs(float(velocity))
+            w = float(width_m)
         except Exception:
+            return
+        sample = {
+            't': float(time.monotonic()),
+            'e': e,
+            'v': v,
+            'w': w,
+        }
+        self._history.append(sample)
+        if debug:
+            self._gripper_logger.info(
+                'sample: e=%.4f v=%.4f w=%.4f (len=%d)', e, v, w, len(self._history)
+            )
+
+    def _detect_contact_window(self, debug: bool = False) -> bool:
+        """Detect contact based on a short history of effort/velocity.
+
+        启发式规则：
+        - 在窗口前半段寻找“自由闭合”样本（速度较大）以确定基线 e_base / v_base；
+        - 在最后几帧中寻找“力矩抬升 + 速度骤降”的拐点；
+        - 要求当前帧力矩达到一定绝对值、速度足够小。
+        """
+        hist = list(self._history)
+        n = len(hist)
+        if n < self._window_size:
+            if debug:
+                self._gripper_logger.info('history too short (n=%d)', n)
             return False
-        return abs(vel) <= self._contact_velocity_eps and abs(eff) >= self._contact_effort_threshold
+
+        # 前半段（去掉最近 3 帧）作为“自由闭合”的候选
+        cut = max(1, n - 3)
+        free_candidates = [s for s in hist[:cut] if s['v'] > self._free_velocity_min]
+        if len(free_candidates) < 2:
+            if debug:
+                self._gripper_logger.info(
+                    'insufficient free samples (n=%d, free=%d)', n, len(free_candidates)
+                )
+            return False
+
+        e_base = sum(s['e'] for s in free_candidates) / len(free_candidates)
+        v_base = sum(s['v'] for s in free_candidates) / len(free_candidates)
+
+        recent = hist[-3:]
+        e_now_max = max(s['e'] for s in recent)
+        v_now_min = min(s['v'] for s in recent)
+
+        delta_eff = e_now_max - e_base
+        delta_v = v_base - v_now_min
+
+        current = hist[-1]
+        e_t = current['e']
+        v_t = current['v']
+
+        ok = True
+        reason = []
+        if e_t < self._effort_min_for_contact:
+            ok = False
+            reason.append('e_t < effort_min')
+        if v_t > self._velocity_after_threshold:
+            ok = False
+            reason.append('v_t > v_after')
+        if delta_eff < self._effort_jump_threshold:
+            ok = False
+            reason.append('Δeff < jump')
+        if delta_v < self._velocity_drop_threshold:
+            ok = False
+            reason.append('Δv < drop')
+
+        if debug:
+            self._gripper_logger.info(
+                'eval: n=%d e_base=%.3f v_base=%.3f e_t=%.3f v_t=%.3f '
+                'delta_eff=%.3f delta_v=%.3f ok=%s%s',
+                n,
+                e_base,
+                v_base,
+                e_t,
+                v_t,
+                delta_eff,
+                delta_v,
+                ok,
+                f' ({",".join(reason)})' if not ok else '',
+            )
+
+        return ok

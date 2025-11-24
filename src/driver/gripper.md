@@ -146,54 +146,107 @@ position_rad = position_close_rad
 - `gripper.no_object_margin_ratio`：用于区分“夹到物体”与“顶到机械极限”的行程裕度；
 -（可选）`gripper.contact_effort_threshold`：若需要为 gripper 单独调节接触阈值，可覆盖默认 `_CONTACT_EFFORT_THRESHOLD`。
 
-### 5.2 启发式规则
+### 5.2 滑动窗口 + 差值启发式（推荐）
 
-在 GRIP 模式下，GripperCommand server 将 JointCommand 的反馈转换为如下决策逻辑：
+考虑到软体物体在夹持过程中，绝对力矩值可能不大，但会在接触瞬间出现明显的“抬力 + 掉速”，GripperCommand 在 GRIP 模式下采用一个**短时间滑动窗口**来检测接触事件，而不是只看单帧数据。
 
-设：
+#### 5.2.1 维护短时间窗口
 
-- `q_close`：`position_close_rad`（完全闭合目标）；
-- `q`：当前 gripper 关节角（rad）；
-- `span = q_close - position_open_rad`（完整行程）；
-- `dist = |q_close - q|`（当前距离闭合极限的距离）；
-- `margin = gripper.no_object_margin_ratio * span`（行程裕度）。
+在 GRIP 模式下，每次收到 `/robot_driver/action/joint` 的 Feedback 时，从 `contact_state` 中找到 `name == 'gripper'` 的那条，记录：
 
-1. **早期接触 → 认为夹到物体**
-   - 条件：
-     - `in_contact == true` 且 `dist > margin`；
-   - 行为：
-     - 若 Goal.stop_on_contact=true：
-       - 立即取消底层 JointCommand；
-       - Result：
-         - `success = true`
-         - `object_attached = true`
-         - `in_contact = true`
-         - `result_code = 'OBJECT_GRASPED'`
-         - `contact_position = q`
-         - `contact_effort = effort`。
+- `e[i] = |effort_i|`
+- `v[i] = |velocity_i|`
+- `p[i] = position_i`
+- `t[i] = 时间戳（可选，仅用于调试和统计）`
 
-2. **临近极限才接触 → 倾向认为空抓**
-   - 条件：
-     - `in_contact == true` 且 `dist <= margin`；
-   - 行为：
-     - 不提前停止，允许 JointCommand 完整运行到目标闭合位置；
-     - 最终 Result：
-       - `object_attached = false`
-       - `result_code = 'NO_OBJECT'`（或其他约定标识）；
-       - `in_contact` 视最终状态填写。
+内部维护一个固定大小的环形缓冲区，例如最近 `N = 10` 帧：
 
-3. **整个过程中未检测到接触**
-   - 行为：
-     - JointCommand 正常执行到目标闭合位置；
-     - Result 中：
-       - `object_attached = false`
-       - `in_contact = false`
-       - `result_code = 'NO_OBJECT'`。
+- `i = 0 .. N-1` 为窗口内的样本索引；
+- 下文所有“最近几帧”均指该窗口内的最后 K 帧（如 K=3）。
 
-上述判定是启发式的近似：通过“接触是否发生在距离闭合极限足够远的位置”来区分“夹到物体”与“空抓到底”。实际部署时，可根据现场数据调整：
+#### 5.2.2 阶段 A：确认“自由闭合”阶段
 
-- `gripper.no_object_margin_ratio`（行程裕度比例）；
-- `gripper.contact_effort_threshold`（接触力矩阈值）。
+在开始做接触检测前，先确认存在一段“正常闭合”的历史窗口，以避免刚启动时的噪声被误判为接触。
+
+从窗口中选取“自由闭合段”的样本（例如最近若干帧中速度较大的帧）：
+
+- 选取满足 `v[i] > v_free_min` 的样本，`v_free_min` 例如可取 `0.2 rad/s`；
+- 要求这些样本的平均力矩较小：
+  - `e_base = mean(e[i_free])`，通常期望 `< e_free_max`（如 0.3）。
+
+若无法找到足够的满足条件的样本，接触检测逻辑暂不启用（例如夹爪一开始就卡住时，只依赖超时/位置兜底）。
+
+#### 5.2.3 阶段 B：检测“疑似接触事件”
+
+在滑动窗口中寻找“力矩抬升 + 速度骤降”的拐点，而不是看单帧绝对值。
+
+从最近 K 帧（例如 3 帧）中计算：
+
+- 力矩抬升量：
+  - `e_now_max = max(e[j])`（最近 K 帧中的最大 |effort|）；
+  - 要求：`Δeff = e_now_max - e_base >= gripper.effort_jump_threshold`；
+- 速度下降量：
+  - `v_now_min = min(v[j])`（最近 K 帧中最小 |velocity|，越小越接近静止）；
+  - 要求：`Δv = v_base - v_now_min >= gripper.velocity_drop_threshold`。
+
+典型参数建议（结合当前硬件与软体物体测试）：
+
+- `gripper.effort_jump_threshold`：`0.2 ~ 0.4`；
+- `gripper.velocity_drop_threshold`：`0.2 ~ 0.4`；
+- `v_free_min`：`0.2`；
+- `e_free_max`：`0.3`。
+
+若同时满足 `Δeff` 和 `Δv` 的阈值条件，则在该窗口内标记一个“疑似接触事件”（`contact_candidate`）。
+
+#### 5.2.4 阶段 C：确认接触（防止瞬时抖动）
+
+为防止由个别异常样本造成误判，在检测到 `contact_candidate` 之后，还需在后续若干帧中验证：
+
+- 速度持续较小：
+  - 在接下来 2~3 帧内，`v[k] <= gripper.velocity_after_threshold`（例如 `0.05`）；  
+- 力矩维持高位：
+  - 在接下来 2~3 帧内，`e[k] >= e_base + gripper.effort_jump_keep`（略低于 jump 阈值，例如 `0.15`）。
+
+当以上条件均被满足时，认为**确实夹到了某个物体**：
+
+- 标记 `object_attached = true`；
+- 记录 `contact_position = p_contact`、`contact_effort = e_contact`；
+- 若 Goal.stop_on_contact=true：
+  - 通过内部的 JointCommand ActionClient 请求 `cancel_goal_async()`，尝试停止继续闭合。
+
+#### 5.2.5 用宽度区分“软物体 vs 空抓到极限”
+
+为在“软物体夹紧”和“空抓顶到机械限位”之间做区分，引入一个简单的闭合极限阈值 `p_close_threshold`（例如 `0.005 ~ 0.01`，具体由现场标定）：
+
+- 若接触事件发生时：
+  - `p_contact > p_close_threshold`：认为在离机械极限尚有一定行程的位置夹到了物体：
+    - `result_code = 'OBJECT_GRASPED'`；
+  - `p_contact <= p_close_threshold`：倾向认为是空抓顶到机械极限：
+    - `result_code = 'NO_OBJECT'` 或 `'LIMIT_REACHED'`（具体编码可约定）。
+
+若整个 GRIP 过程中都未检测到接触事件， 且最终收敛到 `final_width_m` 非常接近 0（即 `p_final <= p_close_threshold`），则认为是空抓：
+
+- `object_attached = false`；
+- `result_code = 'NO_OBJECT'`。
+
+#### 5.2.6 推荐的默认配置与窗口大小
+
+参数建议（可根据现场数据微调）：
+
+- 滑动窗口大小：`N = 10` 帧（约对应 0.1~0.3s，根据 JointAction feedback 频率估算）；
+- 自由闭合阶段判定：
+  - `v_free_min = 0.2` rad/s；
+  - `e_free_max = 0.3`；
+- 接触事件判定：
+  - `gripper.effort_jump_threshold = 0.3`；
+  - `gripper.velocity_drop_threshold = 0.3`；
+  - `gripper.effort_min_for_contact = 0.3`（确保是有意义的受力）；
+  - `gripper.velocity_after_threshold = 0.05`（接触后速度近似为 0）。
+- 空抓/极限判定：
+  - `gripper.no_object_margin_ratio`：行程裕度比例（如 0.1），用于估算 `p_close_threshold`；
+  - 或直接配置 `gripper.p_close_threshold_m`（物理宽度上的接近 0 门限，例如 0.005m）。
+
+实际实现时，可将上述阈值以 ROS 参数形式暴露，便于现场根据“空抓”和“夹物”时的 `effort/velocity` 曲线进行标定，从而达到较稳定的“夹到物体 vs 空抓到极限”的判定效果。
 
 ## 6. 典型调用示例（控制台）
 
