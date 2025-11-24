@@ -20,7 +20,7 @@
 | 零重力 | 执行前若处于零重力，必须自动退出（无配置项，强制执行） |
 | 速度语义 | Goal 中提供单个 `speed_scale`（0~1），结合关节差值推算平滑时间（默认 0.9） |
 | IK/FK | 统一通过 `KinematicsSolver`（封装 I2RT `self._kinematics`）提供；无 SDK 时返回缓存/NaN |
-| 反馈 | 每条反馈包含关节状态 + `KinematicsSolver` 产出的末端 FK pose；并定期发布 `/robot_driver/end_effector_pose` |
+| 反馈 | 每条反馈包含关节状态 + `KinematicsSolver` 产出的末端 FK pose；并有独立的 `/robot_driver/end_effector_pose` Topic 由后台线程轮询 `HardwareCommander` 当前关节状态并通过同一个 `KinematicsSolver` 发布 FK（频率与 `/joint_states` 对齐） |
 | 抢占 | 暂不做自动抢占；支持 Action cancel 即可 |
 
 ## 姿态要求
@@ -48,7 +48,7 @@
 - 反馈阶段划分：`planning` → `waiting_joint` → `joint/<phase>`（透传 JointCommand）→ `complete`。
 - 每条反馈除 JointState 与 Contact 数据外，还需附带当前末端 FK 位姿（position + orientation），由 `KinematicsSolver` 计算；若 FK 不可用则反馈 NaN 并记录 `last_error`。
 - Result 中同样包含最终关节状态、接触信息以及最终末端 FK。
-- 同步新增 Topic `/robot_driver/end_effector_pose`（`geometry_msgs/PoseStamped`），由 `StatePublisher`（或同频率定时器）实时发布最新末端姿态，Action 反馈将与该 Topic 共享同一 FK 数据源，保证一致性。
+- `/robot_driver/end_effector_pose`（`geometry_msgs/PoseStamped`）由专门的发布器在后台周期性读取 `HardwareCommander` 当前关节状态并调用 `KinematicsSolver` 求 FK 后发布，周期由 `joint_state_rate` 推导，Action 反馈与该 Topic 使用同一个 solver，保持 pose 数据一致。
 
 ## 取消与抢占
 

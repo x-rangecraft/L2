@@ -22,6 +22,7 @@ from driver.config.parameter_schema import DriverParameters, declare_and_get_par
 from driver.config.safe_pose_loader import SafePoseLoader
 from driver.control.joint_controler import JointControler
 from driver.control.state_publisher import StatePublisher
+from driver.control.end_effector_pose_publisher import EndEffectorPosePublisher
 from driver.control.zero_gravity_manager import ZeroGravityManager
 from driver.hardware.hardware_commander import HardwareCommander
 from driver.hardware.kinematics_solver import KinematicsSolver
@@ -83,7 +84,11 @@ class RobotDriverNode(Node):
             self,
             self._commander,
             self._params,
-            kinematics_solver=self._kinematics_solver,
+        )
+        self._ee_pose_publisher = EndEffectorPosePublisher(
+            self,
+            solver=self._kinematics_solver,
+            joint_state_topic=self._params.joint_state_topic,
         )
         self._trajectory_group = ReentrantCallbackGroup()
         self._joint_action_group = ReentrantCallbackGroup()
@@ -792,6 +797,7 @@ class RobotDriverNode(Node):
         self._robot_action.destroy()
         self._gripper_action.destroy()
         self._joint_action_client.destroy()
+        self._ee_pose_publisher.shutdown()
         self._commander.disconnect()
         return super().destroy_node()
 

@@ -37,7 +37,7 @@
 | --- | --- | --- | --- |
 | `/joint_states` | `sensor_msgs/JointState` | 30 Hz（可配置） | 仅包含标准位置/速度/力矩（或电流）字段，确保与 MoveIt、RViz、Foxglove 兼容。 |
 | `/robot_driver/diagnostics` | `diagnostic_msgs/DiagnosticArray` | 1 Hz | 汇报命令执行状态、心跳/安全态、零重力模式、CAN 健康、温度/电流/自检等扩展信息，集中展示机械臂健康数据。 |
-| `/robot_driver/end_effector_pose` | `geometry_msgs/PoseStamped` | 与 `/joint_states` 同频率 | 实时发布末端 FK 结果，frame 固定 `base_link`，供可视化/抓取对齐使用；与 `/robot_driver/action/robot` 反馈的 pose 保持数据来源一致。 |
+| `/robot_driver/end_effector_pose` | `geometry_msgs/PoseStamped` | 与 `/joint_states` 同频率 | 由独立 `EndEffectorPosePublisher` 以后台线程周期性读取 `HardwareCommander` 当前关节状态（通过 `KinematicsSolver` 求 FK）并发布，周期由 `joint_state_rate` 推导，frame 固定 `base_link`，与 `/robot_driver/action/robot` 反馈的 pose 保持数据来源一致。 |
 
 ### 订阅的 Topic
 | 话题 | 类型 | 说明 |

@@ -12,15 +12,11 @@ from tf2_ros import TransformBroadcaster
 
 from driver.config.parameter_schema import DriverParameters
 from driver.hardware.hardware_commander import HardwareCommander
-from driver.hardware.kinematics_solver import KinematicsSolver
 
 
 @dataclass
 class DiagnosticsCache:
     last_publish_time: float = 0.0
-
-
-_EE_POSE_TOPIC = '/robot_driver/end_effector_pose'
 
 
 class StatePublisher:
@@ -29,19 +25,13 @@ class StatePublisher:
         node,
         commander: HardwareCommander,
         params: DriverParameters,
-        *,
-        kinematics_solver: KinematicsSolver | None = None,
     ):
         self._node = node
         self._commander = commander
         self._params = params
-        self._solver = kinematics_solver
         self._joint_pub = node.create_publisher(JointState, params.joint_state_topic, 10)
         self._diag_pub = node.create_publisher(DiagnosticArray, params.diagnostics_topic, 10)
         self._tf_broadcaster = TransformBroadcaster(node) if params.publish_tf else None
-        self._ee_pose_pub = (
-            node.create_publisher(PoseStamped, _EE_POSE_TOPIC, 10) if self._solver else None
-        )
         self._diagnostics_cache = DiagnosticsCache()
 
         self._joint_period = 1.0 / max(1e-3, params.joint_state_rate)
@@ -73,14 +63,6 @@ class StatePublisher:
     def _publish_joint_state(self):
         data = self._commander.read_joint_state()
         stamp = self._node.get_clock().now().to_msg()
-        pose_msg: PoseStamped | None = None
-        if self._solver is not None:
-            pose_msg, _ = self._solver.compute_fk_pose(
-                stamp=stamp,
-                joint_state=data,
-            )
-            if self._ee_pose_pub:
-                self._ee_pose_pub.publish(pose_msg)
         msg = JointState()
         msg.header.stamp = stamp
         msg.header.frame_id = self._params.tf_base_frame
@@ -91,11 +73,10 @@ class StatePublisher:
         self._joint_pub.publish(msg)
 
         if self._tf_broadcaster:
-            if pose_msg is None:
-                pose_msg = PoseStamped()
-                pose_msg.header.frame_id = self._params.tf_base_frame
-                pose_msg.header.stamp = msg.header.stamp
-                pose_msg.pose = self._commander.read_end_effector_pose()
+            pose_msg = PoseStamped()
+            pose_msg.header.frame_id = self._params.tf_base_frame
+            pose_msg.header.stamp = msg.header.stamp
+            pose_msg.pose = self._commander.read_end_effector_pose()
             tf_msg = TransformStamped()
             tf_msg.header.stamp = msg.header.stamp
             tf_msg.header.frame_id = self._params.tf_base_frame
