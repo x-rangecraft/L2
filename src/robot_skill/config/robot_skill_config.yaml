@@ -1,10 +1,4 @@
 robot_skill:
   ros__parameters:
-    approach_offset_z: 0.20
-    pre_grasp_offset_z: 0.02
-    lift_height: 0.15
-    position_tolerance: 0.01
-    move_timeout: 10.0
-    gripper_timeout: 5.0
-    xyz_only_mode: false
-    auto_open_gripper: true
+    # 留空表示使用默认的 package skill_sets 目录，若需自定义在此填写绝对路径
+    skill_sets_dir: ''

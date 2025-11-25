@@ -3,9 +3,11 @@ from __future__ import annotations
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, Iterable, List
 
 import yaml
+
+from robot_skill_core.constants import SUPPORTED_STEP_TYPES
 
 
 @dataclass
@@ -41,6 +43,10 @@ class SkillLibrary:
             action_type = spec.get('type')
             if not action_type:
                 raise ValueError(f"common action '{action_id}' missing 'type'")
+            if action_type not in SUPPORTED_STEP_TYPES:
+                raise ValueError(
+                    f"common action '{action_id}' uses unsupported type '{action_type}'"
+                )
             desc = spec.get('desc', action_id)
             params = deepcopy(spec.get('params', {}))
             actions[action_id] = SkillStep(
@@ -97,6 +103,8 @@ class SkillLibrary:
         step_type = item.get('type')
         if not step_type:
             raise ValueError(f"step {index} missing 'type' or 'action' field")
+        if step_type not in SUPPORTED_STEP_TYPES:
+            raise ValueError(f"step {index} uses unsupported type '{step_type}'")
         step_id = item.get('id', f'{step_type}_{index}')
         desc = item.get('desc', step_id)
         params = deepcopy(item.get('params', {}))
@@ -110,6 +118,9 @@ class SkillLibrary:
             else:
                 result[key] = value
         return result
+
+    def iter_common_actions(self) -> Iterable[SkillStep]:
+        return list(self._common_actions.values())
 
 
 __all__ = ['SkillLibrary', 'SkillDefinition', 'SkillStep']

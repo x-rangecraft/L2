@@ -4,7 +4,7 @@ import asyncio
 import math
 import os
 import traceback
-from typing import Tuple
+from typing import List, Tuple
 
 import rclpy
 from ament_index_python.packages import get_package_share_directory
@@ -18,10 +18,14 @@ from sensor_msgs.msg import JointState
 from robot_driver.action import GripperCommand, JointCommand, RobotCommand, SafetyPose
 from robot_driver.msg import JointCommandOptions, JointCommandTarget
 from robot_skill.action import SkillSequence
+from robot_skill_core.constants import (
+    DEFAULT_ACTION_TIMEOUT_SEC,
+    DEFAULT_SPEED_SCALE,
+    JOINT_NAME_ORDER,
+    SKILL_ACTION_TOPIC,
+    SUPPORTED_STEP_TYPES,
+)
 from robot_skill_core.skill_loader import SkillLibrary, SkillStep
-
-JOINT_NAME_ORDER = ['joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'joint6']
-SKILL_ACTION_TOPIC = '/robot_skill/action/skill_sequence'
 
 
 class RobotSkillNode(RclpyNode):
@@ -38,13 +42,7 @@ class RobotSkillNode(RclpyNode):
             self.get_logger().info(f'Using default skill_sets_dir={skill_sets_dir}')
 
         self._skill_library = SkillLibrary(skill_sets_dir)
-        self._move_timeout_default = (
-            self.get_parameter('move_timeout').get_parameter_value().double_value
-        )
-        self._gripper_timeout_default = (
-            self.get_parameter('gripper_timeout').get_parameter_value().double_value
-        )
-
+        self._self_check_skill_sets()
         self._robot_client = ActionClient(self, RobotCommand, '/robot_driver/action/robot')
         self._joint_client = ActionClient(self, JointCommand, '/robot_driver/action/joint')
         self._gripper_client = ActionClient(self, GripperCommand, '/robot_driver/action/gripper')
@@ -68,8 +66,6 @@ class RobotSkillNode(RclpyNode):
         package_share = get_package_share_directory('robot_skill')
         default_skill_dir = os.path.join(package_share, 'skill_sets')
         self.declare_parameter('skill_sets_dir', default_skill_dir)
-        self.declare_parameter('move_timeout', 10.0)
-        self.declare_parameter('gripper_timeout', 5.0)
 
     def _goal_callback(self, goal_request: SkillSequence.Goal) -> GoalResponse:
         if not goal_request.skill_id:
@@ -83,6 +79,84 @@ class RobotSkillNode(RclpyNode):
     def _cancel_callback(self, goal_handle: ServerGoalHandle) -> CancelResponse:
         self.get_logger().info(f'Cancel requested for skill {goal_handle.request.skill_id}')
         return CancelResponse.ACCEPT
+
+    # ------------------------------------------------------------------ #
+    # Configuration self-check
+    # ------------------------------------------------------------------ #
+    def _self_check_skill_sets(self) -> None:
+        errors: List[str] = []
+        common_actions = list(self._skill_library.iter_common_actions())
+        for action in common_actions:
+            try:
+                self._validate_step_schema(action)
+            except ValueError as exc:
+                errors.append(f"common action '{action.id}': {exc}")
+
+        skill_ids = sorted(self._skill_library.list_skills())
+        for skill_id in skill_ids:
+            try:
+                skill_def = self._skill_library.load_skill(skill_id)
+            except Exception as exc:  # pylint: disable=broad-except
+                errors.append(f"skill '{skill_id}' failed to load: {exc}")
+                continue
+            for step in skill_def.steps:
+                try:
+                    self._validate_step_schema(step)
+                except ValueError as exc:
+                    errors.append(f"skill '{skill_id}' step '{step.id}': {exc}")
+
+        if errors:
+            for message in errors:
+                self.get_logger().error(f'Skill self-check error: {message}')
+            raise RuntimeError('skill_sets validation failed; see errors above')
+
+        self.get_logger().info(
+            'Skill set self-check passed: '
+            f"common_actions={len(common_actions)}, skills={len(skill_ids)}"
+        )
+
+    def _validate_step_schema(self, step: SkillStep) -> None:
+        if step.type not in SUPPORTED_STEP_TYPES:
+            raise ValueError(f"unsupported type '{step.type}'")
+
+        params = step.params or {}
+        if step.type == 'safety_pose':
+            return
+        if step.type == 'cartesian_move':
+            pose_dict = params.get('target_pose')
+            if not isinstance(pose_dict, dict):
+                raise ValueError("cartesian_move requires 'target_pose'")
+            position = pose_dict.get('position')
+            orientation = pose_dict.get('orientation')
+            if not isinstance(position, dict) or not isinstance(orientation, dict):
+                raise ValueError("cartesian_move requires position and orientation dicts")
+            for axis in ('x', 'y', 'z'):
+                if axis not in position:
+                    raise ValueError(f"cartesian_move missing position.{axis}")
+            for axis in ('x', 'y', 'z', 'w'):
+                if axis not in orientation:
+                    raise ValueError(f"cartesian_move missing orientation.{axis}")
+            return
+        if step.type == 'gripper':
+            if 'command' not in params:
+                raise ValueError("gripper requires 'command'")
+            return
+        if step.type == 'joint_move':
+            positions = params.get('positions')
+            if not isinstance(positions, (list, tuple)) or not positions:
+                raise ValueError("joint_move requires a non-empty positions list")
+            if params.get('joint_name') is None:
+                index = params.get('joint_index')
+                if index is None:
+                    raise ValueError("joint_move requires 'joint_name' or 'joint_index'")
+                try:
+                    index_val = int(index)
+                except (TypeError, ValueError) as exc:
+                    raise ValueError('joint_move joint_index must be an integer') from exc
+                if index_val < 0 or index_val >= len(JOINT_NAME_ORDER):
+                    raise ValueError('joint_move joint_index out of range (0-5)')
+            return
+        raise ValueError(f"unsupported type '{step.type}'")
 
     # ------------------------------------------------------------------ #
     # Execution pipeline
@@ -198,9 +272,8 @@ class RobotSkillNode(RclpyNode):
 
         goal = RobotCommand.Goal()
         goal.target = pose
-        goal.speed_scale = float(step.params.get('speed_scale', 0.3))
-        timeout = float(step.params.get('timeout', self._move_timeout_default))
-        goal.timeout = self._seconds_to_duration(timeout)
+        goal.speed_scale = float(step.params.get('speed_scale', DEFAULT_SPEED_SCALE))
+        goal.timeout = self._seconds_to_duration(DEFAULT_ACTION_TIMEOUT_SEC)
         goal.label = step.params.get('label', step.id)
         return await self._send_goal(self._robot_client, goal, f'{step.id}/cartesian')
 
@@ -208,10 +281,9 @@ class RobotSkillNode(RclpyNode):
         goal = GripperCommand.Goal()
         goal.command = int(step.params.get('command', 0))
         goal.width_m = float(step.params.get('width_m', 0.0))
-        goal.speed_scale = float(step.params.get('speed_scale', 0.5))
+        goal.speed_scale = float(step.params.get('speed_scale', DEFAULT_SPEED_SCALE))
         goal.stop_on_contact = bool(step.params.get('stop_on_contact', True))
-        timeout = float(step.params.get('timeout', self._gripper_timeout_default))
-        goal.timeout = self._seconds_to_duration(timeout)
+        goal.timeout = self._seconds_to_duration(DEFAULT_ACTION_TIMEOUT_SEC)
         goal.label = step.params.get('label', step.id)
         return await self._send_goal(self._gripper_client, goal, f'{step.id}/gripper')
 
@@ -226,8 +298,8 @@ class RobotSkillNode(RclpyNode):
             if index is None or index < 0 or index >= len(JOINT_NAME_ORDER):
                 raise ValueError(f"Invalid joint index in step '{step.id}'")
             joint_name = JOINT_NAME_ORDER[int(index)]
-        speed_scale = float(params.get('speed_scale', 0.4))
-        timeout = float(params.get('timeout', self._move_timeout_default))
+        speed_scale = float(params.get('speed_scale', DEFAULT_SPEED_SCALE))
+        timeout = DEFAULT_ACTION_TIMEOUT_SEC
         label = params.get('label', step.id)
         relative = bool(params.get('relative', False))
 

@@ -208,17 +208,32 @@ def compute_lift_pose(grasp_pose: Pose, lift_height: float = 0.15) -> Pose:
     return lift
 ```
 
+### 4.4 动作类型规范
+
+| Type | 必填参数 | 可选参数 | 说明 |
+|------|----------|----------|------|
+| `safety_pose` | 无 | `enable_zero_gravity_after`（bool） | 触发 `SafetyPose` action，把机械臂送回安全位姿；仅支持布尔参数控制是否进入零重力模式。 |
+| `cartesian_move` | `frame_id`、`target_pose.position.{x,y,z}`、`target_pose.orientation.{x,y,z,w}` | `speed_scale（默认 DEFAULT_SPEED_SCALE）`、`label` | 发送 `PoseStamped` 给 `/robot_driver/action/robot`；姿态必须是单位四元数，所有坐标以米为单位。 |
+| `gripper` | `command`（0=张开，1=闭合） | `width_m`、`speed_scale（默认 DEFAULT_SPEED_SCALE）`、`stop_on_contact`、`label` | 驱动夹爪动作；`width_m` 代表目标开度，`stop_on_contact` 控制遇物体即停。 |
+| `joint_move` | `positions`（至少一个浮点角度）、`joint_name` 或合法的 `joint_index`（0-5） | `speed_scale（默认 DEFAULT_SPEED_SCALE）`、`relative`、`label` | 向 `/robot_driver/action/joint` 依次下发关节指令；如果走相对运动需把 `relative` 设为 `true`。 |
+
+> Skill YAML 中只能选择上述标准 `type`，`DEFAULT_ACTION_TIMEOUT_SEC = 30.0` 秒会自动作用于所有动作。
+
+### 4.5 配置自检
+
+- `robot_skill` 节点启动时会读取 `skill_sets/` 下的 `general_skill.yaml` 及所有 `*.yaml` 技能文件，并基于上述类型规范做一次 schema 自检：
+  - 校验每个公共动作与技能步骤只使用受支持的 `type`；
+  - 检查必填字段是否完整（例如 `cartesian_move` 的 `target_pose`、`joint_move` 的 `positions` 等）；
+  - 任何校验失败会在日志里定位具体动作/步骤并阻止节点继续运行，避免运行期才暴露配置错误。
+- 因此新增动作或技能时，请确保参数命名与表格一致，自检通过后再上线。
+
 ## 5. 参数配置
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
-| `approach_offset_z` | 0.20 m | 预抓取位姿的 Z 轴偏移 |
-| `pre_grasp_offset_z` | 0.02 m | 接近位姿的 Z 轴偏移 |
-| `lift_height` | 0.15 m | 抓取后抬起高度 |
-| `position_tolerance` | 0.01 m | 到位判断的位置容差 |
-| `move_timeout` | 10.0 s | 单次移动超时时间 |
-| `gripper_timeout` | 5.0 s | 夹爪动作超时时间 |
+| `skill_sets_dir` | 包默认 `skill_sets` 目录 | 允许覆盖技能 YAML 目录；留空则使用安装目录内置的动作集 |
 
+> 动作执行（笛卡尔移动、关节移动、夹爪）统一使用 `robot_skill_core/constants.py` 中的常量：`DEFAULT_ACTION_TIMEOUT_SEC = 30.0` 秒、`DEFAULT_SPEED_SCALE = 1.0`。若需调整默认行为，请修改该文件即可全局生效。
 ## 6. 异常处理
 
 | 异常类型 | 处理策略 |
