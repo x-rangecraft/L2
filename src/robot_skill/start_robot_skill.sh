@@ -8,7 +8,15 @@ if [[ -n "${ZSH_VERSION:-}" && -f "/opt/ros/humble/setup.zsh" ]]; then
 else
     ROS_SETUP="/opt/ros/humble/setup.bash"
 fi
-INSTALL_SETUP="${WORKSPACE_ROOT}/install/setup.bash"
+if [[ -n "${ZSH_VERSION:-}" && -f "${WORKSPACE_ROOT}/install/setup.zsh" ]]; then
+    INSTALL_SETUP="${WORKSPACE_ROOT}/install/setup.zsh"
+else
+if [[ -n "${ZSH_VERSION:-}" && -f "${WORKSPACE_ROOT}/install/setup.zsh" ]]; then
+    INSTALL_SETUP="${WORKSPACE_ROOT}/install/setup.zsh"
+else
+    INSTALL_SETUP="${WORKSPACE_ROOT}/install/setup.bash"
+fi
+fi
 LOG_DIR="${WORKSPACE_ROOT}/log/robot_skill"
 mkdir -p "${LOG_DIR}"
 LOG_FILE="${LOG_DIR}/robot_skill_$(date +'%Y%m%d_%H%M%S').log"
@@ -75,7 +83,16 @@ start_node() {
     echo "[robot_skill] 启动中，日志: ${LOG_FILE}"
     source_env
     nohup ros2 launch robot_skill robot_skill.launch.py >>"${LOG_FILE}" 2>&1 &
+    local launch_pid=$!
     disown
+
+    sleep 2
+    if ! kill -0 "${launch_pid}" >/dev/null 2>&1; then
+        echo "[robot_skill] 启动失败，最近日志：" >&2
+        tail -n 40 "${LOG_FILE}" >&2 || true
+        exit 1
+    fi
+    echo "[robot_skill] 已启动 (PID=${launch_pid})"
 }
 
 stop_node() {

@@ -3,13 +3,16 @@ project(robot_skill)
 
 find_package(ament_cmake REQUIRED)
 find_package(ament_cmake_python REQUIRED)
+find_package(geometry_msgs REQUIRED)
+find_package(builtin_interfaces REQUIRED)
+find_package(rosidl_default_generators REQUIRED)
 
 ament_python_install_package(
-  ${PROJECT_NAME}
-  PACKAGE_DIR src/${PROJECT_NAME}
+  robot_skill_core
+  PACKAGE_DIR src/robot_skill_core
 )
 
-install(DIRECTORY config launch resource
+install(DIRECTORY config launch resource skill_sets
   DESTINATION share/${PROJECT_NAME}
 )
 
@@ -18,9 +21,15 @@ install(PROGRAMS scripts/robot_skill_node.py
   RENAME robot_skill_node
 )
 
+rosidl_generate_interfaces(${PROJECT_NAME}
+  "action/SkillSequence.action"
+  DEPENDENCIES geometry_msgs builtin_interfaces
+)
+
 if(BUILD_TESTING)
   find_package(ament_cmake_pytest REQUIRED)
-  ament_add_pytest_test(${PROJECT_NAME}_tests tests/test_placeholder.py)
+  ament_add_pytest_test(_tests tests/test_skill_loader.py)
 endif()
 
+ament_export_dependencies(rosidl_default_runtime)
 ament_package()

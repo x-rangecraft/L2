@@ -1,0 +1,17 @@
+# Goal
+string skill_id
+geometry_msgs/PoseStamped[] targets
+string context_id
+---
+# Result
+bool success
+string error_code
+string message
+int32 steps_executed
+---
+# Feedback
+int32 step_index
+string step_id
+string step_desc
+float32 progress
+string detail

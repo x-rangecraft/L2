@@ -1,0 +1,78 @@
+common_actions:
+  go_safe_pose:
+    type: safety_pose
+    desc: "回到安全位姿"
+    params:
+      enable_zero_gravity_after: false
+      speed_scale: 0.9
+      timeout: 15.0
+  move_record_pre_grasp:
+    type: cartesian_move
+    desc: "移动至预抓取位姿"
+    params:
+      frame_id: base_link
+      target_pose:
+        position: {x: 0.44570661670496153, y: 0.22144147902240613, z: 0.059982425100292835}
+        orientation: {x: -0.21784444448478357, y: 0.8025009675152103, z: 0.17739868623565766, w: 0.5263703081159964}
+      speed_scale: 0.9
+      timeout: 15.0
+      label: record_pre_grasp
+  open_gripper_max:
+    type: gripper
+    desc: "张开夹爪"
+    params:
+      command: 0
+      speed_scale: 0.9
+      width_m: 0.094
+      timeout: 8.0
+      label: gripper_open
+  move_record_grasp:
+    type: cartesian_move
+    desc: "移动到抓取位"
+    params:
+      frame_id: base_link
+      target_pose:
+        position: {x: 0.5087268451888356, y: 0.2754820850432299, z: 0.05726576362856198}
+        orientation: {x: -0.22637323645745716, y: 0.7723385537517967, z: 0.18285557071612654, w: 0.5646345335369048}
+      speed_scale: 0.9
+      timeout: 15.0
+      label: record_grasp
+  close_gripper_fast:
+    type: gripper
+    desc: "闭合夹爪"
+    params:
+      command: 1
+      speed_scale: 0.9
+      timeout: 6.0
+      label: gripper_close
+  move_record_observe:
+    type: cartesian_move
+    desc: "移动至观察位"
+    params:
+      frame_id: base_link
+      target_pose:
+        position: {x: 0.03586991293867343, y: 0.3111905019299687, z: 0.4428649697650363}
+        orientation: {x: -0.5268686399645887, y: -0.15210254136154186, z: -0.20206340031608086, w: 0.8114460150779765}
+      speed_scale: 0.9
+      timeout: 15.0
+      label: record_observe
+  sweep_joint6_inspect:
+    type: joint_move
+    desc: "关节6 往返扫描"
+    params:
+      joint_index: 5
+      positions: [-2.14, 2.14, -2.14]
+      speed_scale: 0.9
+      timeout: 15.0
+      label: joint6_sweep
+  move_record_place:
+    type: cartesian_move
+    desc: "移动到放置位"
+    params:
+      frame_id: base_link
+      target_pose:
+        position: {x: 0.5087268451888356, y: 0.2754820850432299, z: 0.05726576362856198}
+        orientation: {x: -0.22637323645745716, y: 0.7723385537517967, z: 0.18285557071612654, w: 0.5646345335369048}
+      speed_scale: 0.9
+      timeout: 15.0
+      label: record_place

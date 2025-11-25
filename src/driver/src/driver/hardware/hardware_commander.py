@@ -718,7 +718,20 @@ class HardwareCommander:
             (success, joint_solution) where joint_solution is a numpy array of joint positions
         """
         if not self._robot or not self._kinematics:
-            self._logger.warning('IK solving requires hardware SDK')
+            # SDK / kinematics 未就绪时，所有 IK 请求都会失败，这里打印一次详细日志方便定位。
+            self._logger.warning(
+                'IK solving requires hardware SDK (robot_available=%s, kinematics_available=%s); '
+                'target pos=(%.3f, %.3f, %.3f) quat=(%.4f, %.4f, %.4f, %.4f)',
+                bool(self._robot),
+                bool(self._kinematics),
+                target.x,
+                target.y,
+                target.z,
+                target.qx,
+                target.qy,
+                target.qz,
+                target.qw,
+            )
             return False, None
 
         try:
@@ -752,8 +765,34 @@ class HardwareCommander:
                     full_joints[:6] = joint_sol
                     return True, full_joints
                 else:
+                    # 这里代表 IK 在给定约束下没有找到解，记录目标与初始关节作为诊断信息。
+                    seed_preview = ', '.join(f'{v:+.3f}' for v in current_joints.tolist())
+                    self._logger.warning(
+                        'IK solver returned no solution for target pos=(%.3f, %.3f, %.3f) '
+                        'quat=(%.4f, %.4f, %.4f, %.4f); seed joints=[%s]',
+                        target.x,
+                        target.y,
+                        target.z,
+                        target.qx,
+                        target.qy,
+                        target.qz,
+                        target.qw,
+                        seed_preview,
+                    )
                     return False, None
 
         except Exception as exc:
-            self._logger.error('IK solving failed: %s', exc)
+            # 捕获到底层 SDK 抛出的异常，并附带目标位姿信息。
+            self._logger.error(
+                'IK solving failed for target pos=(%.3f, %.3f, %.3f) '
+                'quat=(%.4f, %.4f, %.4f, %.4f): %s',
+                target.x,
+                target.y,
+                target.z,
+                target.qx,
+                target.qy,
+                target.qz,
+                target.qw,
+                exc,
+            )
             return False, None
