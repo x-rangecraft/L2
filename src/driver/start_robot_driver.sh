@@ -29,7 +29,10 @@ LOG_STDERR_MIRROR=1
 VERBOSE_CONSOLE=0
 declare -a CHILD_ARGS=()
 
-CAN_CHANNEL="can0"
+DEFAULT_CAN_CHANNEL="can0"
+CAN_CHANNEL="${DEFAULT_CAN_CHANNEL}"
+CAN_CHANNEL_USER_SET=0
+SUPERVISOR_PGREP_PATTERN='start_robot_driver\.sh.*--daemon-child'
 XYZ_ONLY_MODE="false"
 ZERO_GRAVITY_DEFAULT="true"
 PARAM_FILE=""
@@ -100,7 +103,7 @@ get_cmdline_for_pid() {
 
 extract_can_from_cmdline() {
     local cmdline="$1"
-    local default_can="$2"
+    local default_can="${2:-${DEFAULT_CAN_CHANNEL}}"
     local token next
     local -a tokens=()
     default_can="${default_can:-can0}"
@@ -131,8 +134,12 @@ extract_can_from_cmdline() {
 
 list_supervisors_for_can() {
     local target_can="$1"
+    local include_all=0
     local found=0
-    target_can="${target_can:-can0}"
+    local default_can="${DEFAULT_CAN_CHANNEL:-can0}"
+    if [[ -z "${target_can}" ]]; then
+        include_all=1
+    fi
     while IFS= read -r pid; do
         [[ -z "${pid}" ]] && continue
         if [[ ! "${pid}" =~ ^[0-9]+$ ]]; then
@@ -146,12 +153,12 @@ list_supervisors_for_can() {
             continue
         fi
         local cmd_can
-        cmd_can="$(extract_can_from_cmdline "${cmdline}" "can0")"
-        if [[ "${cmd_can}" == "${target_can}" ]]; then
-            printf '%s\t%s\n' "${pid}" "${cmdline}"
+        cmd_can="$(extract_can_from_cmdline "${cmdline}" "${default_can}")"
+        if [[ ${include_all} -eq 1 || "${cmd_can}" == "${target_can}" ]]; then
+            printf '%s\t%s\t%s\n' "${pid}" "${cmd_can}" "${cmdline}"
             found=1
         fi
-    done < <(pgrep -f "start_robot_driver.sh --daemon-child" 2>/dev/null || true)
+    done < <(pgrep -f "${SUPERVISOR_PGREP_PATTERN}" 2>/dev/null || true)
 
     if [[ ${found} -eq 0 ]]; then
         return 1
@@ -195,9 +202,14 @@ stop_daemon() {
     status_cn "正在查找需要关闭的 robot_driver 相关进程..."
 
     local supervisors launches nodes
-    supervisors="$(pgrep -fa "start_robot_driver.sh --daemon-child" 2>/dev/null || true)"
+    supervisors="$(pgrep -fa "${SUPERVISOR_PGREP_PATTERN}" 2>/dev/null || true)"
     launches="$(pgrep -fa "ros2 launch robot_driver robot_driver.launch.py" 2>/dev/null || true)"
     nodes="$(pgrep -fa "robot_driver/lib/robot_driver/robot_driver_node.py" 2>/dev/null || true)"
+
+    local supervisor_filter=""
+    if [[ ${CAN_CHANNEL_USER_SET} -eq 1 ]]; then
+        supervisor_filter="${CAN_CHANNEL}"
+    fi
 
     if [[ -z "${supervisors}${launches}${nodes}" ]]; then
         status_cn "未找到正在运行的 robot_driver 相关进程" "WARN"
@@ -229,10 +241,10 @@ stop_daemon() {
     log "Stopping robot_driver supervisor and ROS processes..."
 
     local targeted_output=""
-    if targeted_output="$(list_supervisors_for_can "${CAN_CHANNEL}")"; then
-        while IFS=$'\t' read -r pid cmdline; do
+    if targeted_output="$(list_supervisors_for_can "${supervisor_filter}")"; then
+        while IFS=$'\t' read -r pid cmd_can cmdline; do
             [[ -z "${pid}" ]] && continue
-            status_cn "  supervisor PID=${pid} (CAN=${CAN_CHANNEL}) 正在关闭..."
+            status_cn "  supervisor PID=${pid} (CAN=${cmd_can}) 正在关闭..."
             if terminate_supervisor_pid "${pid}" 10; then
                 status_cn "  supervisor PID=${pid} 已退出" "INFO"
             else
@@ -240,7 +252,11 @@ stop_daemon() {
             fi
         done <<< "${targeted_output}"
     else
-        status_cn "未匹配到 CAN=${CAN_CHANNEL} 的守护进程，可能已停止或使用了其他 CAN" "WARN"
+        if [[ -n "${supervisor_filter}" ]]; then
+            status_cn "未匹配到 CAN=${supervisor_filter} 的守护进程，可能已停止或使用了其他 CAN" "WARN"
+        else
+            status_cn "未匹配到任何守护进程，可能已提前退出" "WARN"
+        fi
     fi
 
     cleanup_processes || true
@@ -250,7 +266,7 @@ stop_daemon() {
     local still_launch still_nodes remaining_output="" remaining_targeted=0
     still_launch="$(pgrep -fa "ros2 launch robot_driver robot_driver.launch.py" 2>/dev/null || true)"
     still_nodes="$(pgrep -fa "robot_driver/lib/robot_driver/robot_driver_node.py" 2>/dev/null || true)"
-    if remaining_output="$(list_supervisors_for_can "${CAN_CHANNEL}")"; then
+    if remaining_output="$(list_supervisors_for_can "${supervisor_filter}")"; then
         remaining_targeted=1
     fi
 
@@ -262,9 +278,9 @@ stop_daemon() {
 
     status_cn "部分进程仍在运行，请手动检查：" "WARN"
     if [[ ${remaining_targeted} -eq 1 ]]; then
-        while IFS=$'\t' read -r pid cmdline; do
+        while IFS=$'\t' read -r pid cmd_can cmdline; do
             [[ -z "${pid}" ]] && continue
-            status_cn "  supervisor: PID=${pid} ${cmdline}" "WARN"
+            status_cn "  supervisor: PID=${pid} (CAN=${cmd_can}) ${cmdline}" "WARN"
         done <<< "${remaining_output}"
     fi
     if [[ -n "${still_launch}" ]]; then
@@ -312,9 +328,9 @@ launch_daemon_mode() {
     local existing_supervisors
     if existing_supervisors="$(list_supervisors_for_can "${CAN_CHANNEL}")"; then
         status_cn "检测到 robot_driver 守护进程已在运行 (CAN=${CAN_CHANNEL})" "WARN"
-        while IFS=$'\t' read -r pid cmdline; do
+        while IFS=$'\t' read -r pid cmd_can cmdline; do
             [[ -z "${pid}" ]] && continue
-            status_cn "  supervisor PID=${pid}: ${cmdline}" "WARN"
+            status_cn "  supervisor PID=${pid} (CAN=${cmd_can}): ${cmdline}" "WARN"
         done <<< "${existing_supervisors}"
         log "Existing supervisor detected for CAN ${CAN_CHANNEL}; aborting new launch."
         exit 0
@@ -633,10 +649,12 @@ while [[ $# -gt 0 ]]; do
         --can)
             ensure_value_present "--can" "$#"
             CAN_CHANNEL="$2"
+            CAN_CHANNEL_USER_SET=1
             shift 2
             ;;
         --can=*)
             CAN_CHANNEL="${1#*=}"
+            CAN_CHANNEL_USER_SET=1
             shift
             ;;
         --xyz-only)
@@ -710,7 +728,7 @@ if [[ ${STOP_ONLY} -eq 1 ]]; then
 
     # 检查是否有正在运行的相关进程；若没有，则认为已经关闭，直接返回。
     ensure_command pgrep
-    supervisors="$(pgrep -fa "start_robot_driver.sh --daemon-child" 2>/dev/null || true)"
+    supervisors="$(pgrep -fa "${SUPERVISOR_PGREP_PATTERN}" 2>/dev/null || true)"
     launches="$(pgrep -fa "ros2 launch robot_driver robot_driver.launch.py" 2>/dev/null || true)"
     nodes="$(pgrep -fa "robot_driver/lib/robot_driver/robot_driver_node.py" 2>/dev/null || true)"
 
