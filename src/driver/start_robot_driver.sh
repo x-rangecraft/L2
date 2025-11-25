@@ -86,17 +86,114 @@ cleanup_processes() {
     pkill -f robot_driver_node 2>/dev/null || true
 }
 
-cleanup_supervisors() {
-    # Ensure there is at most one start_robot_driver.sh supervisor.
-    # 只匹配真正的守护进程，不会杀掉当前这次 CLI 调用（没有 --daemon-child）。
-    log "Killing existing robot_driver supervisor processes (if any)..."
-    pkill -f "start_robot_driver.sh --daemon-child" 2>/dev/null || true
+get_cmdline_for_pid() {
+    local pid="$1"
+    if [[ -r "/proc/${pid}/cmdline" ]]; then
+        tr '\0' ' ' < "/proc/${pid}/cmdline"
+        return 0
+    fi
+    if command -v ps >/dev/null 2>&1; then
+        ps -o args= -p "${pid}" 2>/dev/null || return 1
+    fi
+    return 1
+}
+
+extract_can_from_cmdline() {
+    local cmdline="$1"
+    local default_can="$2"
+    local token next
+    local -a tokens=()
+    default_can="${default_can:-can0}"
+    if [[ -z "${cmdline}" ]]; then
+        printf '%s\n' "${default_can}"
+        return 0
+    fi
+    # shellcheck disable=SC2206
+    read -r -a tokens <<< "${cmdline}"
+    local i=0
+    local total=${#tokens[@]}
+    while (( i < total )); do
+        token="${tokens[i]}"
+        if [[ "${token}" == --can ]]; then
+            ((i+=1))
+            if (( i < total )); then
+                printf '%s\n' "${tokens[i]}"
+                return 0
+            fi
+        elif [[ "${token}" == --can=* ]]; then
+            printf '%s\n' "${token#*=}"
+            return 0
+        fi
+        ((i+=1))
+    done
+    printf '%s\n' "${default_can}"
+}
+
+list_supervisors_for_can() {
+    local target_can="$1"
+    local found=0
+    target_can="${target_can:-can0}"
+    while IFS= read -r pid; do
+        [[ -z "${pid}" ]] && continue
+        if [[ ! "${pid}" =~ ^[0-9]+$ ]]; then
+            continue
+        fi
+        local cmdline
+        if ! cmdline="$(get_cmdline_for_pid "${pid}")"; then
+            continue
+        fi
+        if [[ "${cmdline}" != *"--daemon-child"* ]]; then
+            continue
+        fi
+        local cmd_can
+        cmd_can="$(extract_can_from_cmdline "${cmdline}" "can0")"
+        if [[ "${cmd_can}" == "${target_can}" ]]; then
+            printf '%s\t%s\n' "${pid}" "${cmdline}"
+            found=1
+        fi
+    done < <(pgrep -f "start_robot_driver.sh --daemon-child" 2>/dev/null || true)
+
+    if [[ ${found} -eq 0 ]]; then
+        return 1
+    fi
+    return 0
+}
+
+wait_for_pid_exit() {
+    local pid="$1"
+    local timeout="$2"
+    local waited=0
+    timeout="${timeout:-5}"
+    while kill -0 "${pid}" 2>/dev/null; do
+        if (( waited >= timeout )); then
+            return 1
+        fi
+        sleep 1
+        ((waited+=1))
+    done
+    return 0
+}
+
+terminate_supervisor_pid() {
+    local pid="$1"
+    local timeout="$2"
+    timeout="${timeout:-10}"
+    if ! kill "${pid}" 2>/dev/null; then
+        return 1
+    fi
+    if wait_for_pid_exit "${pid}" "${timeout}"; then
+        return 0
+    fi
+    kill -9 "${pid}" 2>/dev/null || true
+    if wait_for_pid_exit "${pid}" 2; then
+        return 0
+    fi
+    return 1
 }
 
 stop_daemon() {
     status_cn "正在查找需要关闭的 robot_driver 相关进程..."
 
-    # 收集当前所有相关进程（仅用于打印，不靠这些 PID 进行精确杀死）
     local supervisors launches nodes
     supervisors="$(pgrep -fa "start_robot_driver.sh --daemon-child" 2>/dev/null || true)"
     launches="$(pgrep -fa "ros2 launch robot_driver robot_driver.launch.py" 2>/dev/null || true)"
@@ -131,35 +228,44 @@ stop_daemon() {
     status_cn "正在关闭上述进程..." "INFO"
     log "Stopping robot_driver supervisor and ROS processes..."
 
-    # Best-effort kill of all daemon-child supervisors and ROS nodes.
-    # 1) 先按惯用启动方式杀掉所有 start_robot_driver.sh --can ... 守护/残留进程
-    pkill -f "start_robot_driver.sh --can" 2>/dev/null || true
-    # 2) 再杀掉带 --daemon-child 标记的守护进程
-    cleanup_supervisors || true
-    # 3) 最后杀掉所有 ros2 launch / robot_driver_node 进程
+    local targeted_output=""
+    if targeted_output="$(list_supervisors_for_can "${CAN_CHANNEL}")"; then
+        while IFS=$'\t' read -r pid cmdline; do
+            [[ -z "${pid}" ]] && continue
+            status_cn "  supervisor PID=${pid} (CAN=${CAN_CHANNEL}) 正在关闭..."
+            if terminate_supervisor_pid "${pid}" 10; then
+                status_cn "  supervisor PID=${pid} 已退出" "INFO"
+            else
+                status_cn "  supervisor PID=${pid} 未能在超时时间内退出" "WARN"
+            fi
+        done <<< "${targeted_output}"
+    else
+        status_cn "未匹配到 CAN=${CAN_CHANNEL} 的守护进程，可能已停止或使用了其他 CAN" "WARN"
+    fi
+
     cleanup_processes || true
 
-    # 等待一小段时间让进程退出
     sleep 1
 
-    # 再次检查是否还有相关进程存活
-    local still_sup still_launch still_nodes
-    still_sup="$(pgrep -fa "start_robot_driver.sh --daemon-child" 2>/dev/null || true)"
+    local still_launch still_nodes remaining_output="" remaining_targeted=0
     still_launch="$(pgrep -fa "ros2 launch robot_driver robot_driver.launch.py" 2>/dev/null || true)"
     still_nodes="$(pgrep -fa "robot_driver/lib/robot_driver/robot_driver_node.py" 2>/dev/null || true)"
+    if remaining_output="$(list_supervisors_for_can "${CAN_CHANNEL}")"; then
+        remaining_targeted=1
+    fi
 
-    if [[ -z "${still_sup}${still_launch}${still_nodes}" ]]; then
+    if [[ ${remaining_targeted} -eq 0 && -z "${still_launch}${still_nodes}" ]]; then
         status_cn "robot_driver 相关进程已全部关闭" "INFO"
         log "robot_driver stopped."
         return 0
     fi
 
     status_cn "部分进程仍在运行，请手动检查：" "WARN"
-    if [[ -n "${still_sup}" ]]; then
-        while IFS= read -r line; do
-            [[ -z "${line}" ]] && continue
-            status_cn "  supervisor: ${line}" "WARN"
-        done <<< "${still_sup}"
+    if [[ ${remaining_targeted} -eq 1 ]]; then
+        while IFS=$'\t' read -r pid cmdline; do
+            [[ -z "${pid}" ]] && continue
+            status_cn "  supervisor: PID=${pid} ${cmdline}" "WARN"
+        done <<< "${remaining_output}"
     fi
     if [[ -n "${still_launch}" ]]; then
         while IFS= read -r line; do
@@ -203,10 +309,16 @@ build_child_args() {
 }
 
 launch_daemon_mode() {
-    # Before starting a new supervisor, proactively clean up any stray
-    # daemon-child supervisors from previous runs to guarantee a single
-    # supervisor and a single /robot_driver instance.
-    cleanup_supervisors
+    local existing_supervisors
+    if existing_supervisors="$(list_supervisors_for_can "${CAN_CHANNEL}")"; then
+        status_cn "检测到 robot_driver 守护进程已在运行 (CAN=${CAN_CHANNEL})" "WARN"
+        while IFS=$'\t' read -r pid cmdline; do
+            [[ -z "${pid}" ]] && continue
+            status_cn "  supervisor PID=${pid}: ${cmdline}" "WARN"
+        done <<< "${existing_supervisors}"
+        log "Existing supervisor detected for CAN ${CAN_CHANNEL}; aborting new launch."
+        exit 0
+    fi
     build_child_args
     status_cn "正在后台启动 robot_driver，日志输出：${LOG_FILE}"
     log "Starting robot_driver supervisor in daemon mode (log: ${LOG_FILE})"
@@ -597,6 +709,7 @@ if [[ ${STOP_ONLY} -eq 1 ]]; then
     # 只有 SafetyPose 成功（或使用 --force 时允许失败）才会真正停止进程。
 
     # 检查是否有正在运行的相关进程；若没有，则认为已经关闭，直接返回。
+    ensure_command pgrep
     supervisors="$(pgrep -fa "start_robot_driver.sh --daemon-child" 2>/dev/null || true)"
     launches="$(pgrep -fa "ros2 launch robot_driver robot_driver.launch.py" 2>/dev/null || true)"
     nodes="$(pgrep -fa "robot_driver/lib/robot_driver/robot_driver_node.py" 2>/dev/null || true)"
@@ -642,6 +755,7 @@ fi
 ensure_command ros2
 ensure_command python3
 ensure_command pkill
+ensure_command pgrep
 ensure_command nohup
 
 if [[ ${DAEMON_CHILD} -eq 0 ]]; then
@@ -754,7 +868,7 @@ while true; do
 
     if ! run_can_maintenance "${FIRST_RUN}"; then
         log "ERROR: CAN maintenance failed; retrying in ${RESTART_DELAY_FAILURE}s"
-        sleep ${RESTART_DELAY_FAILURE}
+        sleep ${RESTART_DELAY_FAILURE} || true
         continue
     fi
     FIRST_RUN=0
@@ -770,17 +884,17 @@ while true; do
     set -e
 
     if [[ ${SHUTDOWN_REQUESTED} -ne 0 ]]; then
-        log "Shutdown requested; exiting supervisor loop (ros2 launch code ${EXIT_CODE})"
+        log "Shutdown requested; supervisor exiting after ros2 launch finished (code ${EXIT_CODE})."
         break
     fi
 
-    # 关闭自动重启逻辑：仅记录一次退出原因后直接退出监督循环。
     if [[ ${EXIT_CODE} -eq 0 ]]; then
-        log "ros2 launch exited cleanly (code 0). Auto-restart disabled; supervisor exiting."
+        log "ros2 launch exited cleanly (code 0); restarting in ${RESTART_DELAY_SUCCESS}s."
+        sleep ${RESTART_DELAY_SUCCESS} || true
     else
-        log "WARNING: ros2 launch exited with code ${EXIT_CODE}; auto-restart disabled; supervisor exiting."
+        log "WARNING: ros2 launch exited with code ${EXIT_CODE}; restarting in ${RESTART_DELAY_FAILURE}s."
+        sleep ${RESTART_DELAY_FAILURE} || true
     fi
-    break
 done
 
 log "robot_driver supervisor stopped"

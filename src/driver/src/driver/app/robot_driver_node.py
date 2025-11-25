@@ -31,7 +31,7 @@ from driver.safety.safe_pose_manager import SafePoseManager
 from driver.utils.logging_utils import get_action_robot_logger, get_logger
 from driver.app.gripper_action import GripperAction
 
-_SAFE_POSE_SPEED_SCALE = 0.8
+_SAFE_POSE_SPEED_SCALE = 1.0
 _SAFE_POSE_TIMEOUT_S = 10.0
 _SAFE_POSE_EXIT_ZERO_GRAVITY = True
 _SAFE_POSE_RELATIVE = False
