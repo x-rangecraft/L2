@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Web Interactive GUI</title>
+    <script src="https://cdn.socket.io/4.5.4/socket.io.min.js" crossorigin="anonymous"></script>
+    <script>
+        if (typeof io === 'undefined') {
+            document.write('<script src="' + {{ url_for('static', filename='socket.io.min.js')|tojson }} + '"><\\/script>');
+        }
+    </script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            padding: 20px;
+        }
+        .container {
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+            padding: 30px;
+            max-width: 1200px;
+            width: 100%;
+        }
+        h1 {
+            text-align: center;
+            color: #333;
+            margin-bottom: 10px;
+            font-size: 2.2em;
+        }
+        .subtitle {
+            text-align: center;
+            color: #666;
+            margin-bottom: 30px;
+            font-size: 1.1em;
+        }
+        .image-wrapper {
+            position: relative;
+            width: 100%;
+            max-width: 900px;
+            margin: 0 auto;
+            border: 3px solid #667eea;
+            border-radius: 12px;
+            overflow: hidden;
+            cursor: crosshair;
+            background: #111;
+        }
+        #camera-image {
+            width: 100%;
+            height: auto;
+            display: block;
+            position: relative;
+            z-index: 1;
+        }
+        #overlay-image {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+            opacity: 0;
+            transition: opacity 0.4s ease-in-out;
+            z-index: 2;
+        }
+        .click-marker {
+            position: absolute;
+            width: 10px;
+            height: 10px;
+            background: #00e676;
+            border: 2px solid white;
+            border-radius: 50%;
+            transform: translate(-50%, -50%);
+            pointer-events: none;
+            animation: pulse 1s ease-in-out infinite;
+            z-index: 3;
+        }
+        @keyframes pulse {
+            0%, 100% { transform: translate(-50%, -50%) scale(1); }
+            50% { transform: translate(-50%, -50%) scale(1.5); }
+        }
+        .info-panel {
+            margin-top: 20px;
+            padding: 20px;
+            background: #f8f9fa;
+            border-radius: 12px;
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            gap: 15px;
+        }
+        .info-item {
+            text-align: center;
+        }
+        .info-label {
+            font-size: 0.9em;
+            color: #666;
+            margin-bottom: 5px;
+        }
+        .info-value {
+            font-size: 1.6em;
+            font-weight: bold;
+            color: #667eea;
+        }
+        .status {
+            text-align: center;
+            margin-top: 15px;
+            padding: 12px;
+            border-radius: 8px;
+            font-weight: bold;
+        }
+        .status.connected {
+            background: #d4edda;
+            color: #155724;
+        }
+        .status.disconnected {
+            background: #f8d7da;
+            color: #721c24;
+        }
+        .instructions {
+            margin-top: 20px;
+            padding: 15px;
+            background: #e7f3ff;
+            border-left: 4px solid #667eea;
+            border-radius: 8px;
+        }
+        .instructions h3 {
+            color: #667eea;
+            margin-bottom: 10px;
+        }
+        .instructions li {
+            margin: 5px 0;
+            color: #555;
+        }
+    </style>
+</head>
+<body>
+<div class="container">
+    <h1>Web Interactive GUI</h1>
+    <p class="subtitle">点击画面即可把坐标转换成 ROS `/click_point` 事件</p>
+
+    <div class="image-wrapper" id="image-container">
+        <img id="camera-image" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7" alt="Camera Feed">
+        <img id="overlay-image" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7" alt="Overlay">
+    </div>
+
+    <div class="info-panel">
+        <div class="info-item">
+            <div class="info-label">点击次数</div>
+            <div class="info-value" id="click-count">0</div>
+        </div>
+        <div class="info-item">
+            <div class="info-label">最近点击</div>
+            <div class="info-value" id="last-click">-</div>
+        </div>
+        <div class="info-item">
+            <div class="info-label">帧率 (FPS)</div>
+            <div class="info-value" id="fps">0</div>
+        </div>
+    </div>
+
+    <div class="status disconnected" id="status">● 正在连接...</div>
+
+    <div class="instructions">
+        <h3>操作提示</h3>
+        <ul>
+            <li>Stage2/Stage3 任意节点只要发布图像，就能在此实时预览</li>
+            <li>点击画面任意位置，会向 `/click_point` 发布 `geometry_msgs/PointStamped`</li>
+            <li>Overlay 透明度会自动保持/衰减，可通过 ROS 参数自定义</li>
+        </ul>
+    </div>
+</div>
+
+<script>
+    const TRANSPARENT_PIXEL = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
+
+    function initializeSocketIO() {
+        if (typeof io === 'undefined') {
+            console.error('Socket.IO 加载失败');
+            const statusElement = document.getElementById('status');
+            statusElement.className = 'status disconnected';
+            statusElement.textContent = '● Socket.IO 资源缺失';
+            return;
+        }
+
+        const socket = io();
+        const imageElement = document.getElementById('camera-image');
+        const overlayElement = document.getElementById('overlay-image');
+        const imageContainer = document.getElementById('image-container');
+        const statusElement = document.getElementById('status');
+        const clickCountElement = document.getElementById('click-count');
+        const lastClickElement = document.getElementById('last-click');
+        const fpsElement = document.getElementById('fps');
+
+        let clickCount = 0;
+        let frameCount = 0;
+        let lastFrameTime = Date.now();
+
+        socket.on('connect', () => {
+            statusElement.className = 'status connected';
+            statusElement.textContent = '● 已连接服务器';
+        });
+
+        socket.on('disconnect', () => {
+            statusElement.className = 'status disconnected';
+            statusElement.textContent = '● 与服务器断开';
+        });
+
+        socket.on('image_update', (data) => {
+            if (data.image) {
+                imageElement.src = 'data:image/jpeg;base64,' + data.image;
+            }
+
+            if (data.overlay) {
+                overlayElement.src = 'data:image/jpeg;base64,' + data.overlay;
+                const newOpacity = typeof data.overlay_opacity === 'number' ? data.overlay_opacity : 1.0;
+                const currentOpacity = parseFloat(overlayElement.style.opacity) || 0;
+
+                if (newOpacity > currentOpacity) {
+                    overlayElement.style.transition = 'none';
+                    overlayElement.style.opacity = Math.max(0, Math.min(1, newOpacity));
+                    void overlayElement.offsetHeight;
+                    overlayElement.style.transition = 'opacity 0.4s ease-in-out';
+                } else {
+                    overlayElement.style.opacity = Math.max(0, Math.min(1, newOpacity));
+                }
+            } else {
+                overlayElement.src = TRANSPARENT_PIXEL;
+                overlayElement.style.opacity = 0;
+            }
+
+            frameCount++;
+            const now = Date.now();
+            const elapsed = (now - lastFrameTime) / 1000;
+            if (elapsed >= 1.0) {
+                const fps = frameCount / elapsed;
+                fpsElement.textContent = fps.toFixed(1);
+                frameCount = 0;
+                lastFrameTime = now;
+            }
+        });
+
+        imageContainer.addEventListener('click', (event) => {
+            const rect = imageElement.getBoundingClientRect();
+            const x = event.clientX - rect.left;
+            const y = event.clientY - rect.top;
+
+            const imageX = (x / rect.width) * imageElement.naturalWidth;
+            const imageY = (y / rect.height) * imageElement.naturalHeight;
+
+            fetch('/click', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({ x: Math.round(imageX), y: Math.round(imageY) })
+            })
+            .then(res => res.json())
+            .then(data => {
+                clickCount++;
+                clickCountElement.textContent = clickCount;
+                lastClickElement.textContent = `(${data.x}, ${data.y})`;
+                showClickMarker(x, y);
+            })
+            .catch(err => console.error('发送点击失败', err));
+        });
+
+        function showClickMarker(x, y) {
+            const marker = document.createElement('div');
+            marker.className = 'click-marker';
+            marker.style.left = x + 'px';
+            marker.style.top = y + 'px';
+            imageContainer.appendChild(marker);
+            setTimeout(() => marker.remove(), 2000);
+        }
+    }
+
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', initializeSocketIO);
+    } else {
+        initializeSocketIO();
+    }
+</script>
+</body>
+</html>
