@@ -148,7 +148,7 @@ wait_for_log_marker() {
             return 0
         fi
         sleep 1
-        ((waited++))
+        waited=$((waited + 1))
     done
     status_cn "${warn_msg}" "WARN"
     return 1
@@ -162,10 +162,14 @@ report_startup_sequence() {
         status_cn "节点 /robot_driver 未在 30s 内出现" "WARN"
     fi
 
-    wait_for_log_marker "[robot_start] 机械臂连接成功" "机械臂连接成功" 60 "机械臂连接超时，请检查 CAN 连接"
-    wait_for_log_marker "[robot_start] 安全位姿复位中" "安全位姿复位中" 30 "未检测到安全位姿复位指令"
-    wait_for_log_marker "[robot_start] 安全位姿复位成功" "安全位姿复位成功" 120 "安全位姿复位未完成，请查看日志"
-    wait_for_log_marker "[robot_start] 启动结束" "启动结束" 30 "未检测到启动收尾日志"
+    # 第一阶段（Base）：硬件连接
+    wait_for_log_marker "[robot_start] 基础启动完成" "第一阶段完成：基础启动" 120 "硬件连接超时，请检查 CAN 连接"
+
+    # 第二阶段（Ext）：安全位姿
+    wait_for_log_marker "[robot_start] 安全位姿复位成功" "已回到安全位姿" 180 "安全位姿复位超时，请查看日志"
+
+    # 第二阶段（Ext）：零重力 + 启动结束
+    wait_for_log_marker "[robot_start] 启动结束" "启动流程全部完成" 30 "启动未完成，请查看日志"
 }
 
 stop_daemon() {
@@ -464,12 +468,7 @@ if ! kill -0 "${LAUNCH_PID}" 2>/dev/null; then
     exit 1
 fi
 
-status_cn "robot_driver 启动完成，节点正在运行 (PID=${LAUNCH_PID})"
+status_cn "robot_driver 启动完成"
 status_cn "日志文件：${LOG_FILE}"
 
-# 等待 launch 进程结束（用户 Ctrl+C 或节点退出）
-wait "${LAUNCH_PID}"
-EXIT_CODE=$?
-
-log "ros2 launch exited with code ${EXIT_CODE}"
-exit ${EXIT_CODE}
+exit 0

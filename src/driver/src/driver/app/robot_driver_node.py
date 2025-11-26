@@ -14,13 +14,12 @@ import rclpy
 
 class RobotState(Enum):
     """机械臂状态枚举。"""
-    INITIALIZING = "initializing"      # 正在初始化
-    CONNECTING = "connecting"          # 正在连接硬件
-    SAFE_POSING = "safe_posing"        # 正在执行安全位姿
-    READY = "ready"                    # 就绪，可以接受指令
-    BUSY = "busy"                      # 正在执行指令
+    INITIALIZING = "initializing"      # 第一阶段：同步任务执行中
+    CONNECTING = "connecting"          # 第一阶段：异步任务执行中（CAN准备、硬件连接）
+    CALIBRATING = "calibrating"        # 第二阶段：扩展任务执行中（安全位姿、零重力）
+    READY = "ready"                    # 完全就绪，可接受外部请求
     SHUTTING_DOWN = "shutting_down"    # 正在关闭
-    ERROR = "error"                    # 错误状态
+    ERROR = "error"                    # 错误状态，启动失败
 from rclpy.executors import MultiThreadedExecutor
 from builtin_interfaces.msg import Duration
 from control_msgs.action import FollowJointTrajectory
@@ -62,6 +61,7 @@ class RobotDriverNode(Node):
         super().__init__('robot_driver')
         self._params: DriverParameters = declare_and_get_parameters(self)
         self._logger = get_logger('robot_driver_node')
+        self._logger.info('[robot_start] 节点初始化中')
         self._robot_description = RobotDescriptionLoader().load(self._params.robot_description_file)
         self._commander = HardwareCommander(
             joint_limit_rate=self._params.joint_command.rate_limit,
@@ -71,7 +71,7 @@ class RobotDriverNode(Node):
             self,
             self._commander,
             service_name=self._params.zero_gravity_service,
-            wait_for_ready=self.wait_for_ready,
+            is_ready_callback=self._is_ready_for_zero_gravity,
         )
         # SAFE_POSE management is handled by a dedicated manager so that
         # HardwareCommander remains a thin hardware abstraction.
@@ -125,7 +125,6 @@ class RobotDriverNode(Node):
         # 状态管理
         self._state = RobotState.INITIALIZING
         self._state_lock = threading.Lock()
-        self._ready_condition = threading.Condition(self._state_lock)
         self._startup_error: Optional[str] = None
 
         self._subscriptions = []
@@ -393,29 +392,6 @@ class RobotDriverNode(Node):
             self._logger.error('Safety stop handler failed: %s', exc)
             self.get_logger().error(traceback.format_exc())
 
-    # ------------------------------------------------------------------ state management
-    def wait_for_ready(self, timeout: float = 60.0) -> bool:
-        """等待机械臂就绪（READY 状态）。
-
-        用于服务/action 在执行前等待机械臂连接完成。
-
-        Args:
-            timeout: 最大等待时间（秒）
-
-        Returns:
-            是否成功进入 READY 状态
-        """
-        with self._ready_condition:
-            return self._ready_condition.wait_for(
-                lambda: self._state == RobotState.READY or self._state == RobotState.ERROR,
-                timeout=timeout,
-            ) and self._state == RobotState.READY
-
-    def is_ready(self) -> bool:
-        """检查机械臂是否就绪。"""
-        with self._state_lock:
-            return self._state == RobotState.READY
-
     # ------------------------------------------------------------------ async startup
     def _trigger_async_startup(self) -> None:
         """定时器回调：触发异步启动流程。"""
@@ -434,15 +410,29 @@ class RobotDriverNode(Node):
         ).start()
 
     def _run_async_startup(self) -> None:
-        """异步启动流程：第一阶段连接硬件，第二阶段状态校准。"""
-        max_retries = 3
+        """异步启动流程入口：启动第一阶段。"""
+        self._start_phase1()
 
-        # ======================== 第一阶段：硬件连接 ========================
+    # ================================================================== Phase 1: 硬件连接
+    def _start_phase1(self) -> None:
+        """第一阶段（Base）：硬件连接。在后台线程执行 SDK 同步调用。"""
+        with self._state_lock:
+            self._state = RobotState.CONNECTING
+        self._logger.info('[robot_start] 开始第一阶段（Base）：硬件连接')
+
+        # SDK 连接是同步的，必须在线程中执行
+        threading.Thread(
+            target=self._phase1_connect_hardware,
+            name='phase1_connect',
+            daemon=True,
+        ).start()
+
+    def _phase1_connect_hardware(self) -> None:
+        """第一阶段执行：硬件连接（在后台线程中执行）。"""
+        max_retries = 3
         for attempt in range(1, max_retries + 1):
             try:
-                with self._state_lock:
-                    self._state = RobotState.CONNECTING
-                self._logger.info('[robot_start] 开始硬件连接 (attempt %d)', attempt)
+                self._logger.info('[robot_start] 硬件连接尝试 %d/%d', attempt, max_retries)
 
                 # 重试前先断开（如果已连接）
                 if attempt > 1 and self._hardware_supervisor.connected:
@@ -454,87 +444,108 @@ class RobotDriverNode(Node):
 
                 self._hardware_supervisor.connect()
                 self._logger.info('[robot_start] 机械臂连接成功')
+                self._logger.info('[robot_start] 基础启动完成')
 
-                # 连接成功，进入 READY 状态，通知所有等待者
-                with self._ready_condition:
-                    self._state = RobotState.READY
-                    self._startup_error = None
-                    self._ready_condition.notify_all()
-                self._logger.info('[robot_start] 节点启动成功，可接受控制指令')
-                break  # 退出重试循环，进入第二阶段
+                # 成功，进入第二阶段
+                self._start_phase2()
+                return
 
             except Exception as exc:
                 self._logger.error('[robot_start] 硬件连接尝试 %d 失败: %s', attempt, exc)
-                with self._state_lock:
-                    self._startup_error = str(exc)
                 if attempt < max_retries:
                     time.sleep(5.0)
                 else:
-                    self._logger.error('[robot_start] 硬件连接失败，已达最大重试次数')
-                    with self._ready_condition:
-                        self._state = RobotState.ERROR
-                        self._ready_condition.notify_all()  # 通知等待者（失败）
-                    return  # 第一阶段失败，不进入第二阶段
+                    self._on_startup_failed(f'硬件连接失败，已尝试 {max_retries} 次: {exc}')
 
-        # ======================== 第二阶段：启动后状态校准 ========================
-        self._logger.info('[robot_start] 开始启动后状态校准')
+    # ================================================================== Phase 2: 状态校准
+    def _start_phase2(self) -> None:
+        """第二阶段（Ext）：状态校准。通过 action 回调链执行。"""
+        with self._state_lock:
+            self._state = RobotState.CALIBRATING
+        self._logger.info('[robot_start] 开始扩展启动')
 
-        # 2.1 安全位姿复位
-        try:
-            self._logger.info('[robot_start] 安全位姿复位中')
-            safe_pose_ok = self._execute_startup_safe_pose()
-            if safe_pose_ok:
-                self._logger.info('[robot_start] 安全位姿复位成功')
-            else:
-                self._logger.warning('[robot_start] 安全位姿复位失败，但不影响机械臂可用性')
-        except Exception as exc:
-            self._logger.warning('[robot_start] 安全位姿复位异常: %s', exc)
+        # Step 1: 安全位姿复位
+        self._phase2_start_safe_pose()
 
-        self._logger.info('[robot_start] 启动结束')
+    def _phase2_start_safe_pose(self) -> None:
+        """第二阶段步骤1：发送安全位姿 action。"""
+        self._logger.info('[robot_start] 安全位姿复位中')
 
-    def _execute_startup_safe_pose(self) -> bool:
-        """执行启动时的安全位姿复位（通过 SafetyPose action）。"""
         if not self._safety_pose_client.wait_for_server(timeout_sec=10.0):
-            self._logger.error('[robot_start] SafetyPose action 不可用')
-            return False
+            self._on_startup_failed('安全位姿复位失败: SafetyPose action server 不可用')
+            return
 
         goal = SafetyPose.Goal()
-        goal.enable_zero_gravity_after = bool(self._params.zero_gravity_default)
+        goal.enable_zero_gravity_after = False  # 零重力单独处理
 
         send_future = self._safety_pose_client.send_goal_async(goal)
-        if not self._spin_until_future(send_future, 30.0):
-            self._logger.error('[robot_start] SafetyPose 目标发送超时')
-            return False
+        send_future.add_done_callback(self._on_safe_pose_goal_response)
 
-        goal_handle = send_future.result()
-        if goal_handle is None or not getattr(goal_handle, 'accepted', False):
-            self._logger.error('[robot_start] SafetyPose 目标被拒绝')
-            return False
-
-        result_future = goal_handle.get_result_async()
-        if not self._spin_until_future(result_future, 180.0):
-            self._logger.error('[robot_start] SafetyPose 执行超时')
-            return False
-
+    def _on_safe_pose_goal_response(self, future) -> None:
+        """安全位姿 goal 响应回调。"""
         try:
-            action_result = result_future.result().result
+            goal_handle = future.result()
         except Exception as exc:
-            self._logger.error('[robot_start] 读取 SafetyPose 结果失败: %s', exc)
-            return False
+            self._on_startup_failed(f'安全位姿复位失败: goal 发送异常 - {exc}')
+            return
 
-        if not getattr(action_result, 'success', False):
-            self._logger.error(
-                '[robot_start] SafetyPose 执行失败 result_code=%s last_error=%s',
-                getattr(action_result, 'result_code', ''),
-                getattr(action_result, 'last_error', ''),
+        if not goal_handle.accepted:
+            self._on_startup_failed('安全位姿复位失败: goal 被拒绝')
+            return
+
+        self._logger.info('[robot_start] SafetyPose goal 已接受，等待执行完成')
+        result_future = goal_handle.get_result_async()
+        result_future.add_done_callback(self._on_safe_pose_result)
+
+    def _on_safe_pose_result(self, future) -> None:
+        """安全位姿执行结果回调。"""
+        try:
+            result = future.result().result
+        except Exception as exc:
+            self._on_startup_failed(f'安全位姿复位失败: 结果获取异常 - {exc}')
+            return
+
+        if not result.success:
+            self._on_startup_failed(
+                f'安全位姿复位失败: {result.result_code} - {result.last_error}'
             )
-            return False
+            return
 
-        self._logger.info(
-            '[robot_start] SafetyPose 完成 (max |Δ|=%.4f rad)',
-            float(getattr(action_result, 'max_error', float('nan'))),
-        )
-        return True
+        self._logger.info('[robot_start] 安全位姿复位成功 (max_error=%.4f rad)', result.max_error)
+
+        # Step 2: 零重力模式
+        self._phase2_enable_zero_gravity()
+
+    def _phase2_enable_zero_gravity(self) -> None:
+        """第二阶段步骤2：开启零重力模式。"""
+        if not self._params.zero_gravity_default:
+            self._logger.info('[robot_start] 零重力模式：默认关闭，跳过')
+            self._on_startup_success()
+            return
+
+        self._logger.info('[robot_start] 零重力模式开启')
+        if not self._zero_gravity_manager.enable():
+            self._on_startup_failed('零重力开启失败: ZeroGravityManager.enable() 返回 False')
+            return
+
+        self._logger.info('[robot_start] 零重力模式开启成功')
+        self._on_startup_success()
+
+    # ================================================================== 启动结果处理
+    def _on_startup_success(self) -> None:
+        """启动成功回调。"""
+        with self._state_lock:
+            self._state = RobotState.READY
+            self._startup_error = None
+        self._logger.info('[robot_start] 启动结束')
+
+    def _on_startup_failed(self, reason: str) -> None:
+        """启动失败回调。"""
+        self._logger.error('[robot_start] %s', reason)
+        with self._state_lock:
+            self._state = RobotState.ERROR
+            self._startup_error = reason
+        self._logger.error('[robot_start] 启动失败，进入错误状态')
 
     def _on_hardware_recovery_needed(self, reason: str) -> None:
         """硬件恢复回调：当检测到硬件异常时调用。"""
@@ -581,7 +592,7 @@ class RobotDriverNode(Node):
                 response.success = False
                 response.message = '关闭流程已在进行'
                 return response
-            self._state = RobotState.SHUTTING_DOWN
+            # 暂不切换状态，保持 READY 以便 SafetyPose 内部的 JointCommand 能被接受
 
         self._logger.warning('收到 shutdown 服务请求，开始安全停机流程')
         self._shutdown_event.set()
@@ -602,13 +613,16 @@ class RobotDriverNode(Node):
         return response
 
     def _execute_orderly_shutdown(self) -> tuple[bool, str]:
-        # Phase 1: 通过 SafetyPose action 回到安全位姿
+        # Phase 1: 通过 SafetyPose action 回到安全位姿（此时保持 READY 状态）
         if not self._perform_safety_pose_shutdown():
             msg = 'SafetyPose 动作执行失败，无法安全停机'
             self._logger.error(msg)
             return False, msg
 
-        self._logger.info('SafetyPose 停机动作完成，开始关闭硬件链接')
+        # SafetyPose 完成后，切换到 SHUTTING_DOWN 状态
+        with self._state_lock:
+            self._state = RobotState.SHUTTING_DOWN
+        self._logger.info('SafetyPose 停机动作完成，状态切换为 SHUTTING_DOWN，开始关闭硬件链接')
 
         # Phase 2: 断开硬件连接
         try:
@@ -683,39 +697,50 @@ class RobotDriverNode(Node):
         except Exception:
             pass
 
-    # ------------------------------------------------------------------ action server
-    def _wait_ready_for_command(self, timeout: float = 60.0) -> tuple[bool, str]:
-        """等待机械臂就绪，用于 action 执行前。
+    # ------------------------------------------------------------------ state check
+    def _is_ready_for_zero_gravity(self) -> tuple[bool, str]:
+        """检查是否可以执行零重力操作。
 
-        Returns:
-            (是否就绪, 原因说明)
+        在 READY 和 CALIBRATING 状态下允许（第二阶段需要开启零重力）。
         """
         with self._state_lock:
             state = self._state
 
-        # 如果已经就绪，直接返回
+        if state in (RobotState.READY, RobotState.CALIBRATING):
+            return True, ''
+        return False, f'零重力服务不可用 (state={state.value})'
+
+    # ------------------------------------------------------------------ action server
+    def _is_ready_for_external_request(self) -> tuple[bool, str]:
+        """检查是否可以接受外部请求。
+
+        只有在 READY 状态下才接受外部请求。
+
+        Returns:
+            (是否就绪, 拒绝原因)
+        """
+        with self._state_lock:
+            state = self._state
+
         if state == RobotState.READY:
             return True, ''
-
-        # 如果正在关闭或已出错，不等待
+        if state == RobotState.INITIALIZING:
+            return False, f'节点正在初始化 (state={state.value})'
+        if state == RobotState.CONNECTING:
+            return False, f'正在连接硬件 (state={state.value})'
+        if state == RobotState.CALIBRATING:
+            return False, f'正在执行启动校准 (state={state.value})'
         if state == RobotState.SHUTTING_DOWN:
-            return False, '机械臂正在关闭'
+            return False, f'节点正在关闭 (state={state.value})'
         if state == RobotState.ERROR:
-            return False, f'机械臂处于错误状态: {self._startup_error or "unknown"}'
-
-        # 等待就绪
-        self._logger.info('等待机械臂就绪 (当前状态: %s)', state.value)
-        if self.wait_for_ready(timeout):
-            return True, ''
-        else:
-            with self._state_lock:
-                state = self._state
-            if state == RobotState.ERROR:
-                return False, f'机械臂启动失败: {self._startup_error or "unknown"}'
-            return False, f'等待机械臂就绪超时 (当前状态: {state.value})'
+            return False, f'启动失败: {self._startup_error or "unknown"} (state={state.value})'
+        return False, f'未知状态 (state={state.value})'
 
     def _goal_callback(self, _goal_request) -> GoalResponse:
-        # 始终接受 goal，在 execute 中等待就绪
+        ready, reason = self._is_ready_for_external_request()
+        if not ready:
+            self._logger.warning('Trajectory goal rejected: %s', reason)
+            return GoalResponse.REJECT
         return GoalResponse.ACCEPT
 
     def _cancel_callback(self, goal_handle) -> CancelResponse:
@@ -723,16 +748,6 @@ class RobotDriverNode(Node):
         return CancelResponse.ACCEPT
 
     async def _execute_trajectory(self, goal_handle):
-        # 等待机械臂就绪
-        ready, reason = self._wait_ready_for_command(timeout=60.0)
-        if not ready:
-            self.get_logger().warning('Trajectory execution aborted: %s', reason)
-            goal_handle.abort()
-            result = FollowJointTrajectory.Result()
-            result.error_code = FollowJointTrajectory.Result.INVALID_GOAL
-            result.error_string = reason
-            return result
-
         try:
             result = self._motion_controller.execute_trajectory(goal_handle)
             goal_handle.succeed()
@@ -746,26 +761,22 @@ class RobotDriverNode(Node):
             return result
 
     def _joint_goal_callback(self, _goal_request) -> GoalResponse:
-        # JointCommand 始终接受，在 execute 中等待就绪
-        # 注意：SafetyPose action 内部也使用 JointCommand，所以不能拒绝
-        return GoalResponse.ACCEPT
+        # JointCommand 在以下状态下接受：
+        # - READY: 正常运行状态
+        # - CALIBRATING: 第二阶段 SafetyPose 内部通过 action/joint 调用
+        # 注：shutdown 时先执行 SafetyPose（保持 READY），完成后才切换到 SHUTTING_DOWN
+        with self._state_lock:
+            state = self._state
+        if state in (RobotState.READY, RobotState.CALIBRATING):
+            return GoalResponse.ACCEPT
+        self._logger.warning('Joint goal rejected: state=%s', state.value)
+        return GoalResponse.REJECT
 
     def _joint_cancel_callback(self, goal_handle) -> CancelResponse:
         self._motion_controller.halt_and_safe('joint_action_cancelled')
         return CancelResponse.ACCEPT
 
     async def _execute_joint_action(self, goal_handle):
-        # 等待机械臂就绪（SafetyPose action 内部调用时状态已是 READY，会立即返回）
-        ready, reason = self._wait_ready_for_command(timeout=60.0)
-        if not ready:
-            self._logger.warning('Joint action aborted: %s', reason)
-            goal_handle.abort()
-            result = JointCommand.Result()
-            result.success = False
-            result.result_code = 'NOT_READY'
-            result.last_error = reason
-            return result
-
         try:
             result = self._motion_controller.execute_joint_action(goal_handle)
             if result.success:
@@ -785,7 +796,10 @@ class RobotDriverNode(Node):
             return result
 
     def _robot_goal_callback(self, _goal_request) -> GoalResponse:
-        # RobotCommand 始终接受，在 execute 中等待就绪
+        ready, reason = self._is_ready_for_external_request()
+        if not ready:
+            self._logger.warning('Robot goal rejected: %s', reason)
+            return GoalResponse.REJECT
         return GoalResponse.ACCEPT
 
     def _robot_cancel_callback(self, goal_handle) -> CancelResponse:
@@ -800,12 +814,6 @@ class RobotDriverNode(Node):
         return CancelResponse.ACCEPT
 
     async def _execute_robot_action(self, goal_handle):
-        # 等待机械臂就绪
-        ready, reason = self._wait_ready_for_command(timeout=60.0)
-        if not ready:
-            self._logger.warning('Robot action aborted: %s', reason)
-            return self._robot_action_abort(goal_handle, reason, 'NOT_READY')
-
         goal = goal_handle.request
         label = goal.label or 'robot'
         label_tag = f' [{label}]' if label else ''
