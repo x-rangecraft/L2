@@ -7,7 +7,7 @@
     <script src="https://cdn.socket.io/4.5.4/socket.io.min.js" crossorigin="anonymous"></script>
     <script>
         if (typeof io === 'undefined') {
-            document.write('<script src="' + {{ url_for('static', filename='socket.io.min.js')|tojson }} + '"><\\/script>');
+            document.write('<script src="' + {{ url_for('static', filename='socket.io.min.js')|tojson }} + '"><\/script>');
         }
     </script>
     <style>
@@ -294,3 +294,4 @@
 </script>
 </body>
 </html>
+
