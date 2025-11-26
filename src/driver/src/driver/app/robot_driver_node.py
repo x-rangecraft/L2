@@ -575,12 +575,12 @@ class RobotDriverNode(Node):
             interval = _RECONNECT_INTERVALS[min(attempt - 1, len(_RECONNECT_INTERVALS) - 1)]
             self._logger.info('[reconnect] 第 %d 次尝试，等待 %d 秒后重连', attempt, interval)
 
-        # 1. 断开旧连接（清理状态，保留线程钩子以便继续监听异常）
-        try:
-            if self._hardware_supervisor.connected:
-                self._hardware_supervisor.disconnect(for_reconnect=True)
-        except Exception as e:
-            self._logger.warning('[reconnect] 断开旧连接失败: %s', e)
+            # 1. 断开旧连接（清理状态，保留线程钩子以便继续监听异常）
+            try:
+                if self._hardware_supervisor.connected:
+                    self._hardware_supervisor.disconnect(for_reconnect=True)
+            except Exception as e:
+                self._logger.warning('[reconnect] 断开旧连接失败: %s', e)
 
             # 2. 等待间隔（可被 shutdown 中断）
             if self._shutdown_event.wait(timeout=interval):
