@@ -73,6 +73,31 @@ status_cn() {
     log "提示(${prefix}): ${msg}"
 }
 
+# 清理旧日志，保留最近 N 个
+cleanup_old_logs() {
+    local keep_count=2
+
+    # 清理运行日志（robot_driver_*.log）
+    local driver_logs
+    driver_logs=$(ls -1t "${LOG_DIR}"/robot_driver_*.log 2>/dev/null | tail -n +$((keep_count + 1)) || true)
+    if [[ -n "${driver_logs}" ]]; then
+        local count
+        count=$(echo "${driver_logs}" | wc -l)
+        echo "${driver_logs}" | xargs rm -f 2>/dev/null || true
+        log "Cleaned up ${count} old robot_driver log files, keeping last ${keep_count}"
+    fi
+
+    # 清理编译日志（build_*）
+    local build_logs
+    build_logs=$(ls -1dt "${WORKSPACE_ROOT}/log/build_"* 2>/dev/null | tail -n +$((keep_count + 1)) || true)
+    if [[ -n "${build_logs}" ]]; then
+        local count
+        count=$(echo "${build_logs}" | wc -l)
+        echo "${build_logs}" | xargs rm -rf 2>/dev/null || true
+        log "Cleaned up ${count} old build log directories, keeping last ${keep_count}"
+    fi
+}
+
 cleanup_processes() {
     log "Killing existing robot_driver processes (if any)..."
     # 关闭所有 ros2 launch robot_driver 进程
@@ -460,6 +485,9 @@ LAUNCH_ARGS=("can_channel:=${CAN_CHANNEL}" "xyz_only_mode:=${XYZ_ONLY_MODE}" "ze
 if [[ -n "${PARAM_FILE}" ]]; then
     LAUNCH_ARGS+=("params:=${PARAM_FILE}")
 fi
+
+# 清理旧日志文件（保留最近 2 个）
+cleanup_old_logs
 
 cleanup_processes
 
