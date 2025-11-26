@@ -240,6 +240,7 @@ class HardwareCommander:
                 self._logger.error('Failed to initialize I2RT robot: %s', exc)
                 self._robot = None
                 self._kinematics = None
+                raise RuntimeError(f'Failed to initialize I2RT robot: {exc}') from exc
         else:
             self._logger.info('Hardware commander connected to %s (dummy mode)', can_channel)
 

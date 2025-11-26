@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import sys
 import time
@@ -47,10 +48,15 @@ def _run_reset_script(path_str: str) -> None:
 
 
 def _bring_up_interface(interface: str, bitrate: int) -> None:
+    """将 CAN 接口设置为 UP 状态。需要 root 权限或 sudo。"""
+    # 如果不是 root 用户，使用 sudo
+    use_sudo = os.geteuid() != 0
+    sudo_prefix = ['sudo'] if use_sudo else []
+
     commands = [
-        ['ip', 'link', 'set', interface, 'down'],
-        ['ip', 'link', 'set', interface, 'type', 'can', 'bitrate', str(bitrate)],
-        ['ip', 'link', 'set', interface, 'up'],
+        sudo_prefix + ['ip', 'link', 'set', interface, 'down'],
+        sudo_prefix + ['ip', 'link', 'set', interface, 'type', 'can', 'bitrate', str(bitrate)],
+        sudo_prefix + ['ip', 'link', 'set', interface, 'up'],
     ]
     for cmd in commands:
         LOGGER.info('Executing: %s', ' '.join(cmd))
@@ -61,11 +67,22 @@ def _bring_up_interface(interface: str, bitrate: int) -> None:
 
 
 def _check_interface(interface: str) -> bool:
+    """检查 CAN 接口是否处于 UP 状态。"""
     result = subprocess.run(['ip', '-details', 'link', 'show', interface], capture_output=True, text=True)
     if result.returncode != 0:
+        LOGGER.warning('Failed to query interface %s: %s', interface, result.stderr.strip())
         return False
     output = result.stdout.lower()
-    return 'state up' in output or 'can' in output
+    # 必须同时满足：是 CAN 接口 且 状态为 UP
+    is_can = 'link/can' in output or 'type can' in output
+    is_up = 'state up' in output
+    if not is_can:
+        LOGGER.warning('Interface %s is not a CAN interface', interface)
+        return False
+    if not is_up:
+        LOGGER.warning('CAN interface %s exists but state is not UP', interface)
+        return False
+    return True
 
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:

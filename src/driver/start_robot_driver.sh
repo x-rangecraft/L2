@@ -21,6 +21,7 @@ fi
 touch "${LOG_FILE}"
 
 STOP_ONLY=0
+FORCE_STOP=0
 LOG_STDERR_MIRROR=1
 VERBOSE_CONSOLE=0
 
@@ -45,6 +46,7 @@ Options:
   --no-xyz-only          恢复全姿态控制（默认）
   --params <file>        指定参数 YAML（默认 driver/config/robot_driver_config.yaml，若存在）
   --stop                 停止后台守护进程
+  --force                与 --stop 一起使用，跳过服务调用直接强制杀进程
   --verbose              控制台打印更多启动进度 / 状态
   -h, --help             显示本帮助
 USAGE
@@ -173,7 +175,16 @@ report_startup_sequence() {
 }
 
 stop_daemon() {
+    local force_mode="${1:-0}"
     status_cn "正在查找需要关闭的 robot_driver 相关进程..."
+
+    # 如果是强制模式，直接跳到进程级别清理
+    if [[ ${force_mode} -eq 1 ]]; then
+        status_cn "强制模式：跳过服务调用，直接杀进程" "WARN"
+        cleanup_processes
+        status_cn "强制停止完成" "INFO"
+        return 0
+    fi
 
     local service_attempted=0
     local service_success=0
@@ -370,6 +381,10 @@ while [[ $# -gt 0 ]]; do
             STOP_ONLY=1
             shift
             ;;
+        --force)
+            FORCE_STOP=1
+            shift
+            ;;
         -h|--help)
             usage
             exit 0
@@ -385,7 +400,7 @@ done
 if [[ ${STOP_ONLY} -eq 1 ]]; then
     ensure_command ros2
     source_ros_env
-    if stop_daemon; then
+    if stop_daemon "${FORCE_STOP:-0}"; then
         exit 0
     fi
     exit 1

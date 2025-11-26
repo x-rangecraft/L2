@@ -129,16 +129,26 @@ class HardwareSupervisor:
         self._connected = True
         self._logger.info('[robot_start] 机械臂连接成功')
 
-    def disconnect(self) -> None:
-        """断开硬件连接。"""
-        self._stop_event.set()
-        self._remove_thread_hook()
+    def disconnect(self, *, for_reconnect: bool = False) -> None:
+        """断开硬件连接。
+
+        Args:
+            for_reconnect: 如果为 True，保留线程钩子和 stop_event 状态，
+                          以便后续重连时能继续监听异常。
+        """
+        if not for_reconnect:
+            self._stop_event.set()
+            self._remove_thread_hook()
+
         try:
             self._commander.disconnect()
         except Exception as exc:
             self._logger.warning('Error disconnecting commander: %s', exc)
+
         self._connected = False
-        self._logger.info('Hardware disconnected')
+        # 重置 first_attempt，让下次 connect 执行完整的 CAN 清理流程
+        self._first_attempt = True
+        self._logger.info('Hardware disconnected (for_reconnect=%s)', for_reconnect)
 
     def connect_with_retry(self, max_attempts: int = 0, backoff: float = 0.0) -> bool:
         """带重试的连接。
@@ -200,9 +210,31 @@ class HardwareSupervisor:
                 self._on_recovery_needed(message or 'thread_exception')
 
     def _should_attempt_recovery(self, message: str) -> bool:
+        """检查异常消息是否表示需要硬件恢复。
+
+        关键词来自本地 I2RT SDK 代码分析：
+        - motor_chain_robot.py: "motor chain is not running"
+        - dm_driver.py: "motors have errors", "dm error"
+        - can_interface.py: "fail to communicate", "motor timeout"
+        """
         if not message:
             return False
-        keywords = ('motorchainrobot', 'dmchain', 'loss communication', 'can0', 'i2rt')
+        keywords = (
+            # 来自 motor_chain_robot.py
+            'motorchainrobot',
+            'motor chain is not running',
+            # 来自 dm_driver.py
+            'dmchain',
+            'motors have errors',
+            'dm error',
+            # 来自 can_interface.py
+            'fail to communicate',
+            'motor timeout',
+            # CAN 接口相关
+            'can0', 'can1',
+            # 保留原有
+            'loss communication', 'i2rt',
+        )
         return any(key in message for key in keywords)
 
     # ------------------------------------------------------------------ misc

@@ -18,6 +18,7 @@ class RobotState(Enum):
     CONNECTING = "connecting"          # 第一阶段：异步任务执行中（CAN准备、硬件连接）
     CALIBRATING = "calibrating"        # 第二阶段：扩展任务执行中（安全位姿、零重力）
     READY = "ready"                    # 完全就绪，可接受外部请求
+    RECONNECTING = "reconnecting"      # 断连后重连中
     SHUTTING_DOWN = "shutting_down"    # 正在关闭
     ERROR = "error"                    # 错误状态，启动失败
 from rclpy.executors import MultiThreadedExecutor
@@ -51,9 +52,11 @@ _SAFE_POSE_TIMEOUT_S = 10.0
 _SAFE_POSE_EXIT_ZERO_GRAVITY = True
 _SAFE_POSE_RELATIVE = False
 _SAFE_POSE_SETTLE_TIME = 1.5
-_SAFE_POSE_TOLERANCE = 0.05
+_SAFE_POSE_TOLERANCE = 0.08
 _ROBOT_ACTION_DEFAULT_SPEED = 0.9
 _ROBOT_ACTION_DEFAULT_TIMEOUT = 15.0
+# 重连间隔：20s -> 40s -> 60s -> 2min -> 5min -> 10min（之后保持10min）
+_RECONNECT_INTERVALS = [20, 40, 60, 120, 300, 600]
 
 
 class RobotDriverNode(Node):
@@ -548,14 +551,59 @@ class RobotDriverNode(Node):
         self._logger.error('[robot_start] 启动失败，进入错误状态')
 
     def _on_hardware_recovery_needed(self, reason: str) -> None:
-        """硬件恢复回调：当检测到硬件异常时调用。"""
+        """硬件恢复回调：检测到硬件异常时触发重连。"""
         self._logger.warning('硬件需要恢复: %s', reason)
         with self._state_lock:
-            if self._state == RobotState.SHUTTING_DOWN:
-                return
-            self._state = RobotState.ERROR
+            if self._state in (RobotState.SHUTTING_DOWN, RobotState.RECONNECTING):
+                return  # 已在关闭或重连中，忽略
+            self._state = RobotState.RECONNECTING
             self._startup_error = reason
-        # 可以在这里触发重连逻辑
+
+        # 启动重连线程
+        threading.Thread(
+            target=self._reconnect_loop,
+            name='hardware_reconnect',
+            daemon=True,
+        ).start()
+
+    def _reconnect_loop(self) -> None:
+        """重连循环：递增间隔重试，直到成功或节点关闭。"""
+        attempt = 0
+
+        while not self._shutdown_event.is_set():
+            attempt += 1
+            interval = _RECONNECT_INTERVALS[min(attempt - 1, len(_RECONNECT_INTERVALS) - 1)]
+            self._logger.info('[reconnect] 第 %d 次尝试，等待 %d 秒后重连', attempt, interval)
+
+        # 1. 断开旧连接（清理状态，保留线程钩子以便继续监听异常）
+        try:
+            if self._hardware_supervisor.connected:
+                self._hardware_supervisor.disconnect(for_reconnect=True)
+        except Exception as e:
+            self._logger.warning('[reconnect] 断开旧连接失败: %s', e)
+
+            # 2. 等待间隔（可被 shutdown 中断）
+            if self._shutdown_event.wait(timeout=interval):
+                self._logger.info('[reconnect] 收到 shutdown 信号，停止重连')
+                return
+
+            # 3. 尝试重新连接
+            with self._state_lock:
+                self._state = RobotState.CONNECTING
+            self._logger.info('[reconnect] 正在尝试连接硬件...')
+
+            try:
+                self._hardware_supervisor.connect()
+                self._logger.info('[reconnect] 硬件连接成功，开始 Phase 2 校准')
+                # 4. 成功后重新执行 Phase 2（安全位姿 + 零重力）
+                self._start_phase2()
+                return  # 成功退出循环
+            except Exception as e:
+                self._logger.error('[reconnect] 连接失败: %s', e)
+                with self._state_lock:
+                    self._state = RobotState.RECONNECTING
+                    self._startup_error = str(e)
+                # 继续下一次循环
 
     # ------------------------------------------------------------------ services
     def _handle_get_state_service(self, _request: Trigger.Request, response: Trigger.Response):
@@ -613,11 +661,26 @@ class RobotDriverNode(Node):
         return response
 
     def _execute_orderly_shutdown(self) -> tuple[bool, str]:
-        # Phase 1: 通过 SafetyPose action 回到安全位姿（此时保持 READY 状态）
-        if not self._perform_safety_pose_shutdown():
-            msg = 'SafetyPose 动作执行失败，无法安全停机'
-            self._logger.error(msg)
-            return False, msg
+        # 检查是否需要跳过 SafetyPose（硬件已断开或正在重连）
+        with self._state_lock:
+            current_state = self._state
+        skip_safety_pose = (
+            current_state == RobotState.RECONNECTING
+            or not self._hardware_supervisor.connected
+        )
+
+        if skip_safety_pose:
+            self._logger.warning(
+                'shutdown: 跳过 SafetyPose（state=%s, connected=%s）',
+                current_state.value,
+                self._hardware_supervisor.connected,
+            )
+        else:
+            # Phase 1: 通过 SafetyPose action 回到安全位姿（此时保持 READY 状态）
+            if not self._perform_safety_pose_shutdown():
+                msg = 'SafetyPose 动作执行失败，无法安全停机'
+                self._logger.error(msg)
+                return False, msg
 
         # SafetyPose 完成后，切换到 SHUTTING_DOWN 状态
         with self._state_lock:
