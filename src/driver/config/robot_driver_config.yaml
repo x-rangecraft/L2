@@ -23,6 +23,11 @@ robot_driver:
     safety_pose_action: /robot_driver/action/safety_pose
     zero_gravity_service: /robot_driver/service/zero_gravity
     can_reset_script: ""
+    can_cleanup_script: src/driver/scripts/cleanup_can_interface.sh
+    can_cleanup_force: true
+    can_cleanup_on_recover: true
+    hardware_reconnect_backoff_s: 5.0
+    hardware_reconnect_max_attempts: 0
     joint_command_mode: position
     joint_command_rate_limit: 0.5
     enable_joint_velocity_fuse: false

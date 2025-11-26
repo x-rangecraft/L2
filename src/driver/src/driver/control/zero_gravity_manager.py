@@ -1,6 +1,8 @@
 """Utility class for managing zero-gravity state and ROS service exposure."""
 from __future__ import annotations
 
+from typing import Callable, Optional
+
 from rclpy.node import Node
 from std_srvs.srv import SetBool
 
@@ -16,10 +18,18 @@ class ZeroGravityManager:
     state to make it easy for higher level modules to query.
     """
 
-    def __init__(self, node: Node, commander: HardwareCommander, *, service_name: str) -> None:
+    def __init__(
+        self,
+        node: Node,
+        commander: HardwareCommander,
+        *,
+        service_name: str,
+        wait_for_ready: Optional[Callable[[float], bool]] = None,
+    ) -> None:
         self._commander = commander
         self._logger = get_logger('zero_gravity_manager')
         self._current_state = commander.get_zero_gravity()
+        self._wait_for_ready = wait_for_ready
         self._service = node.create_service(SetBool, service_name, self._handle_service_request)
 
     @property
@@ -57,6 +67,14 @@ class ZeroGravityManager:
 
     # ------------------------------------------------------------------ ROS callbacks
     def _handle_service_request(self, request: SetBool.Request, response: SetBool.Response):
+        # 等待机械臂就绪
+        if self._wait_for_ready is not None:
+            if not self._wait_for_ready(60.0):
+                self._logger.warning('zero_gravity 服务：等待机械臂就绪超时')
+                response.success = False
+                response.message = '等待机械臂就绪超时，无法执行零重力切换'
+                return response
+
         success = self.set_state(request.data)
         response.success = success
         if success:

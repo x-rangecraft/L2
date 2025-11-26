@@ -45,6 +45,11 @@ class DriverParameters:
     safety_pose_action: str
     zero_gravity_service: str
     can_reset_script: str
+    can_cleanup_script: str
+    can_cleanup_force: bool
+    can_cleanup_on_recover: bool
+    hardware_reconnect_backoff_s: float
+    hardware_reconnect_max_attempts: int
     joint_command: JointCommandConfig
     enable_joint_velocity_fuse: bool
     safe_pose_fallback: SafePoseFallback
@@ -110,6 +115,11 @@ def declare_and_get_parameters(node: Node) -> DriverParameters:
         safety_pose_action=_declare('safety_pose_action', '/robot_driver/action/safety_pose'),
         zero_gravity_service=_declare('zero_gravity_service', '/robot_driver/service/zero_gravity'),
         can_reset_script=_declare('can_reset_script', ''),
+        can_cleanup_script=_declare('can_cleanup_script', 'src/driver/scripts/cleanup_can_interface.sh'),
+        can_cleanup_force=bool(_declare('can_cleanup_force', True)),
+        can_cleanup_on_recover=bool(_declare('can_cleanup_on_recover', True)),
+        hardware_reconnect_backoff_s=float(_declare('hardware_reconnect_backoff_s', 5.0)),
+        hardware_reconnect_max_attempts=int(_declare('hardware_reconnect_max_attempts', 0)),
         joint_command=joint_cfg,
         enable_joint_velocity_fuse=bool(_declare('enable_joint_velocity_fuse', False)),
         safe_pose_fallback=safe_pose_fallback,

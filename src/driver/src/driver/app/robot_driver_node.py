@@ -1,12 +1,27 @@
 """ROS 2 entry point for robot_driver."""
 from __future__ import annotations
 
+import asyncio
 import math
 import threading
 import time
 import traceback
+from enum import Enum
+from typing import Optional
 
 import rclpy
+
+
+class RobotState(Enum):
+    """机械臂状态枚举。"""
+    INITIALIZING = "initializing"      # 正在初始化
+    CONNECTING = "connecting"          # 正在连接硬件
+    SAFE_POSING = "safe_posing"        # 正在执行安全位姿
+    READY = "ready"                    # 就绪，可以接受指令
+    BUSY = "busy"                      # 正在执行指令
+    SHUTTING_DOWN = "shutting_down"    # 正在关闭
+    ERROR = "error"                    # 错误状态
+from rclpy.executors import MultiThreadedExecutor
 from builtin_interfaces.msg import Duration
 from control_msgs.action import FollowJointTrajectory
 from geometry_msgs.msg import PoseStamped
@@ -24,6 +39,7 @@ from driver.control.joint_controler import JointControler
 from driver.control.state_publisher import StatePublisher
 from driver.control.end_effector_pose_publisher import EndEffectorPosePublisher
 from driver.control.zero_gravity_manager import ZeroGravityManager
+from driver.app.hardware_supervisor import HardwareSupervisor
 from driver.hardware.hardware_commander import HardwareCommander
 from driver.hardware.kinematics_solver import KinematicsSolver
 from driver.hardware.robot_description_loader import RobotDescriptionLoader
@@ -55,6 +71,7 @@ class RobotDriverNode(Node):
             self,
             self._commander,
             service_name=self._params.zero_gravity_service,
+            wait_for_ready=self.wait_for_ready,
         )
         # SAFE_POSE management is handled by a dedicated manager so that
         # HardwareCommander remains a thin hardware abstraction.
@@ -101,10 +118,50 @@ class RobotDriverNode(Node):
         self._safety_client_group = ReentrantCallbackGroup()
         self._robot_goal_lock = threading.Lock()
         self._robot_joint_goals: dict[int, ActionClient.GoalHandle] = {}
+        self._hardware_supervisor: Optional[HardwareSupervisor] = None
+        self._shutdown_event = threading.Event()
+        self._supervisor_shutdown_done = False
+
+        # 状态管理
+        self._state = RobotState.INITIALIZING
+        self._state_lock = threading.Lock()
+        self._ready_condition = threading.Condition(self._state_lock)
+        self._startup_error: Optional[str] = None
 
         self._subscriptions = []
         self._create_ros_interfaces()
-        self._connect_hardware()
+
+        # 创建 HardwareSupervisor（不在 __init__ 里连接，等异步启动流程）
+        self._hardware_supervisor = HardwareSupervisor(
+            commander=self._commander,
+            params=self._params,
+            on_recovery_needed=self._on_hardware_recovery_needed,
+        )
+
+        self._shutdown_group = ReentrantCallbackGroup()
+        self._shutdown_service = self.create_service(
+            Trigger,
+            '/robot_driver/service/shutdown',
+            self._handle_shutdown_service,
+            callback_group=self._shutdown_group,
+        )
+
+        # 状态查询服务
+        self._state_service = self.create_service(
+            Trigger,
+            '/robot_driver/service/get_state',
+            self._handle_get_state_service,
+            callback_group=self._shutdown_group,
+        )
+
+        # 创建异步启动定时器（executor 运行后触发）
+        self._startup_group = ReentrantCallbackGroup()
+        self._startup_triggered = False
+        self._startup_timer = self.create_timer(
+            0.5,
+            self._trigger_async_startup,
+            callback_group=self._startup_group,
+        )
 
     # ------------------------------------------------------------------ setup helpers
     def _create_ros_interfaces(self) -> None:
@@ -203,18 +260,6 @@ class RobotDriverNode(Node):
             cancel_callback=self._safety_cancel_callback,
             callback_group=self._safety_action_group,
         )
-
-    def _connect_hardware(self) -> None:
-        try:
-            reset_script = self._params.can_reset_script or None
-            self._commander.connect(self._params.can_channel, reset_script=reset_script)
-            # 启动阶段不再自动回 SAFE_POSE；是否执行 SAFE_POSE 由外部脚本
-            # （例如 start_robot_driver.sh 调用 /robot_driver/action/safety_pose）
-            # 进行编排，便于开发阶段频繁重启和调试。
-        except Exception as exc:  # pragma: no cover
-            self._logger.error('Failed to connect hardware: %s', exc)
-            self.get_logger().error(traceback.format_exc())
-            raise
 
     # ------------------------------------------------------------------ subscribers
     def _on_robot_command(self, msg: PoseStamped) -> None:
@@ -348,7 +393,171 @@ class RobotDriverNode(Node):
             self._logger.error('Safety stop handler failed: %s', exc)
             self.get_logger().error(traceback.format_exc())
 
+    # ------------------------------------------------------------------ state management
+    def wait_for_ready(self, timeout: float = 60.0) -> bool:
+        """等待机械臂就绪（READY 状态）。
+
+        用于服务/action 在执行前等待机械臂连接完成。
+
+        Args:
+            timeout: 最大等待时间（秒）
+
+        Returns:
+            是否成功进入 READY 状态
+        """
+        with self._ready_condition:
+            return self._ready_condition.wait_for(
+                lambda: self._state == RobotState.READY or self._state == RobotState.ERROR,
+                timeout=timeout,
+            ) and self._state == RobotState.READY
+
+    def is_ready(self) -> bool:
+        """检查机械臂是否就绪。"""
+        with self._state_lock:
+            return self._state == RobotState.READY
+
+    # ------------------------------------------------------------------ async startup
+    def _trigger_async_startup(self) -> None:
+        """定时器回调：触发异步启动流程。"""
+        if self._startup_triggered:
+            return
+        self._startup_triggered = True
+        try:
+            self._startup_timer.cancel()
+        except Exception:
+            pass
+        # 在后台线程执行启动流程
+        threading.Thread(
+            target=self._run_async_startup,
+            name='async_startup',
+            daemon=True,
+        ).start()
+
+    def _run_async_startup(self) -> None:
+        """异步启动流程：第一阶段连接硬件，第二阶段状态校准。"""
+        max_retries = 3
+
+        # ======================== 第一阶段：硬件连接 ========================
+        for attempt in range(1, max_retries + 1):
+            try:
+                with self._state_lock:
+                    self._state = RobotState.CONNECTING
+                self._logger.info('[robot_start] 开始硬件连接 (attempt %d)', attempt)
+
+                # 重试前先断开（如果已连接）
+                if attempt > 1 and self._hardware_supervisor.connected:
+                    self._logger.info('[robot_start] 重试前断开旧连接')
+                    try:
+                        self._hardware_supervisor.disconnect()
+                    except Exception as disc_exc:
+                        self._logger.warning('[robot_start] 断开旧连接失败: %s', disc_exc)
+
+                self._hardware_supervisor.connect()
+                self._logger.info('[robot_start] 机械臂连接成功')
+
+                # 连接成功，进入 READY 状态，通知所有等待者
+                with self._ready_condition:
+                    self._state = RobotState.READY
+                    self._startup_error = None
+                    self._ready_condition.notify_all()
+                self._logger.info('[robot_start] 节点启动成功，可接受控制指令')
+                break  # 退出重试循环，进入第二阶段
+
+            except Exception as exc:
+                self._logger.error('[robot_start] 硬件连接尝试 %d 失败: %s', attempt, exc)
+                with self._state_lock:
+                    self._startup_error = str(exc)
+                if attempt < max_retries:
+                    time.sleep(5.0)
+                else:
+                    self._logger.error('[robot_start] 硬件连接失败，已达最大重试次数')
+                    with self._ready_condition:
+                        self._state = RobotState.ERROR
+                        self._ready_condition.notify_all()  # 通知等待者（失败）
+                    return  # 第一阶段失败，不进入第二阶段
+
+        # ======================== 第二阶段：启动后状态校准 ========================
+        self._logger.info('[robot_start] 开始启动后状态校准')
+
+        # 2.1 安全位姿复位
+        try:
+            self._logger.info('[robot_start] 安全位姿复位中')
+            safe_pose_ok = self._execute_startup_safe_pose()
+            if safe_pose_ok:
+                self._logger.info('[robot_start] 安全位姿复位成功')
+            else:
+                self._logger.warning('[robot_start] 安全位姿复位失败，但不影响机械臂可用性')
+        except Exception as exc:
+            self._logger.warning('[robot_start] 安全位姿复位异常: %s', exc)
+
+        self._logger.info('[robot_start] 启动结束')
+
+    def _execute_startup_safe_pose(self) -> bool:
+        """执行启动时的安全位姿复位（通过 SafetyPose action）。"""
+        if not self._safety_pose_client.wait_for_server(timeout_sec=10.0):
+            self._logger.error('[robot_start] SafetyPose action 不可用')
+            return False
+
+        goal = SafetyPose.Goal()
+        goal.enable_zero_gravity_after = bool(self._params.zero_gravity_default)
+
+        send_future = self._safety_pose_client.send_goal_async(goal)
+        if not self._spin_until_future(send_future, 30.0):
+            self._logger.error('[robot_start] SafetyPose 目标发送超时')
+            return False
+
+        goal_handle = send_future.result()
+        if goal_handle is None or not getattr(goal_handle, 'accepted', False):
+            self._logger.error('[robot_start] SafetyPose 目标被拒绝')
+            return False
+
+        result_future = goal_handle.get_result_async()
+        if not self._spin_until_future(result_future, 180.0):
+            self._logger.error('[robot_start] SafetyPose 执行超时')
+            return False
+
+        try:
+            action_result = result_future.result().result
+        except Exception as exc:
+            self._logger.error('[robot_start] 读取 SafetyPose 结果失败: %s', exc)
+            return False
+
+        if not getattr(action_result, 'success', False):
+            self._logger.error(
+                '[robot_start] SafetyPose 执行失败 result_code=%s last_error=%s',
+                getattr(action_result, 'result_code', ''),
+                getattr(action_result, 'last_error', ''),
+            )
+            return False
+
+        self._logger.info(
+            '[robot_start] SafetyPose 完成 (max |Δ|=%.4f rad)',
+            float(getattr(action_result, 'max_error', float('nan'))),
+        )
+        return True
+
+    def _on_hardware_recovery_needed(self, reason: str) -> None:
+        """硬件恢复回调：当检测到硬件异常时调用。"""
+        self._logger.warning('硬件需要恢复: %s', reason)
+        with self._state_lock:
+            if self._state == RobotState.SHUTTING_DOWN:
+                return
+            self._state = RobotState.ERROR
+            self._startup_error = reason
+        # 可以在这里触发重连逻辑
+
     # ------------------------------------------------------------------ services
+    def _handle_get_state_service(self, _request: Trigger.Request, response: Trigger.Response):
+        """返回当前机械臂状态。"""
+        with self._state_lock:
+            state = self._state
+            error = self._startup_error
+        response.success = (state == RobotState.READY)
+        response.message = f'state={state.value}'
+        if error:
+            response.message += f', error={error}'
+        return response
+
     def _handle_self_check(self, _request: Trigger.Request, response: Trigger.Response):
         """Lightweight stub for /robot_driver/service/self_check.
 
@@ -361,8 +570,152 @@ class RobotDriverNode(Node):
         response.message = 'Self-check is disabled; use external diagnostics instead.'
         return response
 
+    def _handle_shutdown_service(self, _request: Trigger.Request, response: Trigger.Response):
+        if self._shutdown_event.is_set():
+            response.success = False
+            response.message = '关闭流程已在进行或已完成'
+            return response
+
+        with self._state_lock:
+            if self._state == RobotState.SHUTTING_DOWN:
+                response.success = False
+                response.message = '关闭流程已在进行'
+                return response
+            self._state = RobotState.SHUTTING_DOWN
+
+        self._logger.warning('收到 shutdown 服务请求，开始安全停机流程')
+        self._shutdown_event.set()
+
+        shutdown_ok, error_msg = self._execute_orderly_shutdown()
+        if not shutdown_ok:
+            self._shutdown_event.clear()
+            with self._state_lock:
+                self._state = RobotState.ERROR
+                self._startup_error = error_msg
+            response.success = False
+            response.message = error_msg or '安全停机失败'
+            return response
+
+        response.success = True
+        response.message = 'robot_driver 已安全关闭'
+        threading.Thread(target=self._finalize_shutdown, name='robot_driver_exit', daemon=True).start()
+        return response
+
+    def _execute_orderly_shutdown(self) -> tuple[bool, str]:
+        # Phase 1: 通过 SafetyPose action 回到安全位姿
+        if not self._perform_safety_pose_shutdown():
+            msg = 'SafetyPose 动作执行失败，无法安全停机'
+            self._logger.error(msg)
+            return False, msg
+
+        self._logger.info('SafetyPose 停机动作完成，开始关闭硬件链接')
+
+        # Phase 2: 断开硬件连接
+        try:
+            if self._hardware_supervisor and not self._supervisor_shutdown_done:
+                self._hardware_supervisor.disconnect()
+                self._supervisor_shutdown_done = True
+            else:
+                self._commander.disconnect()
+        except Exception as exc:
+            msg = f'硬件关闭失败: {exc}'
+            self._logger.error(msg)
+            return False, msg
+
+        self._logger.info('硬件链接已关闭，等待 ROS 退出')
+        return True, ''
+
+    def _perform_safety_pose_shutdown(self) -> bool:
+        if not self._safety_pose_client.wait_for_server(timeout_sec=5.0):
+            self._logger.error('shutdown: SafetyPose action 不可用')
+            return False
+
+        goal = SafetyPose.Goal()
+        goal.enable_zero_gravity_after = False
+        send_future = self._safety_pose_client.send_goal_async(goal)
+        if not self._spin_until_future(send_future, 30.0):
+            self._logger.error('shutdown: SafetyPose 目标发送超时')
+            return False
+
+        goal_handle = send_future.result()
+        if goal_handle is None or not getattr(goal_handle, 'accepted', False):
+            self._logger.error('shutdown: SafetyPose 目标被拒绝')
+            return False
+
+        result_future = goal_handle.get_result_async()
+        if not self._spin_until_future(result_future, 180.0):
+            self._logger.error('shutdown: SafetyPose 返回结果超时')
+            return False
+
+        try:
+            action_result = result_future.result().result
+        except Exception as exc:  # pragma: no cover - defensive guard
+            self._logger.error('shutdown: 读取 SafetyPose 结果失败: %s', exc)
+            return False
+
+        if not getattr(action_result, 'success', False):
+            self._logger.error(
+                'shutdown: SafetyPose 失败 result_code=%s last_error=%s',
+                getattr(action_result, 'result_code', ''),
+                getattr(action_result, 'last_error', ''),
+            )
+            return False
+
+        self._logger.info(
+            'shutdown: SafetyPose 完成 (max |Δ|=%.4f rad)',
+            float(getattr(action_result, 'max_error', float('nan'))),
+        )
+        return True
+
+    def _spin_until_future(self, future, timeout: float) -> bool:
+        try:
+            rclpy.spin_until_future_complete(self, future, timeout_sec=timeout)
+        except Exception as exc:
+            self._logger.error('spin_until_future_complete 异常: %s', exc)
+            return False
+        return future.done()
+
+    def _finalize_shutdown(self) -> None:
+        # 等待服务响应发送完毕后再关闭 ROS，避免 race condition。
+        time.sleep(0.2)
+        try:
+            rclpy.shutdown()
+        except Exception:
+            pass
+
     # ------------------------------------------------------------------ action server
+    def _wait_ready_for_command(self, timeout: float = 60.0) -> tuple[bool, str]:
+        """等待机械臂就绪，用于 action 执行前。
+
+        Returns:
+            (是否就绪, 原因说明)
+        """
+        with self._state_lock:
+            state = self._state
+
+        # 如果已经就绪，直接返回
+        if state == RobotState.READY:
+            return True, ''
+
+        # 如果正在关闭或已出错，不等待
+        if state == RobotState.SHUTTING_DOWN:
+            return False, '机械臂正在关闭'
+        if state == RobotState.ERROR:
+            return False, f'机械臂处于错误状态: {self._startup_error or "unknown"}'
+
+        # 等待就绪
+        self._logger.info('等待机械臂就绪 (当前状态: %s)', state.value)
+        if self.wait_for_ready(timeout):
+            return True, ''
+        else:
+            with self._state_lock:
+                state = self._state
+            if state == RobotState.ERROR:
+                return False, f'机械臂启动失败: {self._startup_error or "unknown"}'
+            return False, f'等待机械臂就绪超时 (当前状态: {state.value})'
+
     def _goal_callback(self, _goal_request) -> GoalResponse:
+        # 始终接受 goal，在 execute 中等待就绪
         return GoalResponse.ACCEPT
 
     def _cancel_callback(self, goal_handle) -> CancelResponse:
@@ -370,6 +723,16 @@ class RobotDriverNode(Node):
         return CancelResponse.ACCEPT
 
     async def _execute_trajectory(self, goal_handle):
+        # 等待机械臂就绪
+        ready, reason = self._wait_ready_for_command(timeout=60.0)
+        if not ready:
+            self.get_logger().warning('Trajectory execution aborted: %s', reason)
+            goal_handle.abort()
+            result = FollowJointTrajectory.Result()
+            result.error_code = FollowJointTrajectory.Result.INVALID_GOAL
+            result.error_string = reason
+            return result
+
         try:
             result = self._motion_controller.execute_trajectory(goal_handle)
             goal_handle.succeed()
@@ -383,6 +746,8 @@ class RobotDriverNode(Node):
             return result
 
     def _joint_goal_callback(self, _goal_request) -> GoalResponse:
+        # JointCommand 始终接受，在 execute 中等待就绪
+        # 注意：SafetyPose action 内部也使用 JointCommand，所以不能拒绝
         return GoalResponse.ACCEPT
 
     def _joint_cancel_callback(self, goal_handle) -> CancelResponse:
@@ -390,6 +755,17 @@ class RobotDriverNode(Node):
         return CancelResponse.ACCEPT
 
     async def _execute_joint_action(self, goal_handle):
+        # 等待机械臂就绪（SafetyPose action 内部调用时状态已是 READY，会立即返回）
+        ready, reason = self._wait_ready_for_command(timeout=60.0)
+        if not ready:
+            self._logger.warning('Joint action aborted: %s', reason)
+            goal_handle.abort()
+            result = JointCommand.Result()
+            result.success = False
+            result.result_code = 'NOT_READY'
+            result.last_error = reason
+            return result
+
         try:
             result = self._motion_controller.execute_joint_action(goal_handle)
             if result.success:
@@ -409,6 +785,7 @@ class RobotDriverNode(Node):
             return result
 
     def _robot_goal_callback(self, _goal_request) -> GoalResponse:
+        # RobotCommand 始终接受，在 execute 中等待就绪
         return GoalResponse.ACCEPT
 
     def _robot_cancel_callback(self, goal_handle) -> CancelResponse:
@@ -423,6 +800,12 @@ class RobotDriverNode(Node):
         return CancelResponse.ACCEPT
 
     async def _execute_robot_action(self, goal_handle):
+        # 等待机械臂就绪
+        ready, reason = self._wait_ready_for_command(timeout=60.0)
+        if not ready:
+            self._logger.warning('Robot action aborted: %s', reason)
+            return self._robot_action_abort(goal_handle, reason, 'NOT_READY')
+
         goal = goal_handle.request
         label = goal.label or 'robot'
         label_tag = f' [{label}]' if label else ''
@@ -909,20 +1292,27 @@ class RobotDriverNode(Node):
         self._gripper_action.destroy()
         self._joint_action_client.destroy()
         self._ee_pose_publisher.shutdown()
-        self._commander.disconnect()
+        if self._hardware_supervisor and not self._supervisor_shutdown_done:
+            self._hardware_supervisor.disconnect()
+        elif not self._hardware_supervisor:
+            self._commander.disconnect()
         return super().destroy_node()
 
 
 def main(args=None):
     rclpy.init(args=args)
     node = RobotDriverNode()
+    executor = MultiThreadedExecutor()
+    executor.add_node(node)
     try:
-        rclpy.spin(node)
+        executor.spin()
     except KeyboardInterrupt:
         pass
     finally:
+        executor.shutdown()
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == '__main__':

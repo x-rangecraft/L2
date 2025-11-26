@@ -17,6 +17,7 @@ setup(
             'config/safe_pose_config.yaml',
         ]),
         ('share/' + package_name + '/launch', ['launch/robot_driver.launch.py']),
+        ('share/' + package_name + '/scripts', ['scripts/cleanup_can_interface.sh']),
     ],
     install_requires=['setuptools'],
     zip_safe=False,
