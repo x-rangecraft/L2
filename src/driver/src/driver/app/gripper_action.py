@@ -182,9 +182,15 @@ class GripperAction:
         speed_scale = goal.speed_scale if math.isfinite(goal.speed_scale) else 1.0
         speed_scale = max(0.0, min(1.0, speed_scale))
 
-        # Ensure JointCommand server is available.
-        if not self._joint_client.wait_for_server(timeout_sec=2.0):
-            msg = 'JointCommand action server unavailable for gripper'
+        # Check JointCommand server availability without blocking.
+        # NOTE: We use timeout_sec=0.0 for a non-blocking check because both
+        # GripperAction and JointCommand live in the same node. A blocking
+        # wait_for_server() would deadlock the executor since it cannot process
+        # callbacks while this coroutine is blocked.
+        if not self._joint_client.server_is_ready():
+            # Server not immediately available; this is unexpected since both
+            # actions are in the same node. Log and fail fast.
+            msg = 'JointCommand action server unavailable for gripper (same-node deadlock avoided)'
             self._logger.error(msg + '%s', label_tag)
             result.success = False
             result.result_code = 'JOINT_SERVER_UNAVAILABLE'

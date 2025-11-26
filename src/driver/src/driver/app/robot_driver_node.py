@@ -474,7 +474,14 @@ class RobotDriverNode(Node):
         """第二阶段步骤1：发送安全位姿 action。"""
         self._logger.info('[robot_start] 安全位姿复位中')
 
-        if not self._safety_pose_client.wait_for_server(timeout_sec=10.0):
+        # Use polling instead of blocking wait_for_server() to avoid potential
+        # deadlock issues. SafetyPose server is in the same node, should be ready quickly.
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline:
+            if self._safety_pose_client.server_is_ready():
+                break
+            time.sleep(0.1)
+        else:
             self._on_startup_failed('安全位姿复位失败: SafetyPose action server 不可用')
             return
 
@@ -703,7 +710,13 @@ class RobotDriverNode(Node):
         return True, ''
 
     def _perform_safety_pose_shutdown(self) -> bool:
-        if not self._safety_pose_client.wait_for_server(timeout_sec=5.0):
+        # Use polling instead of blocking wait_for_server() to avoid potential issues.
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            if self._safety_pose_client.server_is_ready():
+                break
+            time.sleep(0.1)
+        else:
             self._logger.error('shutdown: SafetyPose action 不可用')
             return False
 
@@ -745,11 +758,18 @@ class RobotDriverNode(Node):
         return True
 
     def _spin_until_future(self, future, timeout: float) -> bool:
-        try:
-            rclpy.spin_until_future_complete(self, future, timeout_sec=timeout)
-        except Exception as exc:
-            self._logger.error('spin_until_future_complete 异常: %s', exc)
-            return False
+        """Wait for a future to complete using polling instead of spin_until_future_complete.
+
+        This avoids potential executor deadlock issues when called from within
+        a callback. Since we use MultiThreadedExecutor, other threads can still
+        process callbacks to progress the future while this thread polls.
+        """
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if future.done():
+                return True
+            time.sleep(0.05)
+        self._logger.error('_spin_until_future 超时 (%.1fs)', timeout)
         return future.done()
 
     def _finalize_shutdown(self) -> None:
@@ -936,7 +956,9 @@ class RobotDriverNode(Node):
         feedback.last_error = ''
         goal_handle.publish_feedback(feedback)
 
-        if not self._joint_action_client.wait_for_server(timeout_sec=2.0):
+        # Non-blocking check: avoid deadlock since both RobotCommand and JointCommand
+        # are in the same node. A blocking wait_for_server() would stall the executor.
+        if not self._joint_action_client.server_is_ready():
             msg = 'JointCommand action server unavailable for robot action'
             self._logger.error(msg + label_tag)
             self._robot_action_logger.error('Goal%s aborted: %s', label_tag, msg)
@@ -1128,13 +1150,15 @@ class RobotDriverNode(Node):
             goal_handle.succeed()
             return result
 
-        if not self._joint_action_client.wait_for_server(timeout_sec=timeout):
+        # Non-blocking check: avoid deadlock since both SafetyPose and JointCommand
+        # are in the same node. A blocking wait_for_server() would stall the executor.
+        if not self._joint_action_client.server_is_ready():
             self._logger.error('Safety pose action%s: joint action server unavailable', label_tag)
             goal_handle.abort()
             result = SafetyPose.Result()
             result.success = False
             result.result_code = 'JOINT_SERVER_UNAVAILABLE'
-            result.last_error = 'Timed out waiting for /robot_driver/action/joint'
+            result.last_error = 'JointCommand server not ready in same node'
             result.max_error = float('nan')
             result.joint_action_code = 'UNSENT'
             return result

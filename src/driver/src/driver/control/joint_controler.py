@@ -10,7 +10,6 @@ from typing import Callable, Dict, Iterable, Optional, List, TYPE_CHECKING
 from builtin_interfaces.msg import Duration
 from control_msgs.action import FollowJointTrajectory
 from geometry_msgs.msg import PoseStamped
-from rclpy import spin_until_future_complete
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.node import Node
 from sensor_msgs.msg import JointState
@@ -89,49 +88,29 @@ class JointControler:
         return self._commander.get_zero_gravity()
 
     def _toggle_zero_gravity(self, enabled: bool, label_tag: str = '') -> bool:
-        """Toggle zero-gravity mode, preferring the ROS service for consistency."""
-        # Prefer using the ROS service so external observers see the same state transitions.
-        client = self._zero_gravity_client
-        if client is not None:
-            if not client.wait_for_service(timeout_sec=0.0):
-                self._logger.info(
-                    'Waiting for zero_gravity service (%s)', self._zero_gravity_service_name
-                )
-                if not client.wait_for_service(timeout_sec=self._ZERO_GRAVITY_SERVICE_TIMEOUT):
-                    self._logger.warning(
-                        'zero_gravity service unavailable; falling back to internal toggle%s',
-                        label_tag,
-                    )
-                    client = None
-            if client is not None:
-                request = SetBool.Request()
-                request.data = enabled
-                future = client.call_async(request)
-                if not spin_until_future_complete(
-                    self._node, future, timeout_sec=self._ZERO_GRAVITY_SERVICE_TIMEOUT
-                ):
-                    self._logger.error(
-                        'Timed out waiting for zero_gravity service response%s', label_tag
-                    )
-                    return False
-                response = future.result()
-                if response is None:
-                    self._logger.error('zero_gravity service returned no response%s', label_tag)
-                    return False
-                if not response.success:
-                    self._logger.error(
-                        'zero_gravity service rejected %s: %s%s',
-                        enabled,
-                        response.message,
-                        label_tag,
-                    )
-                    return False
-                return True
+        """Toggle zero-gravity mode using internal manager/commander.
 
-        # Fall back to manager or commander if service is unavailable.
+        NOTE: Previously this method tried to call the zero_gravity ROS service
+        using spin_until_future_complete(), which could deadlock the executor
+        when called from within an action execute callback. To ensure the driver
+        never blocks indefinitely, we now directly use the manager or commander
+        which are same-node objects and will not block.
+        """
+        # Use manager or commander directly to avoid blocking service calls.
+        # This ensures zero-gravity toggle never causes executor deadlock.
         if self._zero_gravity_manager is not None:
-            return self._zero_gravity_manager.set_state(enabled)
-        return self._commander.set_zero_gravity(enabled)
+            result = self._zero_gravity_manager.set_state(enabled)
+            if not result:
+                self._logger.warning(
+                    'zero_gravity manager failed to set state=%s%s', enabled, label_tag
+                )
+            return result
+        result = self._commander.set_zero_gravity(enabled)
+        if not result:
+            self._logger.warning(
+                'zero_gravity commander failed to set state=%s%s', enabled, label_tag
+            )
+        return result
 
     def _exit_zero_gravity_if_needed(self, label_tag: str = '', *, force: bool = False) -> bool:
         """Exit zero-gravity if currently enabled. Returns True if it was disabled."""
