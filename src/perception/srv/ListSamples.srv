@@ -1,0 +1,15 @@
+# ListSamples.srv - 列出样本
+# Service: /perception/service/list_samples
+# 功能：列出物体的所有样本
+
+#==================== Request ====================
+string object_id                      # [必填] 物体 ID
+
+---
+
+#==================== Response ====================
+bool success                          # 是否成功
+string error_message                  # 错误信息（失败时，格式: [EXXX] 描述）
+perception/SampleInfo[] samples       # 样本列表
+int32 total_count                     # 样本总数
+

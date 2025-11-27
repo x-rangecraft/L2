@@ -1,0 +1,14 @@
+# QueryByLabel.srv - 标签查询
+# Service: /perception/service/query_by_label
+# 功能：通过标签精确查找物体
+
+#==================== Request ====================
+string label                          # [必填] 标签（精确匹配，如 "cup"）
+
+---
+
+#==================== Response ====================
+bool success                          # 是否成功
+string error_message                  # 错误信息（失败时，格式: [EXXX] 描述）
+perception/ObjectInfo[] objects       # 匹配的物体列表
+

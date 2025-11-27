@@ -1,0 +1,27 @@
+# Segment.action - 目标分割（原子 Action）
+# Action: /perception/action/segment
+# 功能：基于点击坐标，使用 NanoSAM 分割目标物体
+
+#==================== Goal ====================
+sensor_msgs/Image color_image         # [必填] RGB 图像（共享内存传输）
+float64 click_x                       # [必填] 点击坐标 X（像素坐标）
+float64 click_y                       # [必填] 点击坐标 Y（像素坐标）
+
+---
+
+#==================== Result ====================
+bool success                          # 是否成功
+string error_message                  # 错误信息（失败时，格式: [EXXX] 描述）
+
+sensor_msgs/Image mask                # 分割掩码（mono8，255=目标，0=背景）
+sensor_msgs/Image cropped_image       # 裁剪后的目标图像（RGB）
+sensor_msgs/Image visualization       # 可视化叠加图（原图+掩码+点击点）
+float32 confidence                    # 分割置信度（0.0-1.0）
+int32 mask_area_pixels                # 掩码面积（像素数）
+
+---
+
+#==================== Feedback ====================
+string status                         # 当前状态："encoding" / "decoding"
+float32 progress                      # 进度（0.0-1.0）
+

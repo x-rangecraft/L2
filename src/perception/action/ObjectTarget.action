@@ -1,0 +1,38 @@
+# ObjectTarget.action - 抓取定位（组合 Action）
+# Action: /perception/action/object_target
+# 功能：分割 → 点云计算（用于抓取场景，不保存）
+# 等价于：segment + pointcloud
+
+#==================== Goal ====================
+sensor_msgs/Image color_image         # [必填] RGB 图像
+sensor_msgs/Image depth_image         # [必填] 深度图（对齐到 RGB）
+sensor_msgs/CameraInfo camera_info    # [必填] 相机内参
+float64 click_x                       # [必填] 点击坐标 X（像素）
+float64 click_y                       # [必填] 点击坐标 Y（像素）
+
+---
+
+#==================== Result ====================
+bool success                          # 是否成功
+string error_message                  # 错误信息（失败时，格式: [EXXX] 描述）
+
+# 分割结果
+sensor_msgs/Image mask                # 分割掩码
+sensor_msgs/Image cropped_image       # 裁剪后的目标图像
+sensor_msgs/Image visualization       # 可视化叠加图
+float32 confidence                    # 分割置信度
+int32 mask_area_pixels                # 掩码面积
+
+# 点云结果（用于抓取）
+sensor_msgs/PointCloud2 point_cloud   # 目标点云
+geometry_msgs/Point center_3d         # 点云质心（抓取目标位置）
+geometry_msgs/Vector3 bbox_min        # 3D 边界框最小点
+geometry_msgs/Vector3 bbox_max        # 3D 边界框最大点
+int32 point_count                     # 有效点数量
+
+---
+
+#==================== Feedback ====================
+string status                         # "segmenting" / "computing_pointcloud"
+float32 progress                      # 进度（0.0-1.0）
+

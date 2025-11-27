@@ -1,0 +1,15 @@
+# DeleteSample.srv - 删除样本
+# Service: /perception/service/delete_sample
+# 功能：删除物体的指定样本
+
+#==================== Request ====================
+string object_id                      # [必填] 物体 ID
+string sample_id                      # [必填] 要删除的样本 ID
+
+---
+
+#==================== Response ====================
+bool success                          # 是否成功
+string error_message                  # 错误信息（失败时，格式: [EXXX] 描述）
+int32 remaining_samples               # 剩余样本数量
+

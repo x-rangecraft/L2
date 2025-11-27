@@ -1,0 +1,22 @@
+# Vectorize.action - 向量化（原子 Action）
+# Action: /perception/action/vectorize
+# 功能：使用 CLIP 和 DINOv3 提取图像特征向量
+
+#==================== Goal ====================
+sensor_msgs/Image cropped_image       # [必填] 裁剪后的目标图像（来自 segment）
+
+---
+
+#==================== Result ====================
+bool success                          # 是否成功
+string error_message                  # 错误信息（失败时，格式: [EXXX] 描述）
+
+float32[] clip_embedding              # CLIP 特征向量（512 维，用于文本检索）
+float32[] dino_embedding              # DINOv3 特征向量（384 维，用于图像检索）
+
+---
+
+#==================== Feedback ====================
+string status                         # 当前状态："clip_encoding" / "dino_encoding"
+float32 progress                      # 进度（0.0-1.0）
+

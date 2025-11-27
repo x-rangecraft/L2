@@ -729,6 +729,36 @@ DINOv3 参考代码：`/home/jetson/L1/l1_stage2_segmentation/l1_stage2_segmenta
 | 实时可视化 | ✅ 加入 | 分割结果发布给 Web GUI / RViz |
 | 删除/清理 | ✅ 加入 | 从索引中删除旧物体记录 |
 
+### 7. CLIP 实现 ✅
+
+**选择: transformers 库的 CLIPModel**
+
+- 兼容性好，支持多种预训练权重
+- 使用 `openai/clip-vit-base-patch32`
+- 首次运行自动下载模型
+
+### 8. 并发策略 ✅
+
+**选择: 排队处理（FIFO）**
+
+- 同一时刻只处理一个 Action 请求
+- 后续请求进入队列等待
+- 避免 GPU 资源竞争
+
+### 9. 坐标系输出 ✅
+
+**选择: 相机坐标系**
+
+- 所有 3D 坐标输出为相机坐标系（camera_color_optical_frame）
+- TF 转换由调用方处理
+
+### 10. 持久化策略 ✅
+
+**选择: 立即写入**
+
+- 每次 save/delete 操作后立即同步写入磁盘
+- 使用临时文件 + 重命名保证原子性
+
 ---
 
 ## 向量化存储与检索设计
@@ -765,7 +795,7 @@ DINOv3 参考代码：`/home/jetson/L1/l1_stage2_segmentation/l1_stage2_segmenta
 ### 存储结构
 
 ```
-~/perception_output/
+src/perception/data/                 # 数据存储目录（在 perception 包内）
 ├── index.yaml                       # 物体元数据索引
 ├── faiss/
 │   ├── clip_index.faiss             # CLIP 向量索引
@@ -953,6 +983,12 @@ object_record  = vectorize + save_object(service)
 | `/perception/service/list_samples` | 列出物体的样本 |
 | `/perception/service/clear_all` | 清空所有数据 |
 
+### Service - 系统操作
+
+| 服务名 | 说明 |
+|--------|------|
+| `/perception/service/get_status` | 健康检查（模块状态、资源使用、统计信息） |
+
 ---
 
 ## 节点结构设计
@@ -967,6 +1003,14 @@ src/perception/                      # ROS 2 包（参照 robot_skill 结构）
 ├── CMakeLists.txt
 ├── resource/
 │   └── perception
+├── data/                            # 数据存储目录
+│   ├── index.yaml                   # 物体元数据索引
+│   ├── faiss/                       # FAISS 索引
+│   └── images/                      # 物体图像
+├── models/                          # 模型文件（从 L1 拷贝）
+│   ├── nanosam_image_encoder.engine
+│   ├── nanosam_mask_decoder.engine
+│   └── dinov2_vits14.pth
 ├── action/                          # Action 定义
 │   ├── Segment.action               # 原子：目标分割
 │   ├── PointCloud.action            # 原子：点云计算
@@ -974,7 +1018,7 @@ src/perception/                      # ROS 2 包（参照 robot_skill 结构）
 │   ├── ObjectTarget.action          # 组合：抓取定位（分割→点云）
 │   ├── ObjectRecord.action          # 组合：记录物体（向量化→保存）
 │   └── ObjectProcess.action         # 组合：完整流程
-├── srv/                             # Service 定义
+├── srv/                             # Service 定义（13个）
 │   ├── SaveObject.srv
 │   ├── AddSample.srv
 │   ├── UpdateObject.srv
@@ -986,7 +1030,8 @@ src/perception/                      # ROS 2 包（参照 robot_skill 结构）
 │   ├── QueryById.srv
 │   ├── ListObjects.srv
 │   ├── ListSamples.srv
-│   └── ClearAll.srv
+│   ├── ClearAll.srv
+│   └── GetStatus.srv                # 健康检查
 ├── msg/                             # 消息定义
 │   ├── ObjectInfo.msg
 │   └── SampleInfo.msg
@@ -999,6 +1044,8 @@ src/perception/                      # ROS 2 包（参照 robot_skill 结构）
 ├── src/
 │   └── perception_core/
 │       ├── __init__.py
+│       ├── constants.py             # 全局常量
+│       ├── error_codes.py           # 错误码定义
 │       ├── node.py                  # PerceptionNode（协调层）
 │       ├── segmentation.py          # SegmentationModule
 │       ├── pointcloud.py            # PointCloudModule
@@ -1157,7 +1204,7 @@ src/perception/                      # ROS 2 包（参照 robot_skill 结构）
 | `__init__` | 同步 | 初始化节点，创建模块实例，启动初始化定时器 |
 | `_initialize_modules` | 异步 | 并行初始化所有模块，等待全部就绪后注册服务 |
 | `_register_actions` | 同步 | 注册 6 个 Action Server |
-| `_register_services` | 同步 | 注册 12 个 Service Server |
+| `_register_services` | 同步 | 注册 13 个 Service Server |
 
 **Action 回调（协调各模块）**：
 
@@ -1186,6 +1233,7 @@ src/perception/                      # ROS 2 包（参照 robot_skill 结构）
 | `_list_objects_callback` | storage | 列出物体 |
 | `_list_samples_callback` | storage | 列出样本 |
 | `_clear_all_callback` | storage | 清空索引 |
+| `_get_status_callback` | all modules | 健康检查 |
 
 ---
 
@@ -1195,39 +1243,61 @@ src/perception/                      # ROS 2 包（参照 robot_skill 结构）
 
 ```yaml
 perception:
-  # 存储配置
-  storage_dir: "~/perception_output"
+  # ===== 存储配置 =====
+  storage_dir: "data"               # 相对于 perception 包目录
+  log_dir: "L2/log/perception"      # 日志目录（绝对路径）
   
-  # NanoSAM 配置
+  # ===== NanoSAM 配置 =====
   segmentation:
-    engine_path: "models/nanosam_image_encoder.engine"
+    engine_path: "models/nanosam_image_encoder.engine"   # 相对于 perception 包
     decoder_path: "models/nanosam_mask_decoder.engine"
+    min_confidence: 0.3
+    min_mask_area: 100
     
-  # 点云配置
+  # ===== 点云配置 =====
   pointcloud:
     output_frame_id: "camera_color_optical_frame"
+    min_point_count: 10
+    min_depth_mm: 100
+    max_depth_mm: 10000
     
-  # CLIP 配置
+  # ===== CLIP 配置 =====
   clip:
-    model: "ViT-B/32"
+    model: "openai/clip-vit-base-patch32"
     device: "cuda"
     
-  # DINOv3 配置
+  # ===== DINOv3 配置 =====
   dino:
-    model_path: "models/dinov3_vits16.pth"
+    model_path: "models/dinov2_vits14.pth"               # 相对于 perception 包
     device: "cuda"
     feature_dim: 384
     
-  # FAISS 配置
+  # ===== FAISS 配置 =====
   vector:
     index_type: "IndexFlatL2"
     clip_dimension: 512
     dino_dimension: 384
     
-  # 查询配置
+  # ===== 查询配置 =====
   query:
     default_top_k: 5
     default_min_similarity: 0.5
+    
+  # ===== 超时配置 =====
+  timeout:
+    segment: 5.0
+    pointcloud: 2.0
+    vectorize: 6.0
+    object_target: 10.0
+    object_record: 10.0
+    object_process: 20.0
+    faiss_search: 1.0
+    file_write: 2.0
+    
+  # ===== 并发配置 =====
+  concurrency:
+    max_queue_size: 10
+    queue_timeout: 30.0
 ```
 
 ---
@@ -1359,11 +1429,432 @@ Y = (v - cy) * Z / fy
 |------|------|------|
 | `torch` | >= 2.0 | PyTorch |
 | `torchvision` | >= 0.15 | 图像处理 |
-| `transformers` | >= 4.30 | CLIP 模型 |
+| `transformers` | >= 4.30 | CLIP 模型（CLIPModel） |
 | `faiss-cpu` / `faiss-gpu` | >= 1.7 | 向量检索 |
 | `opencv-python` | >= 4.5 | 图像处理 |
 | `open3d` | >= 0.17 | 点云处理（可选） |
 | `tensorrt` | >= 8.5 | NanoSAM 推理 |
+
+---
+
+## 启动脚本规格
+
+### start_perception.sh
+
+**功能**：启动/停止 Perception 节点
+
+**用法**：
+```bash
+./start_perception.sh --start   # 启动节点
+./start_perception.sh --stop    # 停止节点
+```
+
+**特点**：
+- 启动完成后脚本退出，不常驻
+- 停止完成后脚本退出
+- 日志输出到 `L2/log/perception/`
+
+**启动流程**：
+```
+--start
+    ├── 检查节点是否已运行
+    ├── source ROS 2 环境
+    ├── 启动 perception_node（后台）
+    ├── 等待节点就绪（检查 /perception/service/get_status）
+    ├── 输出启动日志
+    └── 脚本退出
+```
+
+**停止流程**：
+```
+--stop
+    ├── 查找 perception_node 进程
+    ├── 发送 SIGTERM
+    ├── 等待进程退出（超时 10s）
+    ├── 超时则 SIGKILL
+    └── 脚本退出
+```
+
+---
+
+## 日志规范
+
+### 日志目录
+
+```
+/home/jetson/L2/log/perception/  # 日志统一放到 L2/log 下
+├── build.log                    # 编译日志
+├── startup_20251127.log         # 启动日志（按日期）
+├── runtime_20251127.log         # 运行日志（按日期）
+└── runtime_20251126.log         # 历史日志
+```
+
+### 日志格式
+
+```
+[2025-11-27 14:30:25.123] [INFO] [perception_node] 模块初始化完成
+[2025-11-27 14:30:26.456] [WARN] [segmentation] 分割置信度较低: 0.45
+[2025-11-27 14:30:27.789] [ERROR] [pointcloud] 深度图无效点过多: 2001 (code: 3002)
+```
+
+### 日志级别
+
+| 级别 | 用途 |
+|------|------|
+| DEBUG | 调试信息（开发时启用） |
+| INFO | 正常运行信息 |
+| WARN | 警告（不影响功能） |
+| ERROR | 错误（带错误码） |
+
+---
+
+## 错误码体系
+
+### 错误码格式
+
+`error_message` 格式：`[EXXX] 错误描述`
+
+### 错误码定义
+
+#### 1xxx - 初始化错误
+
+| 错误码 | 说明 |
+|--------|------|
+| 1001 | NanoSAM 引擎加载失败 |
+| 1002 | NanoSAM 解码器加载失败 |
+| 1003 | CLIP 模型加载失败 |
+| 1004 | DINOv3 模型加载失败 |
+| 1005 | FAISS 索引加载失败 |
+| 1006 | 存储目录创建失败 |
+| 1007 | 配置文件读取失败 |
+| 1010 | GPU 内存不足 |
+| 1011 | CUDA 不可用 |
+
+#### 2xxx - 分割错误
+
+| 错误码 | 说明 |
+|--------|------|
+| 2001 | 输入图像为空 |
+| 2002 | 图像格式不支持 |
+| 2003 | 点击坐标超出图像范围 |
+| 2004 | 分割结果为空（未检测到目标） |
+| 2005 | 分割置信度过低（< MIN_CONFIDENCE） |
+| 2006 | 掩码面积过小（< MIN_MASK_AREA） |
+| 2007 | NanoSAM 推理超时 |
+| 2008 | NanoSAM 推理异常 |
+
+#### 3xxx - 点云错误
+
+| 错误码 | 说明 |
+|--------|------|
+| 3001 | 深度图为空 |
+| 3002 | 深度图无效点过多（> MAX_INVALID_DEPTH_RATIO） |
+| 3003 | 相机内参无效 |
+| 3004 | 掩码与深度图尺寸不匹配 |
+| 3005 | 有效点数量不足（< MIN_POINT_COUNT） |
+| 3006 | 点云计算超时 |
+
+#### 4xxx - 向量化错误
+
+| 错误码 | 说明 |
+|--------|------|
+| 4001 | CLIP 编码失败 |
+| 4002 | DINOv3 编码失败 |
+| 4003 | 图像预处理失败 |
+| 4004 | 文本编码失败（空文本） |
+| 4005 | 向量化超时 |
+
+#### 5xxx - 存储错误
+
+| 错误码 | 说明 |
+|--------|------|
+| 5001 | 物体 ID 不存在 |
+| 5002 | 样本 ID 不存在 |
+| 5003 | 图像保存失败 |
+| 5004 | index.yaml 写入失败 |
+| 5005 | FAISS 索引保存失败 |
+| 5006 | 向量维度不匹配 |
+| 5007 | 物体已存在（重复 ID） |
+| 5008 | 删除最后一个样本（物体至少保留一个样本） |
+
+#### 6xxx - 查询错误
+
+| 错误码 | 说明 |
+|--------|------|
+| 6001 | 查询文本为空 |
+| 6002 | 查询图像为空 |
+| 6003 | 无匹配结果 |
+| 6004 | 标签不存在 |
+
+#### 9xxx - 系统错误
+
+| 错误码 | 说明 |
+|--------|------|
+| 9001 | 节点未就绪 |
+| 9002 | Action 被取消 |
+| 9003 | 内部异常 |
+| 9004 | 资源繁忙（排队中） |
+
+---
+
+## 超时与性能指标
+
+### 预期耗时（Jetson Orin）
+
+| 操作 | 预期耗时 | 超时设置 |
+|------|----------|----------|
+| NanoSAM 分割 | 200-500ms | 5s |
+| 点云计算 | 50-100ms | 2s |
+| CLIP 编码（图像） | 100-200ms | 3s |
+| CLIP 编码（文本） | 20-50ms | 1s |
+| DINOv3 编码 | 150-300ms | 3s |
+| 向量化（CLIP+DINOv3） | 300-600ms | 6s |
+| FAISS 检索（10k 向量） | 5-20ms | 1s |
+| 文件写入 | 10-50ms | 2s |
+
+### 组合 Action 超时
+
+| Action | 预期耗时 | 超时设置 |
+|--------|----------|----------|
+| object_target | 300-700ms | 10s |
+| object_record | 350-700ms | 10s |
+| object_process | 600-1200ms | 20s |
+
+### 配置项
+
+```yaml
+perception:
+  timeout:
+    segment: 5.0          # 分割超时（秒）
+    pointcloud: 2.0       # 点云超时
+    vectorize: 6.0        # 向量化超时
+    object_target: 10.0   # 组合 Action
+    object_record: 10.0
+    object_process: 20.0
+    faiss_search: 1.0     # FAISS 检索
+    file_write: 2.0       # 文件写入
+```
+
+---
+
+## 边界条件与常量
+
+### 全局常量（constants.py）
+
+```python
+# ===== 图像相关 =====
+MAX_IMAGE_SIZE = 4096 * 4096      # 最大图像像素数（16MP）
+MIN_IMAGE_SIZE = 64 * 64          # 最小图像像素数
+SUPPORTED_IMAGE_FORMATS = ['rgb8', 'bgr8', 'rgba8', 'bgra8']
+
+# ===== 分割相关 =====
+MIN_CONFIDENCE = 0.3              # 最小分割置信度
+MIN_MASK_AREA = 100               # 最小掩码面积（像素）
+MAX_MASK_AREA_RATIO = 0.9         # 最大掩码面积占比
+
+# ===== 点云相关 =====
+MIN_POINT_COUNT = 10              # 最小有效点数
+MAX_INVALID_DEPTH_RATIO = 0.8     # 最大深度无效点占比
+MIN_DEPTH_MM = 100                # 最小有效深度（mm）
+MAX_DEPTH_MM = 10000              # 最大有效深度（mm）
+
+# ===== 向量相关 =====
+CLIP_EMBEDDING_DIM = 512          # CLIP 向量维度
+DINO_EMBEDDING_DIM = 384          # DINOv3 向量维度
+
+# ===== 存储相关 =====
+MAX_OBJECTS = 10000               # 最大物体数量
+MAX_SAMPLES_PER_OBJECT = 100      # 单物体最大样本数
+MAX_LABEL_LENGTH = 64             # 标签最大长度
+MAX_DESCRIPTION_LENGTH = 256      # 描述最大长度
+
+# ===== 查询相关 =====
+MAX_TOP_K = 100                   # 最大返回数量
+DEFAULT_TOP_K = 5                 # 默认返回数量
+DEFAULT_MIN_SIMILARITY = 0.5     # 默认最小相似度
+```
+
+### 可配置项（perception_config.yaml）
+
+```yaml
+perception:
+  # 分割阈值（可调）
+  segmentation:
+    min_confidence: 0.3
+    min_mask_area: 100
+    
+  # 点云阈值（可调）
+  pointcloud:
+    min_point_count: 10
+    min_depth_mm: 100
+    max_depth_mm: 10000
+    
+  # 查询默认值（可调）
+  query:
+    default_top_k: 5
+    default_min_similarity: 0.5
+```
+
+---
+
+## 健康检查接口
+
+### GetStatus Service
+
+```
+# srv/GetStatus.srv
+# Service: /perception/service/get_status
+
+#==================== Request ====================
+# 无参数
+
+---
+
+#==================== Response ====================
+bool ready                        # 节点是否就绪
+string node_status                # 节点状态: "initializing" / "ready" / "error"
+
+# 各模块状态
+bool segmentation_ready           # 分割模块就绪
+bool pointcloud_ready             # 点云模块就绪
+bool vectorizer_ready             # 向量化模块就绪
+bool storage_ready                # 存储模块就绪
+
+# 资源使用
+int64 gpu_memory_used_mb          # GPU 内存使用（MB）
+int64 gpu_memory_total_mb         # GPU 内存总量（MB）
+
+# 索引统计
+int32 total_objects               # 物体总数
+int32 total_samples               # 样本总数
+
+# 运行统计
+int64 uptime_seconds              # 运行时长（秒）
+int32 requests_processed          # 已处理请求数
+int32 requests_failed             # 失败请求数
+```
+
+### 节点结构更新
+
+新增 Service：
+```
+srv/
+├── ...（原有 12 个）
+└── GetStatus.srv                 # 健康检查（新增）
+```
+
+Service 总数：13 个
+
+---
+
+## 并发策略
+
+### Action 并发处理
+
+**策略**：排队处理（FIFO）
+
+- 同一时刻只处理一个 Action 请求
+- 后续请求进入队列等待
+- 队列满时返回 `[9004] 资源繁忙` 错误
+
+```
+请求1 ──────►│        │
+请求2 ──────►│  队列  │──────► GPU 处理 ──────► 结果
+请求3 ──────►│        │
+```
+
+### 配置
+
+```yaml
+perception:
+  concurrency:
+    max_queue_size: 10            # 最大队列长度
+    queue_timeout: 30.0           # 排队超时（秒）
+```
+
+---
+
+## 坐标系说明
+
+### 输出坐标系
+
+所有 3D 坐标输出均为**相机坐标系**（camera_color_optical_frame）：
+- X 轴：向右
+- Y 轴：向下
+- Z 轴：向前（深度方向）
+
+### TF 转换
+
+坐标系转换由调用方处理，本节点不做 TF 查询。
+
+如需转换到机器人基座坐标系，调用方可使用：
+```python
+tf_buffer.transform(point_stamped, "base_link")
+```
+
+---
+
+## 持久化策略
+
+### 写入时机
+
+**立即写入**：每次 `save_object` / `delete_object` / `add_sample` / `delete_sample` 操作后立即同步写入磁盘。
+
+### 写入内容
+
+| 操作 | 写入文件 |
+|------|----------|
+| save_object | index.yaml, clip_index.faiss, dino_index.faiss, id_mapping.json, 图像文件 |
+| add_sample | index.yaml, clip_index.faiss, dino_index.faiss, id_mapping.json |
+| delete_object | index.yaml, clip_index.faiss, dino_index.faiss, id_mapping.json |
+| delete_sample | index.yaml, clip_index.faiss, dino_index.faiss, id_mapping.json |
+| update_object | index.yaml |
+| clear_all | 删除所有文件并重建空索引 |
+
+### 原子性保证
+
+使用临时文件 + 重命名方式保证写入原子性：
+```
+1. 写入 index.yaml.tmp
+2. mv index.yaml.tmp index.yaml
+```
+
+---
+
+## 模型文件说明
+
+### NanoSAM（从 L1 拷贝）
+
+```
+src/perception/models/
+├── nanosam_image_encoder.engine   # TensorRT 引擎
+└── nanosam_mask_decoder.engine    # TensorRT 解码器
+```
+
+来源：`/home/jetson/L1/l1_stage2_segmentation/models/`
+
+### DINOv3（从 L1 拷贝）
+
+```
+src/perception/models/
+└── dinov2_vits14.pth              # DINOv2 ViT-S/14 权重
+```
+
+来源：`/home/jetson/L1/l1_stage2_segmentation/models/`
+
+参考实现：`/home/jetson/L1/l1_stage2_segmentation/l1_stage2_segmentation/perception/dino_feature_extractor.py`
+
+### CLIP（transformers 自动下载）
+
+使用 `transformers` 库的 CLIPModel：
+```python
+from transformers import CLIPModel, CLIPProcessor
+
+model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32")
+processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
+```
+
+首次运行时自动下载到 `~/.cache/huggingface/`
 
 ---
 
@@ -1377,17 +1868,206 @@ Y = (v - cy) * Z / fy
 5. ✅ 确认存储方案（FAISS）
 6. ✅ 确认附加功能（可视化、删除/清理）
 7. ✅ 确认交互模式（Action + 共享内存传输图像）
+8. ✅ 确认 CLIP 实现（transformers CLIPModel）
+9. ✅ 确认并发策略（排队处理）
+10. ✅ 确认坐标系输出（相机坐标系）
+11. ✅ 确认持久化策略（立即写入）
+12. ✅ 定义错误码体系
+13. ✅ 定义日志规范
+14. ✅ 定义超时与性能指标
+15. ✅ 定义健康检查接口
+16. ✅ 定义边界条件与常量
 
 ### 实现阶段
-8. 🔲 创建 ROS 2 包骨架 (package.xml, CMakeLists.txt, setup.py)
-9. 🔲 定义 Action/Service 消息 (SegmentObject.action, *.srv)
-10. 🔲 实现 NanoSAM 分割模块（参考 L1）
-11. 🔲 实现点云计算模块
-12. 🔲 实现 CLIP 特征提取模块
-13. 🔲 实现 DINOv3 特征提取模块（参考 L1）
-14. 🔲 实现 FAISS 向量存储模块
-15. 🔲 实现主节点类（Action Server + Service Server）
-16. 🔲 实现查询服务
-17. 🔲 编写配置文件和启动脚本
-18. 🔲 测试与调试
+
+---
+
+#### Phase 1: 基础设施（无依赖）
+
+| 步骤 | 任务 | 产出文件 | 说明 |
+|------|------|----------|------|
+| 1.1 | 创建目录结构 | 所有目录 | action/, srv/, msg/, config/, src/, scripts/, launch/, models/, data/ |
+| 1.2 | 创建 package.xml | package.xml | 定义包名、依赖（rclpy, sensor_msgs, geometry_msgs 等） |
+| 1.3 | 创建 setup.py + setup.cfg | setup.py, setup.cfg | Python 包配置，入口点 |
+| 1.4 | 创建 CMakeLists.txt | CMakeLists.txt | 消息生成配置 |
+| 1.5 | 创建 resource 标记文件 | resource/perception | ament 索引标记 |
+| 1.6 | 创建全局常量 | src/perception_core/constants.py | MIN_CONFIDENCE, MAX_IMAGE_SIZE 等 |
+| 1.7 | 创建错误码定义 | src/perception_core/error_codes.py | PerceptionError 类，错误码枚举 |
+
+---
+
+#### Phase 2: 消息定义（依赖 Phase 1）
+
+| 步骤 | 任务 | 产出文件 | 说明 |
+|------|------|----------|------|
+| 2.1 | 定义 ObjectInfo 消息 | msg/ObjectInfo.msg | object_id, label, description, timestamps, sample_count |
+| 2.2 | 定义 SampleInfo 消息 | msg/SampleInfo.msg | sample_id, object_id, created_at |
+| 2.3 | 定义 Segment Action | action/Segment.action | 原子分割 Action |
+| 2.4 | 定义 PointCloud Action | action/PointCloud.action | 原子点云 Action |
+| 2.5 | 定义 Vectorize Action | action/Vectorize.action | 原子向量化 Action |
+| 2.6 | 定义 ObjectTarget Action | action/ObjectTarget.action | 组合：分割→点云 |
+| 2.7 | 定义 ObjectRecord Action | action/ObjectRecord.action | 组合：向量化→保存 |
+| 2.8 | 定义 ObjectProcess Action | action/ObjectProcess.action | 组合：完整流程 |
+| 2.9 | 定义存储 Service（5个） | srv/SaveObject.srv 等 | Save, Add, Update, Delete, DeleteSample |
+| 2.10 | 定义查询 Service（4个） | srv/QueryByDesc.srv 等 | ByDesc, ByImage, ByLabel, ById |
+| 2.11 | 定义列表 Service（3个） | srv/ListObjects.srv 等 | List, ListSamples, ClearAll |
+| 2.12 | 定义健康检查 Service | srv/GetStatus.srv | 模块状态、资源使用 |
+| 2.13 | 编译验证消息 | - | colcon build 验证消息生成正确 |
+
+---
+
+#### Phase 3: 配置文件（依赖 Phase 1）
+
+| 步骤 | 任务 | 产出文件 | 说明 |
+|------|------|----------|------|
+| 3.1 | 创建配置文件 | config/perception_config.yaml | 所有模块配置项 |
+| 3.2 | 拷贝 NanoSAM 模型 | models/nanosam_*.engine | 从 L1 拷贝 TensorRT 引擎 |
+| 3.3 | 拷贝 DINOv3 模型 | models/dinov2_vits14.pth | 从 L1 拷贝模型权重 |
+
+---
+
+#### Phase 4: 分割模块（依赖 Phase 2, 3）
+
+| 步骤 | 任务 | 产出文件 | 说明 |
+|------|------|----------|------|
+| 4.1 | 实现 SegmentationModule 骨架 | src/perception_core/segmentation.py | `__init__`, `is_ready`, 类结构 |
+| 4.2 | 实现 initialize 方法 | segmentation.py | 加载 NanoSAM 引擎（参考 L1 nanosam_engine.py） |
+| 4.3 | 实现 segment 方法 | segmentation.py | 核心分割逻辑，返回 SegmentResult |
+| 4.4 | 实现 create_visualization | segmentation.py | 生成叠加可视化图 |
+| 4.5 | 单元测试分割模块 | tests/test_segmentation.py | 验证分割功能正常 |
+
+---
+
+#### Phase 5: 点云模块（依赖 Phase 2）
+
+| 步骤 | 任务 | 产出文件 | 说明 |
+|------|------|----------|------|
+| 5.1 | 实现 PointCloudModule 骨架 | src/perception_core/pointcloud.py | `__init__`, `is_ready`, 类结构 |
+| 5.2 | 实现 initialize 方法 | pointcloud.py | 轻量初始化 |
+| 5.3 | 实现 compute 方法 | pointcloud.py | 深度图→点云，计算质心、边界框 |
+| 5.4 | 单元测试点云模块 | tests/test_pointcloud.py | 验证点云计算正确 |
+
+---
+
+#### Phase 6: 向量化模块（依赖 Phase 2, 3）
+
+| 步骤 | 任务 | 产出文件 | 说明 |
+|------|------|----------|------|
+| 6.1 | 实现 VectorizerModule 骨架 | src/perception_core/vectorizer.py | `__init__`, `is_ready`, 类结构 |
+| 6.2 | 实现 CLIP 加载 | vectorizer.py | 使用 transformers 加载 CLIPModel |
+| 6.3 | 实现 DINOv3 加载 | vectorizer.py | 参考 L1 dino_feature_extractor.py |
+| 6.4 | 实现 extract 方法 | vectorizer.py | 图像→CLIP+DINOv3 向量 |
+| 6.5 | 实现 encode_text 方法 | vectorizer.py | 文本→CLIP 向量 |
+| 6.6 | 单元测试向量化模块 | tests/test_vectorizer.py | 验证向量维度和格式正确 |
+
+---
+
+#### Phase 7: 向量索引模块（依赖 Phase 2）
+
+| 步骤 | 任务 | 产出文件 | 说明 |
+|------|------|----------|------|
+| 7.1 | 实现 VectorManager 骨架 | src/perception_core/vector_manager.py | `__init__`, `is_ready`, 类结构 |
+| 7.2 | 实现 initialize 方法 | vector_manager.py | 加载或创建 FAISS 索引 |
+| 7.3 | 实现 add_vectors 方法 | vector_manager.py | 添加向量到索引 |
+| 7.4 | 实现 search_by_clip/dino | vector_manager.py | 向量检索 |
+| 7.5 | 实现 delete_vectors 方法 | vector_manager.py | 从索引删除（标记删除或重建） |
+| 7.6 | 实现 save/clear 方法 | vector_manager.py | 持久化和清空 |
+| 7.7 | 单元测试向量管理模块 | tests/test_vector_manager.py | 验证增删查功能 |
+
+---
+
+#### Phase 8: 物体存储模块（依赖 Phase 7）
+
+| 步骤 | 任务 | 产出文件 | 说明 |
+|------|------|----------|------|
+| 8.1 | 实现 ObjectStorageManager 骨架 | src/perception_core/object_storage_manager.py | `__init__`, `is_ready` |
+| 8.2 | 实现 initialize 方法 | object_storage_manager.py | 加载 index.yaml |
+| 8.3 | 实现 save_object 方法 | object_storage_manager.py | 保存物体（图像+向量+元数据） |
+| 8.4 | 实现 add_sample 方法 | object_storage_manager.py | 给物体增加样本 |
+| 8.5 | 实现 update_object 方法 | object_storage_manager.py | 更新标签/描述 |
+| 8.6 | 实现 delete_object/sample | object_storage_manager.py | 删除物体或样本 |
+| 8.7 | 实现 query_by_* 方法 | object_storage_manager.py | 4 种查询方式 |
+| 8.8 | 实现 list_*/clear_all | object_storage_manager.py | 列表和清空操作 |
+| 8.9 | 单元测试存储模块 | tests/test_object_storage.py | 验证 CRUD 功能 |
+
+---
+
+#### Phase 9: 主节点实现（依赖 Phase 4-8）
+
+| 步骤 | 任务 | 产出文件 | 说明 |
+|------|------|----------|------|
+| 9.1 | 实现 PerceptionNode 骨架 | src/perception_core/node.py | `__init__`，创建模块实例 |
+| 9.2 | 实现 _initialize_modules | node.py | 异步并行初始化所有模块 |
+| 9.3 | 实现 _register_actions | node.py | 注册 6 个 Action Server |
+| 9.4 | 实现 _register_services | node.py | 注册 13 个 Service Server |
+| 9.5 | 实现 _segment_execute | node.py | 原子 Action：分割 |
+| 9.6 | 实现 _pointcloud_execute | node.py | 原子 Action：点云 |
+| 9.7 | 实现 _vectorize_execute | node.py | 原子 Action：向量化 |
+| 9.8 | 实现 _object_target_execute | node.py | 组合 Action：分割→点云 |
+| 9.9 | 实现 _object_record_execute | node.py | 组合 Action：向量化→保存 |
+| 9.10 | 实现 _object_process_execute | node.py | 组合 Action：完整流程 |
+| 9.11 | 实现存储 Service 回调 | node.py | save, add, update, delete 回调 |
+| 9.12 | 实现查询 Service 回调 | node.py | query_by_* 回调 |
+| 9.13 | 实现列表 Service 回调 | node.py | list_*, clear_all 回调 |
+| 9.14 | 实现 _get_status_callback | node.py | 健康检查回调 |
+
+---
+
+#### Phase 10: 入口和启动脚本（依赖 Phase 9）
+
+| 步骤 | 任务 | 产出文件 | 说明 |
+|------|------|----------|------|
+| 10.1 | 创建入口脚本 | scripts/perception_node.py | main() 函数，节点启动 |
+| 10.2 | 创建 launch 文件 | launch/perception.launch.py | 参数加载、节点启动 |
+| 10.3 | 创建启动脚本 | start_perception.sh | --start / --stop 实现 |
+| 10.4 | 完整编译测试 | - | colcon build 验证整个包 |
+
+---
+
+#### Phase 11: 集成测试（依赖 Phase 10）
+
+| 步骤 | 任务 | 产出文件 | 说明 |
+|------|------|----------|------|
+| 11.1 | 测试节点启动 | - | 验证所有模块初始化成功 |
+| 11.2 | 测试 segment Action | - | 调用分割，验证掩码输出 |
+| 11.3 | 测试 object_target Action | - | 验证分割+点云组合 |
+| 11.4 | 测试 object_record Action | - | 验证向量化+保存 |
+| 11.5 | 测试查询 Service | - | 验证各种查询方式 |
+| 11.6 | 测试删除/清空 Service | - | 验证数据删除和持久化 |
+| 11.7 | 端到端测试 | - | 完整流程：分割→保存→查询→删除 |
+
+---
+
+#### 依赖关系图
+
+```
+Phase 1 (基础设施)
+    │
+    ├──► Phase 2 (消息定义) ──┬──► Phase 4 (分割)
+    │                         ├──► Phase 5 (点云)
+    └──► Phase 3 (配置) ──────┼──► Phase 6 (向量化)
+                              │
+                              └──► Phase 7 (向量索引)
+                                       │
+                                       ▼
+                              Phase 8 (物体存储)
+                                       │
+                                       ▼
+                              Phase 9 (主节点)
+                                       │
+                                       ▼
+                              Phase 10 (启动脚本)
+                                       │
+                                       ▼
+                              Phase 11 (集成测试)
+```
+
+#### 可并行执行
+
+| 阶段 | 可并行任务 |
+|------|------------|
+| Phase 1 完成后 | Phase 2 + Phase 3 可并行 |
+| Phase 2 + 3 完成后 | Phase 4 + 5 + 6 + 7 可并行 |
+| Phase 7 完成后 | Phase 8 开始 |
+| Phase 4-8 全部完成后 | Phase 9 开始 |
 

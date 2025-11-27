@@ -1,0 +1,19 @@
+# SaveObject.srv - 保存物体
+# Service: /perception/service/save_object
+# 功能：将物体信息保存到索引（向量 + 元数据）
+
+#==================== Request ====================
+sensor_msgs/Image cropped_image       # [必填] 物体图像（已裁剪）
+float32[] clip_embedding              # [必填] CLIP 向量（512d）
+float32[] dino_embedding              # [必填] DINOv3 向量（384d）
+string label                          # [可选] 标签（如 "cup"）
+string description                    # [可选] 描述（如 "红色陶瓷杯子"）
+
+---
+
+#==================== Response ====================
+bool success                          # 是否成功
+string error_message                  # 错误信息（失败时，格式: [EXXX] 描述）
+string object_id                      # 自动生成的物体 ID
+int64 created_at                      # 创建时间（毫秒时间戳）
+

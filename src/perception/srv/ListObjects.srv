@@ -1,0 +1,17 @@
+# ListObjects.srv - 列出物体
+# Service: /perception/service/list_objects
+# 功能：列出所有已保存的物体
+
+#==================== Request ====================
+string label_filter                   # [可选] 按标签过滤（空=不过滤）
+int32 offset                          # [可选] 分页偏移（默认 0）
+int32 limit                           # [可选] 返回数量限制（默认 100）
+
+---
+
+#==================== Response ====================
+bool success                          # 是否成功
+string error_message                  # 错误信息（失败时，格式: [EXXX] 描述）
+perception/ObjectInfo[] objects       # 物体列表
+int32 total_count                     # 总数量（不受 limit 限制）
+

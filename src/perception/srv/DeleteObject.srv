@@ -1,0 +1,14 @@
+# DeleteObject.srv - 删除物体
+# Service: /perception/service/delete_object
+# 功能：删除物体及其所有样本
+
+#==================== Request ====================
+string object_id                      # [必填] 要删除的物体 ID
+
+---
+
+#==================== Response ====================
+bool success                          # 是否成功
+string error_message                  # 错误信息（失败时，格式: [EXXX] 描述）
+int32 deleted_samples                 # 删除的样本数量
+

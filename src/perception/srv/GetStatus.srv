@@ -1,0 +1,32 @@
+# GetStatus.srv - 健康检查
+# Service: /perception/service/get_status
+# 功能：获取节点状态、模块就绪情况、资源使用、统计信息
+
+#==================== Request ====================
+# 无参数
+
+---
+
+#==================== Response ====================
+bool ready                            # 节点是否就绪
+string node_status                    # 节点状态: "initializing" / "ready" / "error"
+
+# 各模块状态
+bool segmentation_ready               # 分割模块就绪
+bool pointcloud_ready                 # 点云模块就绪
+bool vectorizer_ready                 # 向量化模块就绪
+bool storage_ready                    # 存储模块就绪
+
+# 资源使用
+int64 gpu_memory_used_mb              # GPU 内存使用（MB）
+int64 gpu_memory_total_mb             # GPU 内存总量（MB）
+
+# 索引统计
+int32 total_objects                   # 物体总数
+int32 total_samples                   # 样本总数
+
+# 运行统计
+int64 uptime_seconds                  # 运行时长（秒）
+int32 requests_processed              # 已处理请求数
+int32 requests_failed                 # 失败请求数
+

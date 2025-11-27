@@ -1,0 +1,60 @@
+# Perception Node 配置文件
+# 详见 perception.md
+
+perception:
+  # ===== 存储配置 =====
+  storage_dir: "data"               # 相对于 perception 包目录
+  log_dir: "L2/log/perception"      # 日志目录（绝对路径）
+  
+  # ===== NanoSAM 配置 =====
+  segmentation:
+    engine_path: "models/nanosam_image_encoder.engine"
+    decoder_path: "models/nanosam_mask_decoder.engine"
+    min_confidence: 0.3
+    min_mask_area: 100
+    
+  # ===== 点云配置 =====
+  pointcloud:
+    output_frame_id: "camera_color_optical_frame"
+    min_point_count: 10
+    min_depth_mm: 100
+    max_depth_mm: 10000
+    
+  # ===== CLIP 配置 =====
+  clip:
+    model: "openai/clip-vit-base-patch32"
+    device: "cuda"
+    
+  # ===== DINOv3 配置 =====
+  dino:
+    model_path: "models/dinov2_vits14.pth"
+    device: "cuda"
+    feature_dim: 384
+    
+  # ===== FAISS 配置 =====
+  vector:
+    index_type: "IndexFlatL2"
+    clip_dimension: 512
+    dino_dimension: 384
+    
+  # ===== 查询配置 =====
+  query:
+    default_top_k: 5
+    default_min_similarity: 0.5
+    
+  # ===== 超时配置 =====
+  timeout:
+    segment: 5.0
+    pointcloud: 2.0
+    vectorize: 6.0
+    object_target: 10.0
+    object_record: 10.0
+    object_process: 20.0
+    faiss_search: 1.0
+    file_write: 2.0
+    
+  # ===== 并发配置 =====
+  concurrency:
+    max_queue_size: 10
+    queue_timeout: 30.0
+

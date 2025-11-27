@@ -1,0 +1,16 @@
+# UpdateObject.srv - 更新物体
+# Service: /perception/service/update_object
+# 功能：更新物体的标签或描述
+
+#==================== Request ====================
+string object_id                      # [必填] 物体 ID
+string label                          # [可选] 新标签（空字符串表示不更新）
+string description                    # [可选] 新描述（空字符串表示不更新）
+
+---
+
+#==================== Response ====================
+bool success                          # 是否成功
+string error_message                  # 错误信息（失败时，格式: [EXXX] 描述）
+int64 updated_at                      # 更新时间（毫秒时间戳）
+

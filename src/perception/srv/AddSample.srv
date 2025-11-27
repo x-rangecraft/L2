@@ -1,0 +1,17 @@
+# AddSample.srv - 增加样本
+# Service: /perception/service/add_sample
+# 功能：给已有物体增加新的向量样本（多角度增强）
+
+#==================== Request ====================
+string object_id                      # [必填] 目标物体 ID
+float32[] clip_embedding              # [必填] 新的 CLIP 向量（512d）
+float32[] dino_embedding              # [必填] 新的 DINOv3 向量（384d）
+
+---
+
+#==================== Response ====================
+bool success                          # 是否成功
+string error_message                  # 错误信息（失败时，格式: [EXXX] 描述）
+string sample_id                      # 新样本 ID
+int32 total_samples                   # 该物体当前样本总数
+

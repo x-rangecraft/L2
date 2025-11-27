@@ -1,0 +1,17 @@
+# QueryByImage.srv - 图片查询
+# Service: /perception/service/query_by_image
+# 功能：通过参考图片查找相似物体（DINOv3 相似度匹配）
+
+#==================== Request ====================
+sensor_msgs/Image query_image         # [必填] 查询图片
+int32 top_k                           # [可选] 返回前 K 个结果（默认 5，最大 100）
+float32 min_similarity                # [可选] 最小相似度阈值（默认 0.5）
+
+---
+
+#==================== Response ====================
+bool success                          # 是否成功
+string error_message                  # 错误信息（失败时，格式: [EXXX] 描述）
+perception/ObjectInfo[] objects       # 相似的物体列表
+float32[] similarities                # 对应的相似度分数（0.0-1.0）
+

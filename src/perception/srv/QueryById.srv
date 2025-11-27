@@ -1,0 +1,17 @@
+# QueryById.srv - ID 查询
+# Service: /perception/service/query_by_id
+# 功能：通过 ID 获取物体详细信息
+
+#==================== Request ====================
+string object_id                      # [必填] 物体 ID（如 "obj_001"）
+bool include_image                    # [可选] 是否返回图像（默认 false）
+
+---
+
+#==================== Response ====================
+bool success                          # 是否成功
+string error_message                  # 错误信息（失败时，格式: [EXXX] 描述）
+perception/ObjectInfo object          # 物体完整信息
+sensor_msgs/Image cropped_image       # 物体图像（当 include_image=true）
+int32 sample_count                    # 样本数量
+
