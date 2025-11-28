@@ -1,17 +1,17 @@
 # SAFE_POSE auto-generated via safe_pose_build.sh
-# Captured at 2025-11-19T10:51:26.075726+00:00
+# Captured at 2025-11-27T11:30:21.577838+00:00
 safe_pose:
   joints:
-    joint1: -0.050546
-    joint2: 0.118830
-    joint3: 0.005913
-    joint4: -0.044823
-    joint5: -0.028420
-    joint6: 0.026894
+    joint1: -0.046731
+    joint2: 0.005531
+    joint3: 0.005531
+    joint4: -0.063897
+    joint5: -0.037194
+    joint6: 0.010491
     gripper: 0.010699
   metadata:
     ready: true
-    captured_at: 2025-11-19T10:51:26.075726+00:00
+    captured_at: 2025-11-27T11:30:21.577838+00:00
     source_topic: /joint_states
     frame_id: base_link
     zero_gravity_requested: true
