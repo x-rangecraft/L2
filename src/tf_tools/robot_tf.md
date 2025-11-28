@@ -137,30 +137,32 @@ tf_tools/
 
 ### /tf_tools/transform_points
 
-将点数组从源坐标系转换到目标坐标系。
+将点列表从源坐标系转换到目标坐标系，并可指定采样时间。
 
 **Request**:
 ```
 string source_frame              # 源坐标系 (如 camera_color_optical_frame)
 string target_frame              # 目标坐标系 (如 base_link)
-float64[] points_in              # 输入点数组 [x1,y1,z1, x2,y2,z2, ...]
+builtin_interfaces/Time stamp    # 采样时间（0/0 为“最新”）
+geometry_msgs/Point[] points_in  # 输入点列表
 ```
 
 **Response**:
 ```
 bool success                     # 是否成功
 string message                   # 错误信息（失败时）
-float64[] points_out             # 转换后的点数组
+geometry_msgs/Point[] points_out # 转换后的点列表
 ```
 
 **命令行调用示例**:
 ```bash
 ros2 service call /tf_tools/transform_points tf_tools/srv/TransformPoints \
-  "{source_frame: 'camera_color_optical_frame', target_frame: 'base_link', points_in: [0.1, 0.2, 0.5]}"
+  "{source_frame: 'camera_color_optical_frame', target_frame: 'base_link', stamp: {sec: 0, nanosec: 0}, points_in: [{x: 0.1, y: 0.2, z: 0.5}, {x: 0.3, y: 0.4, z: 0.6}]}"
 ```
 
 **Python 调用示例**:
 ```python
+from geometry_msgs.msg import Point
 from tf_tools.srv import TransformPoints
 
 # 创建客户端
@@ -170,15 +172,18 @@ client = node.create_client(TransformPoints, '/tf_tools/transform_points')
 request = TransformPoints.Request()
 request.source_frame = 'camera_color_optical_frame'
 request.target_frame = 'base_link'
-request.points_in = [0.1, 0.2, 0.5, 0.3, 0.4, 0.6]  # 2个点
+request.stamp.sec = 1_700_000_000
+request.stamp.nanosec = 123_000_000
+point1 = Point(x=0.1, y=0.2, z=0.5)
+point2 = Point(x=0.3, y=0.4, z=0.6)
+request.points_in = [point1, point2]
 
 # 调用
 future = client.call_async(request)
 response = await future
 
 if response.success:
-    # points_out: [x1', y1', z1', x2', y2', z2']
-    transformed_points = response.points_out
+    transformed_points = response.points_out  # list[geometry_msgs.msg.Point]
 ```
 
 ---
@@ -274,7 +279,7 @@ ros2 topic echo /joint_states
 
 ```bash
 ros2 service call /tf_tools/transform_points tf_tools/srv/TransformPoints \
-  "{source_frame: 'camera_color_optical_frame', target_frame: 'base_link', points_in: [0.1, 0.2, 0.5]}"
+  "{source_frame: 'camera_color_optical_frame', target_frame: 'base_link', stamp: {sec: 0, nanosec: 0}, points_in: [{x: 0.1, y: 0.2, z: 0.5}]}"
 ```
 
 ### 4. 查看日志

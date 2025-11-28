@@ -12,14 +12,16 @@ import json
 import math
 import sys
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List
 
 import numpy as np
 
 import rclpy
+from rclpy.duration import Duration
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
-from geometry_msgs.msg import TransformStamped
+from rclpy.time import Time
+from geometry_msgs.msg import TransformStamped, Point
 from sensor_msgs.msg import JointState
 from tf2_ros import TransformBroadcaster, StaticTransformBroadcaster
 from tf2_ros import Buffer, TransformListener
@@ -382,7 +384,7 @@ class RobotTF(Node):
         Service callback for transforming points between coordinate frames.
         
         Args:
-            request: 包含 source_frame, target_frame, points_in
+            request: 包含 source_frame, target_frame, stamp, points_in
             response: 包含 success, message, points_out
         """
         source_frame = request.source_frame
@@ -392,23 +394,20 @@ class RobotTF(Node):
         # 验证输入
         if len(points_in) == 0:
             response.success = False
-            response.message = "Empty points array"
+            response.message = "Empty points list"
             response.points_out = []
             return response
 
-        if len(points_in) % 3 != 0:
-            response.success = False
-            response.message = f"Points array length ({len(points_in)}) must be multiple of 3"
-            response.points_out = []
-            return response
+        stamp_msg = request.stamp
+        lookup_time = Time.from_msg(stamp_msg) if (stamp_msg.sec != 0 or stamp_msg.nanosec != 0) else Time()
 
         try:
             # 查询变换
             transform = self._tf_buffer.lookup_transform(
                 target_frame,
                 source_frame,
-                rclpy.time.Time(),
-                timeout=rclpy.duration.Duration(seconds=1.0)
+                lookup_time,
+                timeout=Duration(seconds=1.0)
             )
 
             # 转换点
@@ -428,18 +427,18 @@ class RobotTF(Node):
 
     def _do_transform_points(
         self,
-        points_in: List[float],
+        points_in: List[Point],
         transform: TransformStamped
-    ) -> List[float]:
+    ) -> List[Point]:
         """
         Apply transform to points array.
         
         Args:
-            points_in: 输入点 [x1,y1,z1, x2,y2,z2, ...]
+            points_in: 输入点列表
             transform: TF 变换
             
         Returns:
-            转换后的点 [x1',y1',z1', x2',y2',z2', ...]
+            转换后的点列表
         """
         # 提取变换参数
         t = transform.transform.translation
@@ -448,8 +447,8 @@ class RobotTF(Node):
         # 构建变换矩阵
         T = self._transform_to_matrix(t.x, t.y, t.z, q.x, q.y, q.z, q.w)
 
-        # 将点数组转换为 (N, 3)
-        points = np.array(points_in).reshape(-1, 3)
+        # 将点列表转换为 (N, 3)
+        points = np.array([[p.x, p.y, p.z] for p in points_in], dtype=float)
 
         # 添加齐次坐标
         ones = np.ones((points.shape[0], 1))
@@ -458,8 +457,16 @@ class RobotTF(Node):
         # 应用变换
         transformed = (T @ points_homo.T).T[:, :3]  # (N, 3)
 
-        # 转换回列表
-        return transformed.flatten().tolist()
+        # 转换回 Point 列表
+        points_out: List[Point] = []
+        for x, y, z in transformed:
+            point = Point()
+            point.x = float(x)
+            point.y = float(y)
+            point.z = float(z)
+            points_out.append(point)
+
+        return points_out
 
     @staticmethod
     def _transform_to_matrix(
@@ -499,4 +506,3 @@ def main(args=None):
 
 if __name__ == '__main__':
     main()
-

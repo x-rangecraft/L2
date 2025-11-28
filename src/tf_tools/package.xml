@@ -19,6 +19,7 @@
   <depend>sensor_msgs</depend>
   <depend>geometry_msgs</depend>
   <depend>builtin_interfaces</depend>
+  <exec_depend>python3-numpy</exec_depend>
 
   <!-- TF2 -->
   <depend>tf2</depend>
@@ -37,4 +38,3 @@
     <build_type>ament_cmake</build_type>
   </export>
 </package>
-
