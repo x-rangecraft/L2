@@ -26,7 +26,7 @@ def generate_launch_description():
     # 节点
     perception_node = Node(
         package='perception',
-        executable='perception_node',
+        executable='perception_node.py',
         name='perception_node',
         output='screen',
         parameters=[

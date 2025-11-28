@@ -170,16 +170,6 @@
             padding: 16px 20px;
             background: var(--gray-50);
             border-top: 1px solid var(--gray-200);
-            opacity: 0;
-            max-height: 0;
-            overflow: hidden;
-            transition: all 0.3s ease;
-        }
-        
-        .action-bar.visible {
-            opacity: 1;
-            max-height: 80px;
-            padding: 16px 20px;
         }
         
         .action-btn {
@@ -614,7 +604,12 @@ function handleSegmentResult(data) {
 }
 
 function handleRecord() {
-    if (!AppState.hasHighlight || AppState.processing) return;
+    if (AppState.processing) return;
+    
+    if (!AppState.hasHighlight) {
+        showToast('请先点击图像分割目标物体', 'info');
+        return;
+    }
     
     setProcessing(true, '记录中...');
     
@@ -653,6 +648,11 @@ function handleRecordResult(data) {
 function handleCancel() {
     if (AppState.processing) return;
     
+    if (!AppState.hasHighlight) {
+        showToast('当前没有分割结果', 'info');
+        return;
+    }
+    
     fetch('/cancel', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' }
@@ -690,7 +690,7 @@ function setProcessing(isProcessing, text = '处理中...') {
 }
 
 function updateActionBar() {
-    elements.actionBar.classList.toggle('visible', AppState.hasHighlight);
+    // 按钮栏始终显示，不再根据高亮状态隐藏
 }
 
 function updateConnectionStatus() {

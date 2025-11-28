@@ -1,6 +1,6 @@
 {
   "metadata": {
-    "generated_at": "2025-11-27T13:14:34.718665+00:00",
+    "generated_at": "2025-11-28T02:13:06.031968+00:00",
     "generator": "static_tf_config_build.sh",
     "translation_units": "m",
     "rotation_units": "deg",
@@ -34,9 +34,9 @@
       "parent_frame": "world",
       "child_frame": "base_link",
       "translation_m": {
-        "x": -0.04,
-        "y": 0.28,
-        "z": 0.01
+        "x": 0.0,
+        "y": -0.28,
+        "z": 0.02
       },
       "rotation_deg": {
         "about_world_axes": {
@@ -97,9 +97,9 @@
         }
       },
       "inverse_translation_m": {
-        "x": 0.04,
-        "y": -0.28,
-        "z": -0.01
+        "x": 0.0,
+        "y": 0.28,
+        "z": -0.02
       }
     },
     "world_to_camera_link": {
@@ -109,7 +109,7 @@
       "translation_m": {
         "x": -0.11,
         "y": 0.0,
-        "z": 0.55
+        "z": 0.54
       },
       "rotation_deg": {
         "about_world_axes": {
@@ -119,7 +119,7 @@
         },
         "about_body_axes": {
           "x": 0.0,
-          "y": 0.0,
+          "y": 45.0,
           "z": 0.0
         }
       },
@@ -147,7 +147,7 @@
         {
           "type": "body_axis",
           "axis": "Y",
-          "angle_deg": 0.0
+          "angle_deg": 45.0
         },
         {
           "type": "body_axis",
@@ -158,21 +158,21 @@
       "quaternion": {
         "forward_parent_to_child": {
           "x": 0.0,
-          "y": 0.0,
+          "y": 0.3826834323650898,
           "z": 0.0,
-          "w": 1.0
+          "w": 0.9238795325112867
         },
         "inverse_child_to_parent": {
           "x": -0.0,
-          "y": -0.0,
+          "y": -0.3826834323650898,
           "z": -0.0,
-          "w": 1.0
+          "w": 0.9238795325112867
         }
       },
       "inverse_translation_m": {
-        "x": 0.11,
+        "x": 0.4596194077712559,
         "y": 0.0,
-        "z": -0.55
+        "z": -0.3040559159102154
       }
     }
   },
