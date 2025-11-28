@@ -47,12 +47,16 @@ log_error() {
 
 # 检查节点是否运行
 is_running() {
-    pgrep -f "$NODE_NAME" > /dev/null 2>&1
+    # 使用 pgrep -x 精确匹配进程名，或检查 ros2 run 进程
+    pgrep -f "ros2 run.*$NODE_NAME" > /dev/null 2>&1 || \
+    pgrep -f "lib/perception/$NODE_NAME" > /dev/null 2>&1
 }
 
 # 获取 PID
 get_pid() {
-    pgrep -f "$NODE_NAME" 2>/dev/null | head -1
+    # 优先返回实际 Python 节点进程的 PID
+    pgrep -f "lib/perception/$NODE_NAME" 2>/dev/null | head -1 || \
+    pgrep -f "ros2 run.*$NODE_NAME" 2>/dev/null | head -1
 }
 
 # 启动节点
@@ -121,9 +125,15 @@ stop_node() {
         return 0
     fi
     
-    local pid=$(get_pid)
-    log_info "发送 SIGTERM 到 PID: $pid"
-    kill -TERM "$pid" 2>/dev/null || true
+    # 获取所有匹配的进程 PID（ros2 run 父进程 + 实际 Python 节点）
+    local pids=""
+    pids="$(pgrep -f "ros2 run.*$NODE_NAME" 2>/dev/null | tr '\n' ' ')"
+    pids="$pids$(pgrep -f "lib/perception/$NODE_NAME" 2>/dev/null | tr '\n' ' ')"
+    log_info "发送 SIGTERM 到进程: $pids"
+    
+    # 向所有匹配进程发送 SIGTERM
+    pkill -TERM -f "ros2 run.*$NODE_NAME" 2>/dev/null || true
+    pkill -TERM -f "lib/perception/$NODE_NAME" 2>/dev/null || true
     
     # 等待进程退出
     local max_wait=10
@@ -139,9 +149,10 @@ stop_node() {
         fi
     done
     
-    # 强制终止
+    # 强制终止所有匹配进程
     log_warn "发送 SIGKILL"
-    kill -9 "$pid" 2>/dev/null || true
+    pkill -9 -f "ros2 run.*$NODE_NAME" 2>/dev/null || true
+    pkill -9 -f "lib/perception/$NODE_NAME" 2>/dev/null || true
     sleep 1
     
     if is_running; then
