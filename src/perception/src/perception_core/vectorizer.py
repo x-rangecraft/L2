@@ -149,7 +149,7 @@ class VectorizerModule:
             raise PerceptionError(ErrorCode.INTERNAL_ERROR, str(e))
     
     def _load_clip(self):
-        """加载 CLIP 模型"""
+        """加载 CLIP 模型（可选，失败时禁用文本检索功能）"""
         logger.info(f"加载 CLIP 模型: {self._clip_model_name}")
         
         try:
@@ -162,10 +162,10 @@ class VectorizerModule:
             logger.info(f"CLIP 模型加载完成 (device={self._clip_device})")
             
         except Exception as e:
-            raise PerceptionError(
-                ErrorCode.CLIP_MODEL_LOAD_FAILED,
-                f"CLIP 加载失败: {e}"
-            )
+            # CLIP 加载失败不阻止服务启动，只是禁用文本检索功能
+            logger.warning(f"CLIP 模型加载失败，文本检索功能将不可用: {e}")
+            self._clip_model = None
+            self._clip_processor = None
     
     def _load_dino(self):
         """加载 DINOv3 模型"""
@@ -276,6 +276,10 @@ class VectorizerModule:
     
     def _extract_clip(self, image: np.ndarray) -> np.ndarray:
         """提取 CLIP 图像特征"""
+        # CLIP 不可用时返回零向量
+        if self._clip_model is None or self._clip_processor is None:
+            return np.zeros(CLIP_EMBEDDING_DIM, dtype=np.float32)
+        
         try:
             # 预处理
             inputs = self._clip_processor(
@@ -380,6 +384,13 @@ class VectorizerModule:
     
     def _encode_text_sync(self, text: str) -> np.ndarray:
         """同步文本编码"""
+        # CLIP 不可用时无法进行文本编码
+        if self._clip_model is None or self._clip_processor is None:
+            raise PerceptionError(
+                ErrorCode.CLIP_MODEL_LOAD_FAILED,
+                "CLIP 模型不可用，文本检索功能已禁用"
+            )
+        
         try:
             # 预处理
             inputs = self._clip_processor(
