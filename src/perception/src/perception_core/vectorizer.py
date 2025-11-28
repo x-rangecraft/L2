@@ -153,8 +153,16 @@ class VectorizerModule:
         logger.info(f"加载 CLIP 模型: {self._clip_model_name}")
         
         try:
-            self._clip_model = CLIPModel.from_pretrained(self._clip_model_name)
-            self._clip_processor = CLIPProcessor.from_pretrained(self._clip_model_name)
+            # 使用 safetensors 格式加载，避免 torch.load 的安全限制
+            self._clip_model = CLIPModel.from_pretrained(
+                self._clip_model_name,
+                use_safetensors=True,
+                local_files_only=True  # 使用本地缓存，避免网络问题
+            )
+            self._clip_processor = CLIPProcessor.from_pretrained(
+                self._clip_model_name,
+                local_files_only=True
+            )
             
             self._clip_model.to(self._clip_device)
             self._clip_model.eval()
