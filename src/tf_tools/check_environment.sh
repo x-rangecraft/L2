@@ -47,9 +47,9 @@ fi
 echo ""
 echo "4. 检查脚本文件..."
 scripts=(
-  "tf_publisher.sh"
-  "src/dynamic_tf_publish.sh"
-  "src/robot_tf_publisher.py"
+  "start_robot_tf.sh"
+  "src/robot_tf.py"
+  "static_tf_config_build.sh"
 )
 
 all_ok=true
@@ -71,7 +71,7 @@ fi
 # Check running processes
 echo ""
 echo "5. 检查运行状态..."
-"${SCRIPT_DIR}/tf_publisher.sh" --status 2>/dev/null || echo "   ℹ️  当前未运行 TF 发布器"
+"${SCRIPT_DIR}/start_robot_tf.sh" --status 2>/dev/null || echo "   ℹ️  当前未运行 robot_tf 节点"
 
 # Check topics
 echo ""
@@ -99,10 +99,10 @@ echo "✅ 环境检查完成"
 echo "======================================"
 echo ""
 echo "快速启动命令:"
-echo "  前台运行: ./src/tf_tools/tf_publisher.sh"
-echo "  后台运行: ./src/tf_tools/tf_publisher.sh --daemon"
-echo "  查看状态: ./src/tf_tools/tf_publisher.sh --status"
-echo "  停止服务: ./src/tf_tools/tf_publisher.sh --stop"
+echo "  后台启动: ./src/tf_tools/start_robot_tf.sh --start"
+echo "  前台运行: ./src/tf_tools/start_robot_tf.sh --foreground"
+echo "  查看状态: ./src/tf_tools/start_robot_tf.sh --status"
+echo "  停止服务: ./src/tf_tools/start_robot_tf.sh --stop"
 echo ""
 echo "详细文档: ./src/tf_tools/README.md"
 echo ""

@@ -1,6 +1,6 @@
 {
   "metadata": {
-    "generated_at": "2025-11-12T11:23:22.307451+00:00",
+    "generated_at": "2025-11-27T13:14:34.718665+00:00",
     "generator": "static_tf_config_build.sh",
     "translation_units": "m",
     "rotation_units": "deg",
@@ -34,9 +34,9 @@
       "parent_frame": "world",
       "child_frame": "base_link",
       "translation_m": {
-        "x": 0.0,
-        "y": 0.0,
-        "z": 0.0
+        "x": -0.04,
+        "y": 0.28,
+        "z": 0.01
       },
       "rotation_deg": {
         "about_world_axes": {
@@ -97,9 +97,9 @@
         }
       },
       "inverse_translation_m": {
-        "x": 0.0,
-        "y": 0.0,
-        "z": 0.0
+        "x": 0.04,
+        "y": -0.28,
+        "z": -0.01
       }
     },
     "world_to_camera_link": {
@@ -107,19 +107,19 @@
       "parent_frame": "world",
       "child_frame": "camera_link",
       "translation_m": {
-        "x": 0.5,
-        "y": 0.2,
-        "z": 0.8
+        "x": -0.11,
+        "y": 0.0,
+        "z": 0.55
       },
       "rotation_deg": {
         "about_world_axes": {
-          "x": 10.0,
+          "x": 0.0,
           "y": 0.0,
           "z": 0.0
         },
         "about_body_axes": {
           "x": 0.0,
-          "y": 5.0,
+          "y": 0.0,
           "z": 0.0
         }
       },
@@ -127,7 +127,7 @@
         {
           "type": "world_axis",
           "axis": "X",
-          "angle_deg": 10.0
+          "angle_deg": 0.0
         },
         {
           "type": "world_axis",
@@ -147,7 +147,7 @@
         {
           "type": "body_axis",
           "axis": "Y",
-          "angle_deg": 5.0
+          "angle_deg": 0.0
         },
         {
           "type": "body_axis",
@@ -157,22 +157,22 @@
       ],
       "quaternion": {
         "forward_parent_to_child": {
-          "x": 0.0870727897926938,
-          "y": 0.04345340242735779,
-          "z": 0.0038016801040236755,
-          "w": 0.9952465414778341
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0,
+          "w": 1.0
         },
         "inverse_child_to_parent": {
-          "x": -0.0870727897926938,
-          "y": -0.04345340242735779,
-          "z": -0.0038016801040236755,
-          "w": 0.9952465414778341
+          "x": -0.0,
+          "y": -0.0,
+          "z": -0.0,
+          "w": 1.0
         }
       },
       "inverse_translation_m": {
-        "x": -0.43245891528419544,
-        "y": -0.3358800927359859,
-        "z": -0.7938286023411368
+        "x": 0.11,
+        "y": 0.0,
+        "z": -0.55
       }
     }
   },

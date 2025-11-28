@@ -1,15 +1,20 @@
 #!/usr/bin/env python3
 """
-TF Publisher for Robot Manipulator
-Reads URDF model, subscribes to /joint_states, and publishes both static and dynamic TF transforms.
-This node replaces both static_transform_publisher nodes and robot_state_publisher.
+Robot TF Node - 统一的 TF 管理节点
+
+功能：
+1. TF 发布：读取 URDF 和静态配置，发布静态和动态 TF
+2. TF 转换：提供坐标转换 Service
+
+替代原有的 robot_tf_publisher 节点，新增坐标转换服务。
 """
 import json
 import math
 import sys
 from pathlib import Path
-from typing import Dict, List, Optional
-from xml.etree import ElementTree as ET
+from typing import Dict, List, Optional, Tuple
+
+import numpy as np
 
 import rclpy
 from rclpy.node import Node
@@ -17,6 +22,9 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPo
 from geometry_msgs.msg import TransformStamped
 from sensor_msgs.msg import JointState
 from tf2_ros import TransformBroadcaster, StaticTransformBroadcaster
+from tf2_ros import Buffer, TransformListener
+
+from tf_tools.srv import TransformPoints
 
 
 class URDFJoint:
@@ -44,6 +52,8 @@ class URDFParser:
     @staticmethod
     def parse_urdf_file(urdf_path: Path) -> List[URDFJoint]:
         """Parse URDF file and return list of joints."""
+        from xml.etree import ElementTree as ET
+        
         if not urdf_path.exists():
             raise FileNotFoundError(f"URDF file not found: {urdf_path}")
 
@@ -84,16 +94,18 @@ class URDFParser:
         return joints
 
 
-class RobotTFPublisher(Node):
+class RobotTF(Node):
     """
-    ROS2 Node that publishes both static and dynamic TF transforms.
-    - Static TF: Fixed transforms (world→base_link, etc.) from config file
-    - Dynamic TF: Joint-based transforms from URDF + joint_states
-    This node replaces both static_transform_publisher and robot_state_publisher.
+    ROS2 Node that provides unified TF management.
+    
+    功能：
+    - 发布静态 TF：固定变换（world→base_link, world→camera_link 等）
+    - 发布动态 TF：基于 joint_states 的机器人关节变换
+    - 提供转换服务：/tf_tools/transform_points
     """
 
     def __init__(self):
-        super().__init__('robot_tf_publisher')
+        super().__init__('robot_tf')
 
         # Declare parameters
         self.declare_parameter('urdf_path', '')
@@ -133,7 +145,9 @@ class RobotTFPublisher(Node):
         # Current joint positions
         self.joint_positions: Dict[str, float] = {}
 
-        # TF broadcasters
+        # ================================================================
+        # TF 发布功能（保留原有逻辑）
+        # ================================================================
         self.tf_broadcaster = TransformBroadcaster(self)
         self.static_tf_broadcaster = StaticTransformBroadcaster(self)
 
@@ -141,7 +155,7 @@ class RobotTFPublisher(Node):
         if static_config_path:
             self._load_and_publish_static_tf(Path(static_config_path))
 
-        # Subscribe to joint_states with best effort QoS to match typical publishers
+        # Subscribe to joint_states with reliable QoS
         qos = QoSProfile(
             reliability=ReliabilityPolicy.RELIABLE,
             history=HistoryPolicy.KEEP_LAST,
@@ -159,10 +173,27 @@ class RobotTFPublisher(Node):
         timer_period = 1.0 / max(0.1, publish_rate)
         self.timer = self.create_timer(timer_period, self.publish_fixed_transforms)
 
-        self.get_logger().info(
-            f'robot_tf_publisher started, publishing at {publish_rate} Hz'
+        # ================================================================
+        # TF 转换功能（新增）
+        # ================================================================
+        self._tf_buffer = Buffer()
+        self._tf_listener = TransformListener(self._tf_buffer, self)
+
+        # 创建转换服务
+        self.transform_service = self.create_service(
+            TransformPoints,
+            '/tf_tools/transform_points',
+            self._transform_points_callback
         )
 
+        self.get_logger().info(
+            f'robot_tf started: publishing at {publish_rate} Hz, '
+            f'transform service available at /tf_tools/transform_points'
+        )
+
+    # ================================================================
+    # 静态 TF 加载（保留原有逻辑）
+    # ================================================================
     def _load_and_publish_static_tf(self, config_path: Path):
         """Load static TF configuration and publish them once."""
         if not config_path.exists():
@@ -204,7 +235,9 @@ class RobotTFPublisher(Node):
         except Exception as e:
             self.get_logger().error(f'Failed to load static TF config: {e}')
 
-    # ------------------------------------------------------------------ timers
+    # ================================================================
+    # 动态 TF 发布（保留原有逻辑）
+    # ================================================================
     def joint_state_callback(self, msg: JointState):
         """Callback for joint_states topic."""
         # Update joint positions
@@ -264,8 +297,6 @@ class RobotTFPublisher(Node):
         # For movable joints, apply joint position
         if joint.joint_type == 'revolute' or joint.joint_type == 'continuous':
             # Rotate around joint axis
-            # Axis rotation is applied AFTER the origin rotation
-            # We need to compose: origin_rotation * axis_rotation(position)
             ax, ay, az = joint.axis
 
             # Convert origin RPY to quaternion
@@ -339,10 +370,123 @@ class RobotTFPublisher(Node):
         qw = q1w * q2w - q1x * q2x - q1y * q2y - q1z * q2z
         return qx, qy, qz, qw
 
+    # ================================================================
+    # TF 转换服务（新增）
+    # ================================================================
+    def _transform_points_callback(
+        self,
+        request: TransformPoints.Request,
+        response: TransformPoints.Response
+    ) -> TransformPoints.Response:
+        """
+        Service callback for transforming points between coordinate frames.
+        
+        Args:
+            request: 包含 source_frame, target_frame, points_in
+            response: 包含 success, message, points_out
+        """
+        source_frame = request.source_frame
+        target_frame = request.target_frame
+        points_in = request.points_in
+
+        # 验证输入
+        if len(points_in) == 0:
+            response.success = False
+            response.message = "Empty points array"
+            response.points_out = []
+            return response
+
+        if len(points_in) % 3 != 0:
+            response.success = False
+            response.message = f"Points array length ({len(points_in)}) must be multiple of 3"
+            response.points_out = []
+            return response
+
+        try:
+            # 查询变换
+            transform = self._tf_buffer.lookup_transform(
+                target_frame,
+                source_frame,
+                rclpy.time.Time(),
+                timeout=rclpy.duration.Duration(seconds=1.0)
+            )
+
+            # 转换点
+            points_out = self._do_transform_points(points_in, transform)
+
+            response.success = True
+            response.message = ""
+            response.points_out = points_out
+
+        except Exception as e:
+            self.get_logger().error(f'Transform failed: {e}')
+            response.success = False
+            response.message = str(e)
+            response.points_out = []
+
+        return response
+
+    def _do_transform_points(
+        self,
+        points_in: List[float],
+        transform: TransformStamped
+    ) -> List[float]:
+        """
+        Apply transform to points array.
+        
+        Args:
+            points_in: 输入点 [x1,y1,z1, x2,y2,z2, ...]
+            transform: TF 变换
+            
+        Returns:
+            转换后的点 [x1',y1',z1', x2',y2',z2', ...]
+        """
+        # 提取变换参数
+        t = transform.transform.translation
+        q = transform.transform.rotation
+
+        # 构建变换矩阵
+        T = self._transform_to_matrix(t.x, t.y, t.z, q.x, q.y, q.z, q.w)
+
+        # 将点数组转换为 (N, 3)
+        points = np.array(points_in).reshape(-1, 3)
+
+        # 添加齐次坐标
+        ones = np.ones((points.shape[0], 1))
+        points_homo = np.hstack([points, ones])  # (N, 4)
+
+        # 应用变换
+        transformed = (T @ points_homo.T).T[:, :3]  # (N, 3)
+
+        # 转换回列表
+        return transformed.flatten().tolist()
+
+    @staticmethod
+    def _transform_to_matrix(
+        tx: float, ty: float, tz: float,
+        qx: float, qy: float, qz: float, qw: float
+    ) -> np.ndarray:
+        """
+        Convert translation + quaternion to 4x4 transformation matrix.
+        """
+        # 四元数转旋转矩阵
+        x, y, z, w = qx, qy, qz, qw
+        R = np.array([
+            [1 - 2*(y*y + z*z), 2*(x*y - z*w), 2*(x*z + y*w)],
+            [2*(x*y + z*w), 1 - 2*(x*x + z*z), 2*(y*z - x*w)],
+            [2*(x*z - y*w), 2*(y*z + x*w), 1 - 2*(x*x + y*y)]
+        ])
+
+        # 构建 4x4 变换矩阵
+        T = np.eye(4)
+        T[:3, :3] = R
+        T[:3, 3] = [tx, ty, tz]
+        return T
+
 
 def main(args=None):
     rclpy.init(args=args)
-    node = RobotTFPublisher()
+    node = RobotTF()
 
     try:
         rclpy.spin(node)
@@ -355,3 +499,4 @@ def main(args=None):
 
 if __name__ == '__main__':
     main()
+

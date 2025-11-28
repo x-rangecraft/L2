@@ -1,0 +1,15 @@
+# TransformPoints.srv
+# 将点数组从源坐标系转换到目标坐标系
+
+# Request
+string source_frame              # 源坐标系 (如 camera_color_optical_frame)
+string target_frame              # 目标坐标系 (如 base_link)
+float64[] points_in              # 输入点数组 [x1,y1,z1, x2,y2,z2, ...]
+
+---
+
+# Response
+bool success                     # 是否成功
+string message                   # 错误信息（失败时）
+float64[] points_out             # 转换后的点数组 [x1',y1',z1', x2',y2',z2', ...]
+
