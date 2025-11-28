@@ -23,6 +23,7 @@ install(PROGRAMS scripts/robot_skill_node.py
 
 rosidl_generate_interfaces(${PROJECT_NAME}
   "action/SkillSequence.action"
+  "action/GraspRecord.action"
   DEPENDENCIES geometry_msgs builtin_interfaces
 )
 

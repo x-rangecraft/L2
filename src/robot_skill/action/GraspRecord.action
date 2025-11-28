@@ -1,0 +1,17 @@
+# Goal
+geometry_msgs/Point[] boundary_points     # Object boundary point cloud
+float32 max_gripper_width                 # Maximum gripper opening width (meters)
+string context_id                         # Context identifier for tracking
+---
+# Result
+bool success
+string error_code
+string message
+int32 steps_executed
+---
+# Feedback
+string phase                              # Current phase: planning / executing
+int32 step_index
+string step_desc
+float32 progress
+

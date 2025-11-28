@@ -17,7 +17,7 @@ setup(
         ('share/' + package_name + '/launch', ['launch/robot_skill.launch.py']),
         ('share/' + package_name + '/skill_sets', glob('skill_sets/*.yaml')),
     ],
-    install_requires=['setuptools', 'PyYAML'],
+    install_requires=['setuptools', 'PyYAML', 'open3d', 'scipy'],
     zip_safe=True,
     maintainer='L2 Robotics',
     maintainer_email='robot@l2.local',
@@ -26,7 +26,7 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            'robot_skill_node = robot_skill_core.node:main',
+            'robot_skill_node = robot_skill_core.robot_skill:main',
         ],
     },
 )

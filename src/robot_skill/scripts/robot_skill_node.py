@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-from robot_skill_core.node import main
+from robot_skill_core.robot_skill import main
 
 
 if __name__ == '__main__':
