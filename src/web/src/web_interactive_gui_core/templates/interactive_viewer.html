@@ -1,0 +1,751 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>物体分割交互界面</title>
+    <script src="https://cdn.socket.io/4.5.4/socket.io.min.js" crossorigin="anonymous"></script>
+    <script>
+        if (typeof io === 'undefined') {
+            document.write('<script src="' + {{ url_for('static', filename='socket.io.min.js')|tojson }} + '"><\/script>');
+        }
+    </script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        :root {
+            --primary: #2563eb;
+            --primary-dark: #1d4ed8;
+            --success: #16a34a;
+            --success-light: #dcfce7;
+            --danger: #dc2626;
+            --danger-light: #fee2e2;
+            --warning: #f59e0b;
+            --warning-light: #fef3c7;
+            --gray-50: #f9fafb;
+            --gray-100: #f3f4f6;
+            --gray-200: #e5e7eb;
+            --gray-400: #9ca3af;
+            --gray-600: #4b5563;
+            --gray-800: #1f2937;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background: linear-gradient(135deg, #1e3a5f 0%, #0f172a 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+        
+        .container {
+            max-width: 1100px;
+            margin: 0 auto;
+        }
+        
+        .header {
+            text-align: center;
+            margin-bottom: 20px;
+        }
+        
+        .header h1 {
+            color: white;
+            font-size: 1.8em;
+            font-weight: 600;
+            margin-bottom: 8px;
+        }
+        
+        .header p {
+            color: #94a3b8;
+            font-size: 0.95em;
+        }
+        
+        .main-card {
+            background: white;
+            border-radius: 16px;
+            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.4);
+            overflow: hidden;
+        }
+        
+        .image-section {
+            position: relative;
+            background: #000;
+        }
+        
+        .image-wrapper {
+            position: relative;
+            width: 100%;
+            cursor: crosshair;
+        }
+        
+        #camera-image {
+            width: 100%;
+            height: auto;
+            display: block;
+            min-height: 400px;
+            object-fit: contain;
+            background: #111;
+        }
+        
+        #overlay-image {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+            opacity: 0;
+            transition: opacity 0.3s ease;
+            object-fit: contain;
+        }
+        
+        .click-marker {
+            position: absolute;
+            width: 20px;
+            height: 20px;
+            border: 3px solid #fff;
+            border-radius: 50%;
+            transform: translate(-50%, -50%);
+            pointer-events: none;
+            box-shadow: 0 0 0 2px var(--primary), 0 0 20px rgba(37, 99, 235, 0.5);
+            animation: marker-pulse 1.5s ease-out;
+            z-index: 10;
+        }
+        
+        @keyframes marker-pulse {
+            0% { transform: translate(-50%, -50%) scale(0.5); opacity: 1; }
+            100% { transform: translate(-50%, -50%) scale(2); opacity: 0; }
+        }
+        
+        /* 处理中遮罩 */
+        .processing-overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0, 0, 0, 0.6);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            z-index: 20;
+            opacity: 0;
+            visibility: hidden;
+            transition: opacity 0.3s, visibility 0.3s;
+        }
+        
+        .processing-overlay.active {
+            opacity: 1;
+            visibility: visible;
+        }
+        
+        .spinner {
+            width: 50px;
+            height: 50px;
+            border: 4px solid rgba(255, 255, 255, 0.3);
+            border-top-color: white;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+        
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+        
+        .processing-text {
+            color: white;
+            margin-top: 15px;
+            font-size: 1.1em;
+            font-weight: 500;
+        }
+        
+        /* 功能按钮栏 */
+        .action-bar {
+            display: flex;
+            gap: 12px;
+            padding: 16px 20px;
+            background: var(--gray-50);
+            border-top: 1px solid var(--gray-200);
+            opacity: 0;
+            max-height: 0;
+            overflow: hidden;
+            transition: all 0.3s ease;
+        }
+        
+        .action-bar.visible {
+            opacity: 1;
+            max-height: 80px;
+            padding: 16px 20px;
+        }
+        
+        .action-btn {
+            flex: 1;
+            padding: 12px 24px;
+            border: none;
+            border-radius: 8px;
+            font-size: 1em;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+        }
+        
+        .action-btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+        
+        .btn-record {
+            background: var(--success);
+            color: white;
+        }
+        
+        .btn-record:hover:not(:disabled) {
+            background: #15803d;
+            transform: translateY(-1px);
+        }
+        
+        .btn-sample {
+            background: var(--gray-200);
+            color: var(--gray-400);
+            cursor: not-allowed;
+        }
+        
+        .btn-cancel {
+            background: var(--gray-200);
+            color: var(--gray-600);
+        }
+        
+        .btn-cancel:hover:not(:disabled) {
+            background: var(--gray-300, #d1d5db);
+        }
+        
+        /* 信息面板 */
+        .info-panel {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 1px;
+            background: var(--gray-200);
+            border-top: 1px solid var(--gray-200);
+        }
+        
+        .info-item {
+            background: white;
+            padding: 16px;
+            text-align: center;
+        }
+        
+        .info-label {
+            font-size: 0.8em;
+            color: var(--gray-400);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 6px;
+        }
+        
+        .info-value {
+            font-size: 1.4em;
+            font-weight: 700;
+            color: var(--gray-800);
+        }
+        
+        .info-value.highlight {
+            color: var(--primary);
+        }
+        
+        /* 状态栏 */
+        .status-bar {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 12px 20px;
+            background: var(--gray-800);
+            color: white;
+            font-size: 0.9em;
+        }
+        
+        .connection-status {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        
+        .status-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background: var(--danger);
+            transition: background 0.3s;
+        }
+        
+        .status-dot.connected {
+            background: var(--success);
+            box-shadow: 0 0 8px var(--success);
+        }
+        
+        .node-status {
+            color: #94a3b8;
+        }
+        
+        /* Toast 通知 */
+        .toast-container {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            z-index: 1000;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+        
+        .toast {
+            padding: 14px 20px;
+            border-radius: 8px;
+            color: white;
+            font-weight: 500;
+            box-shadow: 0 10px 25px rgba(0, 0, 0, 0.3);
+            animation: toast-in 0.3s ease;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        
+        .toast.success {
+            background: var(--success);
+        }
+        
+        .toast.error {
+            background: var(--danger);
+        }
+        
+        .toast.info {
+            background: var(--primary);
+        }
+        
+        @keyframes toast-in {
+            from { transform: translateX(100%); opacity: 0; }
+            to { transform: translateX(0); opacity: 1; }
+        }
+        
+        .toast-icon {
+            font-size: 1.2em;
+        }
+        
+        /* 操作提示 */
+        .tips {
+            margin-top: 20px;
+            padding: 16px 20px;
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 12px;
+            color: #94a3b8;
+            font-size: 0.9em;
+        }
+        
+        .tips h4 {
+            color: white;
+            margin-bottom: 10px;
+            font-weight: 600;
+        }
+        
+        .tips ul {
+            list-style: none;
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 8px;
+        }
+        
+        .tips li::before {
+            content: "→ ";
+            color: var(--primary);
+        }
+    </style>
+</head>
+<body>
+<div class="container">
+    <div class="header">
+        <h1>物体分割交互界面</h1>
+        <p>点击图像选择目标物体，进行分割和记录</p>
+    </div>
+    
+    <div class="main-card">
+        <div class="image-section">
+            <div class="image-wrapper" id="image-container">
+                <img id="camera-image" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7" alt="Camera Feed">
+                <img id="overlay-image" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7" alt="Overlay">
+                
+                <div class="processing-overlay" id="processing-overlay">
+                    <div class="spinner"></div>
+                    <div class="processing-text" id="processing-text">分割中...</div>
+                </div>
+            </div>
+        </div>
+        
+        <div class="action-bar" id="action-bar">
+            <button class="action-btn btn-record" id="btn-record">
+                <span>✓</span> 记录物体
+            </button>
+            <button class="action-btn btn-sample" id="btn-sample" disabled title="功能开发中">
+                <span>+</span> 添加采样
+            </button>
+            <button class="action-btn btn-cancel" id="btn-cancel">
+                <span>✕</span> 取消
+            </button>
+        </div>
+        
+        <div class="info-panel">
+            <div class="info-item">
+                <div class="info-label">状态</div>
+                <div class="info-value" id="state-display">空闲</div>
+            </div>
+            <div class="info-item">
+                <div class="info-label">点击坐标</div>
+                <div class="info-value" id="last-click">-</div>
+            </div>
+            <div class="info-item">
+                <div class="info-label">分割次数</div>
+                <div class="info-value highlight" id="segment-count">0</div>
+            </div>
+            <div class="info-item">
+                <div class="info-label">帧率</div>
+                <div class="info-value" id="fps">0 FPS</div>
+            </div>
+        </div>
+        
+        <div class="status-bar">
+            <div class="connection-status">
+                <div class="status-dot" id="status-dot"></div>
+                <span id="connection-text">连接中...</span>
+            </div>
+            <div class="node-status" id="node-status">-</div>
+        </div>
+    </div>
+    
+    <div class="tips">
+        <h4>操作说明</h4>
+        <ul>
+            <li>点击图像任意位置触发物体分割</li>
+            <li>分割成功后显示高亮，可选择记录或取消</li>
+            <li>记录后物体将保存到数据库</li>
+            <li>再次点击会替换当前高亮</li>
+        </ul>
+    </div>
+</div>
+
+<div class="toast-container" id="toast-container"></div>
+
+<script>
+const TRANSPARENT_PIXEL = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
+
+// 状态管理
+const AppState = {
+    connected: false,
+    hasHighlight: false,
+    processing: false,
+    segmentCount: 0,
+    frameCount: 0,
+    lastFrameTime: Date.now()
+};
+
+// DOM 元素
+let socket;
+let elements = {};
+
+function initializeApp() {
+    // 获取 DOM 元素
+    elements = {
+        imageContainer: document.getElementById('image-container'),
+        cameraImage: document.getElementById('camera-image'),
+        overlayImage: document.getElementById('overlay-image'),
+        processingOverlay: document.getElementById('processing-overlay'),
+        processingText: document.getElementById('processing-text'),
+        actionBar: document.getElementById('action-bar'),
+        btnRecord: document.getElementById('btn-record'),
+        btnSample: document.getElementById('btn-sample'),
+        btnCancel: document.getElementById('btn-cancel'),
+        stateDisplay: document.getElementById('state-display'),
+        lastClick: document.getElementById('last-click'),
+        segmentCount: document.getElementById('segment-count'),
+        fps: document.getElementById('fps'),
+        statusDot: document.getElementById('status-dot'),
+        connectionText: document.getElementById('connection-text'),
+        nodeStatus: document.getElementById('node-status'),
+        toastContainer: document.getElementById('toast-container')
+    };
+    
+    // 初始化 Socket.IO
+    initializeSocketIO();
+    
+    // 绑定事件
+    bindEvents();
+}
+
+function initializeSocketIO() {
+    if (typeof io === 'undefined') {
+        showToast('Socket.IO 加载失败', 'error');
+        return;
+    }
+    
+    socket = io();
+    
+    socket.on('connect', () => {
+        AppState.connected = true;
+        updateConnectionStatus();
+    });
+    
+    socket.on('disconnect', () => {
+        AppState.connected = false;
+        updateConnectionStatus();
+    });
+    
+    socket.on('image_update', handleImageUpdate);
+    socket.on('segment_result', handleSegmentResult);
+    socket.on('record_result', handleRecordResult);
+}
+
+function bindEvents() {
+    // 图像点击 - 触发分割
+    elements.imageContainer.addEventListener('click', handleImageClick);
+    
+    // 记录按钮
+    elements.btnRecord.addEventListener('click', handleRecord);
+    
+    // 取消按钮
+    elements.btnCancel.addEventListener('click', handleCancel);
+}
+
+function handleImageClick(event) {
+    if (AppState.processing) return;
+    
+    const rect = elements.cameraImage.getBoundingClientRect();
+    const x = event.clientX - rect.left;
+    const y = event.clientY - rect.top;
+    
+    // 转换为图像坐标
+    const imageX = Math.round((x / rect.width) * elements.cameraImage.naturalWidth);
+    const imageY = Math.round((y / rect.height) * elements.cameraImage.naturalHeight);
+    
+    // 显示点击标记
+    showClickMarker(x, y);
+    
+    // 更新显示
+    elements.lastClick.textContent = `(${imageX}, ${imageY})`;
+    
+    // 发送分割请求
+    setProcessing(true, '分割中...');
+    
+    fetch('/segment', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ x: imageX, y: imageY })
+    })
+    .then(res => res.json())
+    .then(data => {
+        if (data.status === 'error') {
+            setProcessing(false);
+            showToast(data.error || '分割请求失败', 'error');
+        }
+        // 成功时等待 segment_result 事件
+    })
+    .catch(err => {
+        setProcessing(false);
+        showToast('网络错误: ' + err.message, 'error');
+    });
+}
+
+function handleImageUpdate(data) {
+    if (data.image) {
+        elements.cameraImage.src = 'data:image/jpeg;base64,' + data.image;
+    }
+    
+    if (data.overlay) {
+        elements.overlayImage.src = 'data:image/jpeg;base64,' + data.overlay;
+        const opacity = typeof data.overlay_opacity === 'number' ? data.overlay_opacity : 0.6;
+        elements.overlayImage.style.opacity = opacity;
+        
+        if (!AppState.hasHighlight) {
+            AppState.hasHighlight = true;
+            updateActionBar();
+        }
+    } else {
+        elements.overlayImage.src = TRANSPARENT_PIXEL;
+        elements.overlayImage.style.opacity = 0;
+        
+        if (AppState.hasHighlight) {
+            AppState.hasHighlight = false;
+            updateActionBar();
+        }
+    }
+    
+    // 更新 FPS
+    AppState.frameCount++;
+    const now = Date.now();
+    const elapsed = (now - AppState.lastFrameTime) / 1000;
+    if (elapsed >= 1.0) {
+        const fps = AppState.frameCount / elapsed;
+        elements.fps.textContent = fps.toFixed(1) + ' FPS';
+        AppState.frameCount = 0;
+        AppState.lastFrameTime = now;
+    }
+}
+
+function handleSegmentResult(data) {
+    setProcessing(false);
+    
+    if (data.success) {
+        AppState.segmentCount++;
+        elements.segmentCount.textContent = AppState.segmentCount;
+        AppState.hasHighlight = true;
+        updateActionBar();
+        updateStateDisplay('已分割');
+        showToast('分割成功', 'success');
+    } else {
+        AppState.hasHighlight = false;
+        updateActionBar();
+        updateStateDisplay('空闲');
+        showToast(data.error || '分割失败', 'error');
+    }
+}
+
+function handleRecord() {
+    if (!AppState.hasHighlight || AppState.processing) return;
+    
+    setProcessing(true, '记录中...');
+    
+    fetch('/record', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ label: '' })
+    })
+    .then(res => res.json())
+    .then(data => {
+        if (data.status === 'error') {
+            setProcessing(false);
+            showToast(data.error || '记录请求失败', 'error');
+        }
+        // 成功时等待 record_result 事件
+    })
+    .catch(err => {
+        setProcessing(false);
+        showToast('网络错误: ' + err.message, 'error');
+    });
+}
+
+function handleRecordResult(data) {
+    setProcessing(false);
+    
+    if (data.success) {
+        AppState.hasHighlight = false;
+        updateActionBar();
+        updateStateDisplay('空闲');
+        showToast(`记录成功: ${data.object_id}`, 'success');
+    } else {
+        showToast(data.error || '记录失败', 'error');
+    }
+}
+
+function handleCancel() {
+    if (AppState.processing) return;
+    
+    fetch('/cancel', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' }
+    })
+    .then(res => res.json())
+    .then(data => {
+        AppState.hasHighlight = false;
+        updateActionBar();
+        updateStateDisplay('空闲');
+    })
+    .catch(err => {
+        showToast('取消失败: ' + err.message, 'error');
+    });
+}
+
+function showClickMarker(x, y) {
+    const marker = document.createElement('div');
+    marker.className = 'click-marker';
+    marker.style.left = x + 'px';
+    marker.style.top = y + 'px';
+    elements.imageContainer.appendChild(marker);
+    setTimeout(() => marker.remove(), 1500);
+}
+
+function setProcessing(isProcessing, text = '处理中...') {
+    AppState.processing = isProcessing;
+    elements.processingOverlay.classList.toggle('active', isProcessing);
+    elements.processingText.textContent = text;
+    elements.btnRecord.disabled = isProcessing;
+    elements.btnCancel.disabled = isProcessing;
+    
+    if (isProcessing) {
+        updateStateDisplay(text.replace('...', ''));
+    }
+}
+
+function updateActionBar() {
+    elements.actionBar.classList.toggle('visible', AppState.hasHighlight);
+}
+
+function updateConnectionStatus() {
+    elements.statusDot.classList.toggle('connected', AppState.connected);
+    elements.connectionText.textContent = AppState.connected ? '已连接' : '连接断开';
+    
+    if (AppState.connected) {
+        // 获取节点状态
+        fetch('/healthz')
+            .then(res => res.json())
+            .then(data => {
+                const parts = [];
+                if (data.camera) parts.push(`相机: ${data.camera.ready ? '✓' : '✗'}`);
+                if (data.perception) parts.push(`感知: ${data.perception.ready ? '✓' : '✗'}`);
+                elements.nodeStatus.textContent = parts.join(' | ') || '-';
+            })
+            .catch(() => {
+                elements.nodeStatus.textContent = '-';
+            });
+    }
+}
+
+function updateStateDisplay(state) {
+    elements.stateDisplay.textContent = state;
+}
+
+function showToast(message, type = 'info') {
+    const toast = document.createElement('div');
+    toast.className = `toast ${type}`;
+    
+    const icons = {
+        success: '✓',
+        error: '✕',
+        info: 'ℹ'
+    };
+    
+    toast.innerHTML = `
+        <span class="toast-icon">${icons[type] || ''}</span>
+        <span>${message}</span>
+    `;
+    
+    elements.toastContainer.appendChild(toast);
+    
+    setTimeout(() => {
+        toast.style.animation = 'toast-in 0.3s ease reverse';
+        setTimeout(() => toast.remove(), 300);
+    }, 3000);
+}
+
+// 启动应用
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', initializeApp);
+} else {
+    initializeApp();
+}
+</script>
+</body>
+</html>
