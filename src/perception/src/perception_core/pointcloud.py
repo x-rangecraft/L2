@@ -20,8 +20,10 @@ from .constants import (
     MIN_DEPTH_MM,
     MAX_DEPTH_MM,
     DEFAULT_OUTPUT_FRAME_ID,
+    TIMEOUT_POINTCLOUD,
 )
 from .error_codes import PerceptionError, ErrorCode
+from .async_worker import AsyncWorker
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +45,7 @@ class PointCloudModule:
     根据分割掩码和深度图，计算目标物体的 3D 点云
     """
     
-    def __init__(self, config: Dict[str, Any]):
+    def __init__(self, config: Dict[str, Any], worker: AsyncWorker):
         """
         初始化配置
         
@@ -53,8 +55,12 @@ class PointCloudModule:
                 - min_point_count: 最小有效点数
                 - min_depth_mm: 最小有效深度 (mm)
                 - max_depth_mm: 最大有效深度 (mm)
+            worker: AsyncWorker 实例
         """
+        if worker is None:
+            raise ValueError("PointCloudModule 需要有效的 AsyncWorker 实例")
         self._config = config
+        self._worker = worker
         self._ready = False
         
         # 配置参数
@@ -63,6 +69,7 @@ class PointCloudModule:
         self._min_depth_mm = config.get('min_depth_mm', MIN_DEPTH_MM)
         self._max_depth_mm = config.get('max_depth_mm', MAX_DEPTH_MM)
         self._max_invalid_ratio = config.get('max_invalid_depth_ratio', MAX_INVALID_DEPTH_RATIO)
+        self._compute_timeout = config.get('timeout', TIMEOUT_POINTCLOUD)
         
         logger.info("PointCloudModule 配置已加载")
     
@@ -139,17 +146,28 @@ class PointCloudModule:
                 f"相机内参无效: fx={fx}, fy={fy}"
             )
         
-        # 在线程池中执行计算（避免阻塞事件循环）
-        loop = asyncio.get_event_loop()
-        result = await loop.run_in_executor(
-            None,
-            self._compute_pointcloud,
-            mask,
-            depth_image,
-            fx, fy, cx, cy
-        )
-        
-        return result
+        frame_id = getattr(camera_info, 'header', None)
+        frame_id = getattr(frame_id, 'frame_id', None) or self._output_frame_id
+
+        try:
+            return await asyncio.wait_for(
+                self._worker.run_callable(
+                    self._compute_pointcloud,
+                    mask,
+                    depth_image,
+                    fx,
+                    fy,
+                    cx,
+                    cy,
+                    frame_id,
+                ),
+                timeout=self._compute_timeout,
+            )
+        except asyncio.TimeoutError as exc:
+            raise PerceptionError(
+                ErrorCode.POINTCLOUD_COMPUTE_TIMEOUT,
+                f"超过 {self._compute_timeout:.1f}s 未完成"
+            ) from exc
     
     def _extract_intrinsics(self, camera_info: CameraInfo) -> Tuple[float, float, float, float]:
         """从 CameraInfo 提取相机内参"""
@@ -168,7 +186,8 @@ class PointCloudModule:
         fx: float,
         fy: float,
         cx: float,
-        cy: float
+        cy: float,
+        frame_id: str,
     ) -> PointCloudResult:
         """计算点云（同步方法，在线程池中执行）"""
         h, w = depth_image.shape[:2]
@@ -230,7 +249,7 @@ class PointCloudModule:
         bbox_max = (float(np.max(x)), float(np.max(y)), float(np.max(z)))
         
         # 创建 PointCloud2 消息
-        point_cloud = self._create_pointcloud2(points)
+        point_cloud = self._create_pointcloud2(points, frame_id)
         
         logger.debug(
             f"点云计算完成: {len(points)} 点, "
@@ -245,7 +264,7 @@ class PointCloudModule:
             point_count=len(points)
         )
     
-    def _create_pointcloud2(self, points: np.ndarray) -> PointCloud2:
+    def _create_pointcloud2(self, points: np.ndarray, frame_id: str) -> PointCloud2:
         """
         创建 PointCloud2 消息
         
@@ -256,7 +275,7 @@ class PointCloudModule:
             PointCloud2: ROS 点云消息
         """
         msg = PointCloud2()
-        msg.header.frame_id = self._output_frame_id
+        msg.header.frame_id = frame_id
         
         # 设置字段
         msg.fields = [
@@ -308,7 +327,14 @@ class PointCloudModule:
         Returns:
             Tuple: (points, center_3d, bbox_min, bbox_max)
         """
-        result = self._compute_pointcloud(mask, depth_image, fx, fy, cx, cy)
+        result = self._compute_pointcloud(
+            mask,
+            depth_image,
+            fx,
+            fy,
+            cx,
+            cy,
+            self._output_frame_id,
+        )
         points = self.pointcloud2_to_array(result.point_cloud)
         return points, result.center_3d, result.bbox_min, result.bbox_max
-

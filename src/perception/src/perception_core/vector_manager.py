@@ -4,7 +4,6 @@ VectorManager - 向量索引管理模块
 FAISS 向量索引的增删查
 """
 
-import asyncio
 import json
 import logging
 from pathlib import Path
@@ -21,6 +20,7 @@ from .constants import (
     ID_MAPPING_FILENAME,
 )
 from .error_codes import PerceptionError, ErrorCode
+from .async_worker import AsyncWorker
 
 # 延迟导入 FAISS
 FAISS_AVAILABLE = False
@@ -40,7 +40,7 @@ class VectorManager:
     管理 FAISS 向量索引的增删查操作
     """
     
-    def __init__(self, config: Dict[str, Any], storage_dir: str):
+    def __init__(self, config: Dict[str, Any], storage_dir: str, worker: AsyncWorker):
         """
         初始化配置
         
@@ -51,8 +51,11 @@ class VectorManager:
                 - dino_dimension: DINOv3 向量维度
             storage_dir: 存储目录路径
         """
+        if worker is None:
+            raise ValueError("VectorManager 需要有效的 AsyncWorker 实例")
         self._config = config
         self._storage_dir = Path(storage_dir)
+        self._worker = worker
         self._ready = False
         
         # 配置参数
@@ -102,8 +105,7 @@ class VectorManager:
             # 创建存储目录
             self._faiss_dir.mkdir(parents=True, exist_ok=True)
             
-            loop = asyncio.get_event_loop()
-            await loop.run_in_executor(None, self._load_or_create_indices)
+            await self._worker.run_callable(self._load_or_create_indices)
             
             self._ready = True
             logger.info(
@@ -473,4 +475,3 @@ class VectorManager:
             'dino_mappings': len(self._dino_id_mapping),
             'index_type': self._index_type,
         }
-

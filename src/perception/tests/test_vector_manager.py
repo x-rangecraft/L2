@@ -13,7 +13,7 @@ from pathlib import Path
 class TestVectorManager:
     """测试 VectorManager"""
     
-    def test_module_init(self):
+    def test_module_init(self, async_worker):
         """测试模块初始化"""
         from perception_core.vector_manager import VectorManager
         
@@ -24,31 +24,31 @@ class TestVectorManager:
                 'dino_dimension': 384,
             }
             
-            manager = VectorManager(config, tmpdir)
+            manager = VectorManager(config, tmpdir, async_worker)
             assert not manager.is_ready
     
     @pytest.mark.asyncio
-    async def test_initialize(self):
+    async def test_initialize(self, async_worker):
         """测试异步初始化"""
         pytest.importorskip("faiss")
         from perception_core.vector_manager import VectorManager
         
         with tempfile.TemporaryDirectory() as tmpdir:
             config = {}
-            manager = VectorManager(config, tmpdir)
+            manager = VectorManager(config, tmpdir, async_worker)
             
             result = await manager.initialize()
             assert result is True
             assert manager.is_ready
     
     @pytest.mark.asyncio
-    async def test_add_and_search(self):
+    async def test_add_and_search(self, async_worker):
         """测试添加和搜索"""
         pytest.importorskip("faiss")
         from perception_core.vector_manager import VectorManager
         
         with tempfile.TemporaryDirectory() as tmpdir:
-            manager = VectorManager({}, tmpdir)
+            manager = VectorManager({}, tmpdir, async_worker)
             await manager.initialize()
             
             # 添加向量
@@ -69,13 +69,13 @@ class TestVectorManager:
             assert results[0][3] == "s001"     # sample_id
     
     @pytest.mark.asyncio
-    async def test_multiple_samples(self):
+    async def test_multiple_samples(self, async_worker):
         """测试多样本"""
         pytest.importorskip("faiss")
         from perception_core.vector_manager import VectorManager
         
         with tempfile.TemporaryDirectory() as tmpdir:
-            manager = VectorManager({}, tmpdir)
+            manager = VectorManager({}, tmpdir, async_worker)
             await manager.initialize()
             
             # 添加多个样本
@@ -90,14 +90,14 @@ class TestVectorManager:
             assert len(dino_indices) == 3
     
     @pytest.mark.asyncio
-    async def test_save_and_load(self):
+    async def test_save_and_load(self, async_worker):
         """测试保存和加载"""
         pytest.importorskip("faiss")
         from perception_core.vector_manager import VectorManager
         
         with tempfile.TemporaryDirectory() as tmpdir:
             # 创建并添加数据
-            manager1 = VectorManager({}, tmpdir)
+            manager1 = VectorManager({}, tmpdir, async_worker)
             await manager1.initialize()
             
             clip_emb = np.random.randn(512).astype(np.float32)
@@ -106,7 +106,7 @@ class TestVectorManager:
             manager1.save()
             
             # 重新加载
-            manager2 = VectorManager({}, tmpdir)
+            manager2 = VectorManager({}, tmpdir, async_worker)
             await manager2.initialize()
             
             stats = manager2.get_stats()
@@ -114,13 +114,13 @@ class TestVectorManager:
             assert stats['dino_vectors'] == 1
     
     @pytest.mark.asyncio
-    async def test_clear(self):
+    async def test_clear(self, async_worker):
         """测试清空索引"""
         pytest.importorskip("faiss")
         from perception_core.vector_manager import VectorManager
         
         with tempfile.TemporaryDirectory() as tmpdir:
-            manager = VectorManager({}, tmpdir)
+            manager = VectorManager({}, tmpdir, async_worker)
             await manager.initialize()
             
             # 添加数据
@@ -134,4 +134,3 @@ class TestVectorManager:
             stats = manager.get_stats()
             assert stats['clip_vectors'] == 0
             assert stats['dino_vectors'] == 0
-

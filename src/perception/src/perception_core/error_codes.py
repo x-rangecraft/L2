@@ -42,6 +42,7 @@ class ErrorCode(IntEnum):
     MASK_AREA_TOO_SMALL = 2006              # 掩码面积过小
     NANOSAM_INFERENCE_TIMEOUT = 2007        # NanoSAM 推理超时
     NANOSAM_INFERENCE_ERROR = 2008          # NanoSAM 推理异常
+    MASK_AREA_TOO_LARGE = 2009              # 掩码面积过大
     
     # =========================================================================
     # 3xxx - 点云错误
@@ -113,6 +114,7 @@ ERROR_MESSAGES = {
     ErrorCode.MASK_AREA_TOO_SMALL: "掩码面积过小",
     ErrorCode.NANOSAM_INFERENCE_TIMEOUT: "NanoSAM 推理超时",
     ErrorCode.NANOSAM_INFERENCE_ERROR: "NanoSAM 推理异常",
+    ErrorCode.MASK_AREA_TOO_LARGE: "掩码面积过大",
     
     # 3xxx - 点云错误
     ErrorCode.DEPTH_IMAGE_EMPTY: "深度图为空",
@@ -190,4 +192,3 @@ class PerceptionError(Exception):
             error_code = ErrorCode.INTERNAL_ERROR
             detail = f"未知错误码: {code}"
         return cls(error_code, detail)
-

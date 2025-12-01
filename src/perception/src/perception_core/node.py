@@ -62,6 +62,7 @@ from .pointcloud import PointCloudModule
 from .vectorizer import VectorizerModule
 from .vector_manager import VectorManager
 from .object_storage_manager import ObjectStorageManager
+from .async_worker import AsyncWorker
 
 logger = logging.getLogger(__name__)
 
@@ -129,11 +130,22 @@ class PerceptionNode(Node):
     
     def _create_modules(self):
         """创建模块实例"""
-        self._segmentation = SegmentationModule(self._segmentation_config)
-        self._pointcloud = PointCloudModule(self._pointcloud_config)
-        self._vectorizer = VectorizerModule(self._vectorizer_config)
-        self._vector_manager = VectorManager(self._vector_config, str(self._storage_dir))
-        self._storage = ObjectStorageManager({}, str(self._storage_dir), self._vector_manager)
+        self._worker = AsyncWorker(name="perception_async_worker")
+        self._worker.start()
+        self._segmentation = SegmentationModule(self._segmentation_config, self._worker)
+        self._pointcloud = PointCloudModule(self._pointcloud_config, self._worker)
+        self._vectorizer = VectorizerModule(self._vectorizer_config, self._worker)
+        self._vector_manager = VectorManager(
+            self._vector_config,
+            str(self._storage_dir),
+            self._worker
+        )
+        self._storage = ObjectStorageManager(
+            {},
+            str(self._storage_dir),
+            self._vector_manager,
+            self._worker
+        )
     
     def _init_timer_callback(self):
         """初始化定时器回调"""
@@ -450,6 +462,27 @@ class PerceptionNode(Node):
         try:
             goal = goal_handle.request
             feedback = ObjectTarget.Feedback()
+
+            color_img = goal.color_image
+            depth_img = goal.depth_image
+            cam_info = goal.camera_info
+            goal_log = (
+                "[object_target] Goal received: "
+                f"color={getattr(color_img, 'width', 0)}x{getattr(color_img, 'height', 0)}"
+                f" enc={getattr(color_img, 'encoding', 'unknown')} step={getattr(color_img, 'step', 0)} | "
+                f"depth={getattr(depth_img, 'width', 0)}x{getattr(depth_img, 'height', 0)}"
+                f" enc={getattr(depth_img, 'encoding', 'unknown')} step={getattr(depth_img, 'step', 0)} | "
+                f"camera frame={getattr(getattr(cam_info, 'header', None), 'frame_id', '')}"
+                f" ({getattr(cam_info, 'width', 0)}x{getattr(cam_info, 'height', 0)}) | "
+                f"click=({goal.click_x:.1f}, {goal.click_y:.1f})"
+            )
+            self.get_logger().info(goal_log)
+
+            intrinsics_log = (
+                "[object_target] Camera intrinsics "
+                f"K={list(cam_info.k)} D_first5={list(cam_info.d[:5]) if cam_info.d else []}"
+            )
+            self.get_logger().debug(intrinsics_log)
             
             # 转换图像
             image = self._bridge.imgmsg_to_cv2(goal.color_image, 'rgb8')
@@ -1012,6 +1045,15 @@ class PerceptionNode(Node):
         msg.created_at = info.created_at
         return msg
 
+    def destroy_node(self):
+        """销毁节点并关闭异步工作线程。"""
+        try:
+            if hasattr(self, '_worker') and self._worker:
+                self._worker.shutdown()
+        except Exception as exc:
+            self.get_logger().warn(f"关闭 AsyncWorker 失败: {exc}")
+        return super().destroy_node()
+
 
 def main(args=None):
     """节点入口"""
@@ -1033,4 +1075,3 @@ def main(args=None):
 
 if __name__ == '__main__':
     main()
-

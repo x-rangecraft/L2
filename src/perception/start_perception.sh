@@ -102,7 +102,7 @@ start_node() {
         fi
         
         # 尝试调用 get_status 服务
-        if ros2 service call /perception/service/get_status perception/srv/GetStatus "{}" --timeout 1 2>/dev/null | grep -q "ready: true"; then
+        if timeout 1 ros2 service call /perception/service/get_status perception/srv/GetStatus "{}" 2>/dev/null | tr 'A-Z' 'a-z' | grep -q "ready=true"; then
             log_info "✅ Perception 节点启动成功 (PID: $(get_pid))"
             return 0
         fi
@@ -207,4 +207,3 @@ main() {
 }
 
 main "$@"
-

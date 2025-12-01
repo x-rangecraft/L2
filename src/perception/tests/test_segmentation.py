@@ -40,7 +40,7 @@ class TestSegmentResult:
 class TestSegmentationModule:
     """测试 SegmentationModule"""
     
-    def test_module_init(self):
+    def test_module_init(self, async_worker):
         """测试模块初始化"""
         from perception_core.segmentation import SegmentationModule
         
@@ -51,15 +51,15 @@ class TestSegmentationModule:
             'min_mask_area': 100,
         }
         
-        module = SegmentationModule(config)
+        module = SegmentationModule(config, async_worker)
         assert not module.is_ready
     
-    def test_create_visualization(self):
+    def test_create_visualization(self, async_worker):
         """测试可视化生成"""
         from perception_core.segmentation import SegmentationModule
         
         config = {}
-        module = SegmentationModule(config)
+        module = SegmentationModule(config, async_worker)
         
         # 创建测试数据
         image = np.zeros((100, 100, 3), dtype=np.uint8)
@@ -81,7 +81,7 @@ class TestSegmentationIntegration:
     """集成测试（需要模型文件）"""
     
     @pytest.mark.skip(reason="需要模型文件")
-    async def test_segment_basic(self):
+    async def test_segment_basic(self, async_worker):
         """测试基本分割功能"""
         from perception_core.segmentation import SegmentationModule
         
@@ -90,7 +90,7 @@ class TestSegmentationIntegration:
             'decoder_path': 'models/nanosam_mask_decoder.engine',
         }
         
-        module = SegmentationModule(config)
+        module = SegmentationModule(config, async_worker)
         await module.initialize()
         
         assert module.is_ready
@@ -104,4 +104,3 @@ class TestSegmentationIntegration:
         assert result.mask.shape == (480, 640)
         assert 0.0 <= result.confidence <= 1.0
         assert result.mask_area > 0
-

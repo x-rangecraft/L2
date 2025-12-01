@@ -6,7 +6,6 @@ CLIP + DINOv3 特征提取
 - DINOv3: 用于图像→图像检索
 """
 
-import asyncio
 import logging
 from dataclasses import dataclass
 from pathlib import Path
@@ -22,6 +21,7 @@ from .constants import (
     DINO_MODEL_FILENAME,
 )
 from .error_codes import PerceptionError, ErrorCode
+from .async_worker import AsyncWorker
 
 # 延迟导入（可能不可用）
 TORCH_AVAILABLE = False
@@ -57,7 +57,7 @@ class VectorizerModule:
     使用 CLIP 和 DINOv3 提取图像特征向量
     """
     
-    def __init__(self, config: Dict[str, Any]):
+    def __init__(self, config: Dict[str, Any], worker: AsyncWorker):
         """
         初始化配置
         
@@ -71,7 +71,10 @@ class VectorizerModule:
                     device: 设备
                     feature_dim: 特征维度
         """
+        if worker is None:
+            raise ValueError("VectorizerModule 需要有效的 AsyncWorker 实例")
         self._config = config
+        self._worker = worker
         self._ready = False
         
         # CLIP 配置
@@ -129,14 +132,11 @@ class VectorizerModule:
                 self._clip_device = 'cpu'
                 self._dino_device = 'cpu'
             
-            # 在线程池中加载模型
-            loop = asyncio.get_event_loop()
-            
             # 并行加载 CLIP 和 DINOv3
-            await asyncio.gather(
-                loop.run_in_executor(None, self._load_clip),
-                loop.run_in_executor(None, self._load_dino)
-            )
+            clip_task = self._worker.run_callable(self._load_clip)
+            dino_task = self._worker.run_callable(self._load_dino)
+            await clip_task
+            await dino_task
             
             self._ready = True
             logger.info("VectorizerModule 初始化完成")
@@ -266,14 +266,13 @@ class VectorizerModule:
         if image is None or image.size == 0:
             raise PerceptionError(ErrorCode.IMAGE_EMPTY)
         
-        loop = asyncio.get_event_loop()
-        
         # 并行提取 CLIP 和 DINOv3 特征
-        clip_task = loop.run_in_executor(None, self._extract_clip, image)
-        dino_task = loop.run_in_executor(None, self._extract_dino, image)
+        clip_task = self._worker.run_callable(self._extract_clip, image)
+        dino_task = self._worker.run_callable(self._extract_dino, image)
         
         try:
-            clip_embedding, dino_embedding = await asyncio.gather(clip_task, dino_task)
+            clip_embedding = await clip_task
+            dino_embedding = await dino_task
         except Exception as e:
             raise PerceptionError(ErrorCode.IMAGE_PREPROCESS_FAILED, str(e))
         
@@ -385,10 +384,7 @@ class VectorizerModule:
         if not text or not text.strip():
             raise PerceptionError(ErrorCode.TEXT_ENCODE_FAILED, "文本为空")
         
-        loop = asyncio.get_event_loop()
-        embedding = await loop.run_in_executor(None, self._encode_text_sync, text)
-        
-        return embedding
+        return await self._worker.run_callable(self._encode_text_sync, text)
     
     def _encode_text_sync(self, text: str) -> np.ndarray:
         """同步文本编码"""
@@ -447,4 +443,3 @@ class VectorizerModule:
         similarity = dot / (norm1 * norm2)
         # 确保在 [0, 1] 范围内
         return float(max(0.0, min(1.0, (similarity + 1) / 2)))
-

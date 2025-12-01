@@ -30,7 +30,7 @@ class TestVectorizeResult:
 class TestVectorizerModule:
     """测试 VectorizerModule"""
     
-    def test_module_init(self):
+    def test_module_init(self, async_worker):
         """测试模块初始化"""
         from perception_core.vectorizer import VectorizerModule
         
@@ -46,14 +46,14 @@ class TestVectorizerModule:
             }
         }
         
-        module = VectorizerModule(config)
+        module = VectorizerModule(config, async_worker)
         assert not module.is_ready
     
-    def test_compute_similarity(self):
+    def test_compute_similarity(self, async_worker):
         """测试相似度计算"""
         from perception_core.vectorizer import VectorizerModule
         
-        module = VectorizerModule({})
+        module = VectorizerModule({}, async_worker)
         
         # 相同向量
         v1 = np.array([1.0, 0.0, 0.0], dtype=np.float32)
@@ -78,7 +78,7 @@ class TestVectorizerIntegration:
     
     @pytest.mark.skip(reason="需要下载模型")
     @pytest.mark.asyncio
-    async def test_extract_basic(self):
+    async def test_extract_basic(self, async_worker):
         """测试基本向量提取"""
         from perception_core.vectorizer import VectorizerModule
         
@@ -87,7 +87,7 @@ class TestVectorizerIntegration:
             'dino': {}
         }
         
-        module = VectorizerModule(config)
+        module = VectorizerModule(config, async_worker)
         await module.initialize()
         
         assert module.is_ready
@@ -103,13 +103,13 @@ class TestVectorizerIntegration:
     
     @pytest.mark.skip(reason="需要下载模型")
     @pytest.mark.asyncio
-    async def test_encode_text(self):
+    async def test_encode_text(self, async_worker):
         """测试文本编码"""
         from perception_core.vectorizer import VectorizerModule
         
         config = {'clip': {'model': 'openai/clip-vit-base-patch32'}}
         
-        module = VectorizerModule(config)
+        module = VectorizerModule(config, async_worker)
         await module.initialize()
         
         # 编码文本
@@ -117,4 +117,3 @@ class TestVectorizerIntegration:
         
         assert embedding.shape == (512,)
         assert np.linalg.norm(embedding) == pytest.approx(1.0, abs=0.01)
-

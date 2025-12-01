@@ -4,7 +4,6 @@ ObjectStorageManager - 物体存储管理模块
 物体数据的增删改查（依赖 VectorManager）
 """
 
-import asyncio
 import logging
 import time
 import uuid
@@ -28,6 +27,7 @@ from .constants import (
 )
 from .error_codes import PerceptionError, ErrorCode
 from .vector_manager import VectorManager
+from .async_worker import AsyncWorker
 
 logger = logging.getLogger(__name__)
 
@@ -65,7 +65,8 @@ class ObjectStorageManager:
         self,
         config: Dict[str, Any],
         storage_dir: str,
-        vector_manager: VectorManager
+        vector_manager: VectorManager,
+        worker: AsyncWorker
     ):
         """
         初始化
@@ -75,9 +76,12 @@ class ObjectStorageManager:
             storage_dir: 存储目录路径
             vector_manager: 向量管理器实例
         """
+        if worker is None:
+            raise ValueError("ObjectStorageManager 需要有效的 AsyncWorker 实例")
         self._config = config
         self._storage_dir = Path(storage_dir)
         self._vector_manager = vector_manager
+        self._worker = worker
         self._ready = False
         
         # 存储路径
@@ -108,8 +112,7 @@ class ObjectStorageManager:
             self._images_dir.mkdir(parents=True, exist_ok=True)
             
             # 加载现有数据
-            loop = asyncio.get_event_loop()
-            await loop.run_in_executor(None, self._load_index)
+            await self._worker.run_callable(self._load_index)
             
             self._ready = True
             logger.info(
@@ -764,4 +767,3 @@ class ObjectStorageManager:
             'total_samples': sum(obj.get('sample_count', 0) for obj in self._objects.values()),
             'last_updated': self._metadata.get('last_updated', 0),
         }
-

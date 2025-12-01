@@ -8,6 +8,7 @@ SegmentationModule - 分割模块
 import asyncio
 import logging
 import time
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Tuple, Dict, Any
@@ -21,8 +22,10 @@ from .constants import (
     MAX_MASK_AREA_RATIO,
     NANOSAM_ENCODER_FILENAME,
     NANOSAM_DECODER_FILENAME,
+    TIMEOUT_SEGMENT,
 )
 from .error_codes import PerceptionError, ErrorCode
+from .async_worker import AsyncWorker
 
 # 延迟导入 NanoSAM（可能不可用）
 NANOSAM_AVAILABLE = False
@@ -60,7 +63,7 @@ class SegmentationModule:
     封装 NanoSAM TensorRT 引擎，提供基于点击的交互式分割能力
     """
     
-    def __init__(self, config: Dict[str, Any]):
+    def __init__(self, config: Dict[str, Any], worker: AsyncWorker):
         """
         初始化配置
         
@@ -70,16 +73,21 @@ class SegmentationModule:
                 - decoder_path: NanoSAM 解码器引擎路径
                 - min_confidence: 最小置信度阈值
                 - min_mask_area: 最小掩码面积
+            worker: AsyncWorker 实例
         """
+        if worker is None:
+            raise ValueError("SegmentationModule 需要有效的 AsyncWorker 实例")
         self._config = config
+        self._worker = worker
         self._ready = False
         self._predictor = None
-        self._engine_lock = asyncio.Lock()
+        self._engine_lock = threading.Lock()
         
         # 配置参数
         self._min_confidence = config.get('min_confidence', MIN_CONFIDENCE)
         self._min_mask_area = config.get('min_mask_area', MIN_MASK_AREA)
         self._max_mask_area_ratio = config.get('max_mask_area_ratio', MAX_MASK_AREA_RATIO)
+        self._segment_timeout = config.get('timeout', TIMEOUT_SEGMENT)
         
         # 性能统计
         self._encode_times = []
@@ -103,59 +111,7 @@ class SegmentationModule:
             PerceptionError: 初始化失败时抛出
         """
         try:
-            # 检查 NanoSAM 是否可用
-            if not NANOSAM_AVAILABLE:
-                raise PerceptionError(
-                    ErrorCode.NANOSAM_ENGINE_LOAD_FAILED,
-                    f"NanoSAM 未安装: {NANOSAM_IMPORT_ERROR}"
-                )
-            
-            # 检查 CUDA
-            if not torch.cuda.is_available():
-                raise PerceptionError(
-                    ErrorCode.CUDA_NOT_AVAILABLE,
-                    "CUDA 不可用"
-                )
-            
-            # 解析引擎路径
-            encoder_path = self._resolve_engine_path(
-                self._config.get('engine_path', NANOSAM_ENCODER_FILENAME)
-            )
-            decoder_path = self._resolve_engine_path(
-                self._config.get('decoder_path', NANOSAM_DECODER_FILENAME)
-            )
-            
-            # 验证文件存在
-            if not encoder_path.exists():
-                raise PerceptionError(
-                    ErrorCode.NANOSAM_ENGINE_LOAD_FAILED,
-                    f"编码器引擎文件不存在: {encoder_path}"
-                )
-            if not decoder_path.exists():
-                raise PerceptionError(
-                    ErrorCode.NANOSAM_DECODER_LOAD_FAILED,
-                    f"解码器引擎文件不存在: {decoder_path}"
-                )
-            
-            logger.info(f"加载 NanoSAM 编码器: {encoder_path}")
-            logger.info(f"加载 NanoSAM 解码器: {decoder_path}")
-            
-            # 在线程池中加载引擎（避免阻塞事件循环）
-            loop = asyncio.get_event_loop()
-            await loop.run_in_executor(
-                None,
-                self._load_predictor,
-                str(encoder_path),
-                str(decoder_path)
-            )
-            
-            # Warmup
-            await loop.run_in_executor(None, self._warmup)
-            
-            self._ready = True
-            logger.info("SegmentationModule 初始化完成")
-            return True
-            
+            return await self._worker.run_callable(self._initialize_sync)
         except PerceptionError:
             raise
         except Exception as e:
@@ -164,6 +120,55 @@ class SegmentationModule:
                 ErrorCode.NANOSAM_ENGINE_LOAD_FAILED,
                 str(e)
             )
+
+    def _initialize_sync(self) -> bool:
+        """实际的 NanoSAM 加载流程，在 AsyncWorker 线程中执行。"""
+        # 检查 NanoSAM 是否可用
+        if not NANOSAM_AVAILABLE:
+            raise PerceptionError(
+                ErrorCode.NANOSAM_ENGINE_LOAD_FAILED,
+                f"NanoSAM 未安装: {NANOSAM_IMPORT_ERROR}"
+            )
+        
+        # 检查 CUDA
+        if not torch.cuda.is_available():
+            raise PerceptionError(
+                ErrorCode.CUDA_NOT_AVAILABLE,
+                "CUDA 不可用"
+            )
+        
+        # 解析引擎路径
+        encoder_path = self._resolve_engine_path(
+            self._config.get('engine_path', NANOSAM_ENCODER_FILENAME)
+        )
+        decoder_path = self._resolve_engine_path(
+            self._config.get('decoder_path', NANOSAM_DECODER_FILENAME)
+        )
+        
+        # 验证文件存在
+        if not encoder_path.exists():
+            raise PerceptionError(
+                ErrorCode.NANOSAM_ENGINE_LOAD_FAILED,
+                f"编码器引擎文件不存在: {encoder_path}"
+            )
+        if not decoder_path.exists():
+            raise PerceptionError(
+                ErrorCode.NANOSAM_DECODER_LOAD_FAILED,
+                f"解码器引擎文件不存在: {decoder_path}"
+            )
+        
+        logger.info(f"加载 NanoSAM 编码器: {encoder_path}")
+        logger.info(f"加载 NanoSAM 解码器: {decoder_path}")
+        
+        # 同步加载引擎
+        self._load_predictor(str(encoder_path), str(decoder_path))
+        
+        # Warmup
+        self._warmup()
+        
+        self._ready = True
+        logger.info("SegmentationModule 初始化完成")
+        return True
     
     def _resolve_engine_path(self, path_str: str) -> Path:
         """解析引擎文件路径"""
@@ -234,7 +239,29 @@ class SegmentationModule:
         if not self._ready:
             raise PerceptionError(ErrorCode.NODE_NOT_READY, "分割模块未就绪")
         
-        # 验证输入
+        try:
+            return await asyncio.wait_for(
+                self._worker.run_callable(
+                    self._segment_sync,
+                    image,
+                    click_x,
+                    click_y
+                ),
+                timeout=self._segment_timeout,
+            )
+        except asyncio.TimeoutError as exc:
+            raise PerceptionError(
+                ErrorCode.NANOSAM_INFERENCE_TIMEOUT,
+                f"分割超时 (> {self._segment_timeout:.1f}s)"
+            ) from exc
+
+    def _segment_sync(
+        self,
+        image: np.ndarray,
+        click_x: float,
+        click_y: float
+    ) -> SegmentResult:
+        """同步执行分割逻辑（运行在 AsyncWorker 的线程池中）。"""
         if image is None or image.size == 0:
             raise PerceptionError(ErrorCode.IMAGE_EMPTY)
         
@@ -251,26 +278,22 @@ class SegmentationModule:
                 f"点击坐标 ({click_x}, {click_y}) 超出图像范围 ({w}, {h})"
             )
         
-        async with self._engine_lock:
-            loop = asyncio.get_event_loop()
-            
+        with self._engine_lock:
             # 编码图像
             start_encode = time.time()
-            await loop.run_in_executor(None, self._predictor.set_image, image)
+            self._predictor.set_image(image)
             encode_time = time.time() - start_encode
             self._encode_times.append(encode_time)
             
             # 解码掩码
             start_decode = time.time()
             point_coords = np.array([[click_x, click_y]], dtype=np.float32)
-            point_labels = np.array([1], dtype=np.float32)  # 1 = 前景点
+            point_labels = np.array([1], dtype=np.float32)
             
-            mask_result = await loop.run_in_executor(
-                None,
-                self._predictor.predict,
+            mask_result = self._predictor.predict(
                 point_coords,
                 point_labels,
-                None  # mask_input
+                None
             )
             decode_time = time.time() - start_decode
             self._decode_times.append(decode_time)
@@ -278,7 +301,6 @@ class SegmentationModule:
         hi_res_mask, mask_iou, _ = mask_result
         confidence = float(mask_iou.view(-1)[0].detach().cpu().item())
         
-        # 转换为 numpy
         mask_np = (
             hi_res_mask[0, 0]
             .detach()
@@ -286,14 +308,11 @@ class SegmentationModule:
             .numpy()
         )
         
-        # 后处理
         mask_binary = self._post_process_mask(mask_np, confidence)
         
-        # 计算掩码面积
         mask_area = int(np.sum(mask_binary > 0))
         total_pixels = h * w
         
-        # 验证结果
         if mask_area == 0:
             raise PerceptionError(ErrorCode.SEGMENT_RESULT_EMPTY)
         
@@ -309,12 +328,13 @@ class SegmentationModule:
                 f"掩码面积 {mask_area} < {self._min_mask_area}"
             )
         
-        if mask_area / total_pixels > self._max_mask_area_ratio:
-            logger.warning(
-                f"掩码面积占比过高: {mask_area / total_pixels:.2%}"
+        area_ratio = mask_area / total_pixels
+        if area_ratio > self._max_mask_area_ratio:
+            raise PerceptionError(
+                ErrorCode.MASK_AREA_TOO_LARGE,
+                f"掩码面积占比 {area_ratio:.2%} > {self._max_mask_area_ratio:.2%}"
             )
         
-        # 裁剪目标图像
         cropped_image, bbox = self._crop_by_mask(image, mask_binary)
         
         logger.debug(
@@ -605,4 +625,3 @@ class _FastPredictor:
         )
         
         return hi_res_mask, mask_iou, low_res_mask
-

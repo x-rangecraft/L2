@@ -35,17 +35,17 @@ class TestObjectStorageManager:
     """测试 ObjectStorageManager"""
     
     @pytest.fixture
-    async def manager(self):
+    async def manager(self, async_worker):
         """创建测试用的管理器"""
         pytest.importorskip("faiss")
         from perception_core.vector_manager import VectorManager
         from perception_core.object_storage_manager import ObjectStorageManager
         
         with tempfile.TemporaryDirectory() as tmpdir:
-            vector_manager = VectorManager({}, tmpdir)
+            vector_manager = VectorManager({}, tmpdir, async_worker)
             await vector_manager.initialize()
             
-            storage_manager = ObjectStorageManager({}, tmpdir, vector_manager)
+            storage_manager = ObjectStorageManager({}, tmpdir, vector_manager, async_worker)
             await storage_manager.initialize()
             
             yield storage_manager
@@ -174,4 +174,3 @@ class TestObjectStorageManager:
         # 验证
         objects, total = manager.list_objects()
         assert total == 0
-

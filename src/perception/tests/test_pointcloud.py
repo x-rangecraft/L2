@@ -34,7 +34,7 @@ class TestPointCloudResult:
 class TestPointCloudModule:
     """测试 PointCloudModule"""
     
-    def test_module_init(self):
+    def test_module_init(self, async_worker):
         """测试模块初始化"""
         from perception_core.pointcloud import PointCloudModule
         
@@ -45,22 +45,22 @@ class TestPointCloudModule:
             'max_depth_mm': 10000,
         }
         
-        module = PointCloudModule(config)
+        module = PointCloudModule(config, async_worker)
         assert not module.is_ready
     
     @pytest.mark.asyncio
-    async def test_initialize(self):
+    async def test_initialize(self, async_worker):
         """测试异步初始化"""
         from perception_core.pointcloud import PointCloudModule
         
         config = {}
-        module = PointCloudModule(config)
+        module = PointCloudModule(config, async_worker)
         
         result = await module.initialize()
         assert result is True
         assert module.is_ready
     
-    def test_pointcloud2_conversion(self):
+    def test_pointcloud2_conversion(self, async_worker):
         """测试 PointCloud2 转换"""
         from perception_core.pointcloud import PointCloudModule
         
@@ -71,7 +71,7 @@ class TestPointCloudModule:
             [0.3, 0.4, 0.7],
         ], dtype=np.float32)
         
-        module = PointCloudModule({})
+        module = PointCloudModule({}, async_worker)
         pc_msg = module._create_pointcloud2(points)
         
         # 验证消息属性
@@ -93,7 +93,7 @@ class TestPointCloudModule:
             'min_depth_mm': 100,
             'max_depth_mm': 10000,
         }
-        module = PointCloudModule(config)
+        module = PointCloudModule(config, async_worker)
         await module.initialize()
         
         # 创建测试数据
@@ -129,12 +129,12 @@ class TestPointCloudErrors:
     """测试错误处理"""
     
     @pytest.mark.asyncio
-    async def test_empty_depth(self):
+    async def test_empty_depth(self, async_worker):
         """测试空深度图错误"""
         from perception_core.pointcloud import PointCloudModule
         from perception_core.error_codes import PerceptionError, ErrorCode
         
-        module = PointCloudModule({})
+        module = PointCloudModule({}, async_worker)
         await module.initialize()
         
         mask = np.zeros((100, 100), dtype=np.uint8)
@@ -147,12 +147,12 @@ class TestPointCloudErrors:
         assert exc_info.value.code == ErrorCode.DEPTH_IMAGE_EMPTY
     
     @pytest.mark.asyncio
-    async def test_size_mismatch(self):
+    async def test_size_mismatch(self, async_worker):
         """测试尺寸不匹配错误"""
         from perception_core.pointcloud import PointCloudModule
         from perception_core.error_codes import PerceptionError, ErrorCode
         
-        module = PointCloudModule({})
+        module = PointCloudModule({}, async_worker)
         await module.initialize()
         
         mask = np.zeros((100, 100), dtype=np.uint8)
@@ -163,4 +163,3 @@ class TestPointCloudErrors:
             await module.compute(mask, depth, camera_info)
         
         assert exc_info.value.code == ErrorCode.MASK_DEPTH_SIZE_MISMATCH
-
