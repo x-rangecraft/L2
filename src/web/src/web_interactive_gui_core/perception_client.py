@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional
 
@@ -127,7 +128,16 @@ class PerceptionClient:
             self._node.get_logger().info(
                 f"[PerceptionClient] 发送分割请求: click=({click_x}, {click_y})"
             )
-            goal_handle = await self._target_client.send_goal_async(goal)
+            try:
+                goal_handle = await asyncio.wait_for(
+                    self._target_client.send_goal_async(goal),
+                    timeout=self._timeout,
+                )
+            except asyncio.TimeoutError:
+                return SegmentResult(
+                    success=False,
+                    error_message=f"分割请求发送超时 (> {self._timeout:.1f}s)",
+                )
 
             if not goal_handle.accepted:
                 return SegmentResult(
@@ -136,7 +146,17 @@ class PerceptionClient:
                 )
 
             # 等待结果
-            result_response = await goal_handle.get_result_async()
+            try:
+                result_response = await asyncio.wait_for(
+                    goal_handle.get_result_async(),
+                    timeout=self._timeout,
+                )
+            except asyncio.TimeoutError:
+                await goal_handle.cancel_goal_async()
+                return SegmentResult(
+                    success=False,
+                    error_message=f"分割超时 (> {self._timeout:.1f}s)",
+                )
             result = result_response.result
 
             if not result.success:
@@ -216,7 +236,16 @@ class PerceptionClient:
             self._node.get_logger().info(
                 f"[PerceptionClient] 发送记录请求: label='{label}'"
             )
-            goal_handle = await self._record_client.send_goal_async(goal)
+            try:
+                goal_handle = await asyncio.wait_for(
+                    self._record_client.send_goal_async(goal),
+                    timeout=self._timeout,
+                )
+            except asyncio.TimeoutError:
+                return RecordResult(
+                    success=False,
+                    error_message=f"记录请求发送超时 (> {self._timeout:.1f}s)",
+                )
 
             if not goal_handle.accepted:
                 return RecordResult(
@@ -225,7 +254,17 @@ class PerceptionClient:
                 )
 
             # 等待结果
-            result_response = await goal_handle.get_result_async()
+            try:
+                result_response = await asyncio.wait_for(
+                    goal_handle.get_result_async(),
+                    timeout=self._timeout,
+                )
+            except asyncio.TimeoutError:
+                await goal_handle.cancel_goal_async()
+                return RecordResult(
+                    success=False,
+                    error_message=f"记录超时 (> {self._timeout:.1f}s)",
+                )
             result = result_response.result
 
             if not result.success:

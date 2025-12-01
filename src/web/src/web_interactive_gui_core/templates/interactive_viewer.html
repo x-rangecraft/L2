@@ -432,6 +432,8 @@
 
 <script>
 const TRANSPARENT_PIXEL = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
+const SEGMENT_TIMEOUT_MS = 30000;
+let segmentTimeoutId = null;
 
 // 状态管理
 const AppState = {
@@ -529,6 +531,7 @@ function handleImageClick(event) {
     
     // 发送分割请求
     setProcessing(true, '分割中...');
+    startSegmentTimeout();
     
     fetch('/segment', {
         method: 'POST',
@@ -538,12 +541,14 @@ function handleImageClick(event) {
     .then(res => res.json())
     .then(data => {
         if (data.status === 'error') {
+            clearSegmentTimeout();
             setProcessing(false);
             showToast(data.error || '分割请求失败', 'error');
         }
         // 成功时等待 segment_result 事件
     })
     .catch(err => {
+        clearSegmentTimeout();
         setProcessing(false);
         showToast('网络错误: ' + err.message, 'error');
     });
@@ -586,6 +591,7 @@ function handleImageUpdate(data) {
 }
 
 function handleSegmentResult(data) {
+    clearSegmentTimeout();
     setProcessing(false);
     
     if (data.success) {
@@ -686,6 +692,25 @@ function setProcessing(isProcessing, text = '处理中...') {
     
     if (isProcessing) {
         updateStateDisplay(text.replace('...', ''));
+    }
+}
+
+function startSegmentTimeout() {
+    clearSegmentTimeout();
+    segmentTimeoutId = setTimeout(() => {
+        segmentTimeoutId = null;
+        AppState.hasHighlight = false;
+        setProcessing(false);
+        updateActionBar();
+        updateStateDisplay('空闲');
+        showToast('分割超时 (>30 秒)，请重试', 'error');
+    }, SEGMENT_TIMEOUT_MS);
+}
+
+function clearSegmentTimeout() {
+    if (segmentTimeoutId !== null) {
+        clearTimeout(segmentTimeoutId);
+        segmentTimeoutId = null;
     }
 }
 
