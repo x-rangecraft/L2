@@ -197,7 +197,7 @@ class PerceptionNode(Node):
         # 原子 Action
         self._segment_action = ActionServer(
             self, Segment, '/perception/action/segment',
-            execute_callback=self._segment_execute,
+            execute_callback=self._wrap_async_execute(self._segment_execute),
             goal_callback=self._goal_callback,
             cancel_callback=self._cancel_callback,
             callback_group=self._callback_group,
@@ -205,7 +205,7 @@ class PerceptionNode(Node):
         
         self._pointcloud_action = ActionServer(
             self, PointCloudAction, '/perception/action/pointcloud',
-            execute_callback=self._pointcloud_execute,
+            execute_callback=self._wrap_async_execute(self._pointcloud_execute),
             goal_callback=self._goal_callback,
             cancel_callback=self._cancel_callback,
             callback_group=self._callback_group,
@@ -213,7 +213,7 @@ class PerceptionNode(Node):
         
         self._vectorize_action = ActionServer(
             self, Vectorize, '/perception/action/vectorize',
-            execute_callback=self._vectorize_execute,
+            execute_callback=self._wrap_async_execute(self._vectorize_execute),
             goal_callback=self._goal_callback,
             cancel_callback=self._cancel_callback,
             callback_group=self._callback_group,
@@ -222,7 +222,7 @@ class PerceptionNode(Node):
         # 组合 Action
         self._object_target_action = ActionServer(
             self, ObjectTarget, '/perception/action/object_target',
-            execute_callback=self._object_target_execute,
+            execute_callback=self._wrap_async_execute(self._object_target_execute),
             goal_callback=self._goal_callback,
             cancel_callback=self._cancel_callback,
             callback_group=self._callback_group,
@@ -230,7 +230,7 @@ class PerceptionNode(Node):
         
         self._object_record_action = ActionServer(
             self, ObjectRecord, '/perception/action/object_record',
-            execute_callback=self._object_record_execute,
+            execute_callback=self._wrap_async_execute(self._object_record_execute),
             goal_callback=self._goal_callback,
             cancel_callback=self._cancel_callback,
             callback_group=self._callback_group,
@@ -238,7 +238,7 @@ class PerceptionNode(Node):
         
         self._object_process_action = ActionServer(
             self, ObjectProcess, '/perception/action/object_process',
-            execute_callback=self._object_process_execute,
+            execute_callback=self._wrap_async_execute(self._object_process_execute),
             goal_callback=self._goal_callback,
             cancel_callback=self._cancel_callback,
             callback_group=self._callback_group,
@@ -1044,6 +1044,17 @@ class PerceptionNode(Node):
         msg.object_id = info.object_id
         msg.created_at = info.created_at
         return msg
+
+    def _wrap_async_execute(self, coro_func):
+        """
+        将 async execute 包装为同步回调，供 ActionServer 调用。
+        
+        MultiThreadedExecutor 不原生支持 async def 回调，
+        需要使用 asyncio.run() 创建事件循环来执行协程。
+        """
+        def wrapper(goal_handle):
+            return asyncio.run(coro_func(goal_handle))
+        return wrapper
 
     def destroy_node(self):
         """销毁节点并关闭异步工作线程。"""
