@@ -14,9 +14,13 @@ SCRIPT_DIR="$(cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 URDF_PATH="${SCRIPT_DIR}/../description/urdf/yam.urdf"
 STATIC_TF_CONFIG="${SCRIPT_DIR}/static_tf_config.yaml"
 LOG_DIR="${SCRIPT_DIR}/../../log/tf_tools"
-PID_FILE="${LOG_DIR}/robot_tf.pid"
 LOG_FILE="${LOG_DIR}/robot_tf.log"
 ROBOT_TF_SCRIPT="${SCRIPT_DIR}/src/robot_tf.py"
+
+# 查找 robot_tf 运行实例（根据 python 命令行中的脚本路径匹配）
+find_robot_tf_pids() {
+  pgrep -f -- "$ROBOT_TF_SCRIPT" || true
+}
 
 usage() {
   cat <<'EOF'
@@ -108,13 +112,12 @@ start_daemon() {
   ensure_log_dir
 
   # Check if already running
-  if [[ -f "$PID_FILE" ]]; then
-    pid=$(cat "$PID_FILE")
-    if kill -0 "$pid" 2>/dev/null; then
-      echo "[ERROR] robot_tf 已在运行 (PID: $pid)" >&2
-      echo "[INFO] 使用 --stop 停止现有进程，或 --status 查看状态" >&2
-      exit 1
-    fi
+  local -a existing_pids=()
+  readarray -t existing_pids < <(find_robot_tf_pids)
+  if [[ ${#existing_pids[@]} -gt 0 ]]; then
+    echo "[ERROR] robot_tf 已在运行 (PID: ${existing_pids[*]})" >&2
+    echo "[INFO] 使用 --stop 停止现有进程，或 --status 查看状态" >&2
+    exit 1
   fi
 
   echo "[INFO] 后台启动 robot_tf..."
@@ -131,7 +134,6 @@ start_daemon() {
     > "$LOG_FILE" 2>&1 &
 
   pid=$!
-  echo "$pid" > "$PID_FILE"
 
   # Wait a moment and check if process is still running
   sleep 1
@@ -141,19 +143,24 @@ start_daemon() {
     echo "[INFO] 停止服务: $0 --stop"
   else
     echo "[ERROR] robot_tf 启动失败，请查看日志: $LOG_FILE" >&2
-    rm -f "$PID_FILE"
     exit 1
   fi
 }
 
 stop_daemon() {
-  if [[ ! -f "$PID_FILE" ]]; then
+  local -a pids=()
+  readarray -t pids < <(find_robot_tf_pids)
+  if [[ ${#pids[@]} -eq 0 ]]; then
     echo "[INFO] robot_tf 未运行"
     return 0
   fi
 
-  pid=$(cat "$PID_FILE")
-  if kill -0 "$pid" 2>/dev/null; then
+  for pid in "${pids[@]}"; do
+    if ! kill -0 "$pid" 2>/dev/null; then
+      echo "[INFO] robot_tf 实例已退出 (PID: $pid)"
+      continue
+    fi
+
     echo "[INFO] 停止 robot_tf (PID: $pid)..."
     kill "$pid" 2>/dev/null || true
 
@@ -171,48 +178,52 @@ stop_daemon() {
       kill -9 "$pid" 2>/dev/null || true
     fi
 
-    echo "[INFO] robot_tf 已停止"
-  else
-    echo "[INFO] robot_tf 未运行 (PID 文件存在但进程不在)"
-  fi
-
-  rm -f "$PID_FILE"
+    echo "[INFO] robot_tf 已停止 (PID: $pid)"
+  done
 }
 
 show_status() {
-  if [[ ! -f "$PID_FILE" ]]; then
+  local -a pids=()
+  readarray -t pids < <(find_robot_tf_pids)
+  if [[ ${#pids[@]} -eq 0 ]]; then
     echo "[INFO] robot_tf: 未运行"
     return 1
   fi
 
-  pid=$(cat "$PID_FILE")
-  if kill -0 "$pid" 2>/dev/null; then
-    echo "[INFO] robot_tf: 运行中 (PID: $pid)"
-    echo "[INFO] 日志文件: $LOG_FILE"
-
-    # Show last few lines of log
-    if [[ -f "$LOG_FILE" ]]; then
-      echo ""
-      echo "最近的日志输出："
-      echo "----------------------------------------"
-      tail -n 10 "$LOG_FILE"
-      echo "----------------------------------------"
+  local -a running=()
+  for pid in "${pids[@]}"; do
+    if kill -0 "$pid" 2>/dev/null; then
+      running+=("$pid")
     fi
+  done
 
-    # Check if service is available
-    echo ""
-    echo "服务状态："
-    if ros2 service list 2>/dev/null | grep -q "/tf_tools/transform_points"; then
-      echo "  ✅ /tf_tools/transform_points 服务可用"
-    else
-      echo "  ⚠️  /tf_tools/transform_points 服务未就绪"
-    fi
-
-    return 0
-  else
-    echo "[INFO] robot_tf: 未运行 (PID 文件存在但进程已退出)"
+  if [[ ${#running[@]} -eq 0 ]]; then
+    echo "[INFO] robot_tf: 未运行"
     return 1
   fi
+
+  echo "[INFO] robot_tf: 运行中 (PID: ${running[*]})"
+  echo "[INFO] 日志文件: $LOG_FILE"
+
+  # Show last few lines of log
+  if [[ -f "$LOG_FILE" ]]; then
+    echo ""
+    echo "最近的日志输出："
+    echo "----------------------------------------"
+    tail -n 10 "$LOG_FILE"
+    echo "----------------------------------------"
+  fi
+
+  # Check if service is available
+  echo ""
+  echo "服务状态："
+  if ros2 service list 2>/dev/null | grep -q "/tf_tools/transform_points"; then
+    echo "  ✅ /tf_tools/transform_points 服务可用"
+  else
+    echo "  ⚠️  /tf_tools/transform_points 服务未就绪"
+  fi
+
+  return 0
 }
 
 # Parse arguments
@@ -264,4 +275,3 @@ case "$MODE" in
     exit 2
     ;;
 esac
-

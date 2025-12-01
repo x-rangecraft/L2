@@ -79,10 +79,10 @@ tf_tools/
 └── IMPLEMENTATION.md              # 实现细节
 ```
 
-### 运行时目录
+### 运行时目录 / 状态
 
-- **PID 文件**：`L2/log/tf_tools/robot_tf.pid`
 - **日志文件**：`L2/log/tf_tools/robot_tf.log`
+- **运行状态**：`start_robot_tf.sh` 通过进程检测（匹配 `robot_tf.py` 的绝对路径）判断节点是否已在运行，无需额外 PID 文件
 
 ---
 
