@@ -12,11 +12,23 @@ import cv2
 import numpy as np
 import rclpy
 from rclpy.node import Node
-from sensor_msgs.msg import Image
+from sensor_msgs.msg import Image, PointCloud2
+from geometry_msgs.msg import Point
+from builtin_interfaces.msg import Time as TimeMsg
+
+from tf_tools.srv import TransformPoints
+from perception.srv import Grasp
 
 from .camera_manager import CameraManager
 from .perception_client import PerceptionClient, SegmentResult
+from .robot_skill_client import RobotSkillClient
 from .web_server import WebServerManager
+
+# TF 坐标系配置
+CAMERA_FRAME = 'camera_color_optical_frame'
+ROBOT_BASE_FRAME = 'base_link'
+TF_TRANSFORM_SERVICE = '/tf_tools/service/transform_points'
+GRASP_SERVICE = '/perception/service/grasp'
 
 
 class State(Enum):
@@ -26,6 +38,8 @@ class State(Enum):
     SEGMENTING = "segmenting"  # 分割处理中
     HIGHLIGHTED = "highlighted"  # 有分割结果，显示高亮
     RECORDING = "recording"  # 记录处理中
+    GRASPING = "grasping"  # 抓取执行中
+    POSE_ESTIMATING = "pose_estimating"  # 姿态测算中
 
 
 class WebInteractiveGui(Node):
@@ -46,17 +60,28 @@ class WebInteractiveGui(Node):
         # 分割结果缓存
         self._visualization: Optional[np.ndarray] = None  # 高亮图（BGR numpy）
         self._cropped_image: Optional[Image] = None  # 裁剪图（ROS Image）
+        self._point_cloud: Optional[PointCloud2] = None  # 点云（ROS PointCloud2）
+        self._segment_3d_info: Optional[dict] = None  # 3D 信息缓存
         self._cache_lock = threading.Lock()
 
         # 2. 创建模块
         self._camera = CameraManager(self, config)
         self._perception = PerceptionClient(self, config)
+        self._robot_skill = RobotSkillClient(self, config)
         self._web_server = WebServerManager(config)
+        
+        # TF 转换服务客户端
+        self._tf_client = self.create_client(TransformPoints, TF_TRANSFORM_SERVICE)
+        
+        # Grasp 姿态测算服务客户端
+        self._grasp_client = self.create_client(Grasp, GRASP_SERVICE)
 
         # 3. 注入回调
         self._web_server.set_callbacks(
             on_segment=self._handle_segment,
             on_record=self._handle_record,
+            on_grasp=self._handle_grasp,
+            on_grasp_pose=self._handle_grasp_pose,
             on_cancel=self._handle_cancel,
             get_status=self._get_status,
             get_health=self._get_health,
@@ -161,17 +186,41 @@ class WebInteractiveGui(Node):
             result = loop.run_until_complete(self._do_segment(x, y))
 
             if result.success:
+                # 构建 3D 信息（相机坐标系）
+                info_3d = {
+                    "center_3d": result.center_3d,
+                    "bbox_min": result.bbox_min,
+                    "bbox_max": result.bbox_max,
+                    "point_count": result.point_count,
+                    "confidence": result.confidence,
+                    "center_3d_base": None,  # 转换后的 base_link 坐标
+                }
+                
+                # 尝试进行坐标转换
+                if result.center_3d:
+                    center_base = loop.run_until_complete(
+                        self._transform_point_to_base(result.center_3d)
+                    )
+                    if center_base:
+                        info_3d["center_3d_base"] = center_base
+                        self.get_logger().info(
+                            f"[web_gui] 坐标转换成功: camera={result.center_3d} -> base={center_base}"
+                        )
+                
                 with self._cache_lock:
                     self._visualization = result.visualization
                     self._cropped_image = result.cropped_image
+                    self._point_cloud = result.point_cloud
+                    self._segment_3d_info = info_3d
 
                 with self._state_lock:
                     self._state = State.HIGHLIGHTED
 
                 self.get_logger().info(
-                    f"[web_gui] 分割成功: confidence={result.confidence:.2f}"
+                    f"[web_gui] 分割成功: confidence={result.confidence:.2f}, "
+                    f"center_3d={result.center_3d}, point_count={result.point_count}"
                 )
-                self._web_server.emit_segment_result(success=True)
+                self._web_server.emit_segment_result(success=True, info_3d=info_3d)
             else:
                 with self._state_lock:
                     self._state = State.IDLE
@@ -210,6 +259,62 @@ class WebInteractiveGui(Node):
             click_x=x,
             click_y=y,
         )
+
+    async def _transform_point_to_base(
+        self, point_camera: tuple
+    ) -> tuple | None:
+        """
+        将单个点从相机坐标系转换到 base_link 坐标系
+        
+        Args:
+            point_camera: (x, y, z) 相机坐标系下的点
+            
+        Returns:
+            (x, y, z) base_link 坐标系下的点，或 None 如果转换失败
+        """
+        if not self._tf_client.service_is_ready():
+            if not self._tf_client.wait_for_service(timeout_sec=2.0):
+                self.get_logger().warning(
+                    f"[web_gui] TF 服务 {TF_TRANSFORM_SERVICE} 不可用"
+                )
+                return None
+
+        # 构建请求
+        request = TransformPoints.Request()
+        request.source_frame = CAMERA_FRAME
+        request.target_frame = ROBOT_BASE_FRAME
+        request.stamp = TimeMsg()  # 使用最新 TF
+        
+        point = Point()
+        point.x = float(point_camera[0])
+        point.y = float(point_camera[1])
+        point.z = float(point_camera[2])
+        request.points_in = [point]
+
+        try:
+            future = self._tf_client.call_async(request)
+            # 等待结果
+            await asyncio.wait_for(
+                asyncio.wrap_future(future),
+                timeout=3.0
+            )
+            
+            response = future.result()
+            if not response.success:
+                self.get_logger().warning(f"[web_gui] TF 转换失败: {response.message}")
+                return None
+            
+            if response.points_out:
+                p = response.points_out[0]
+                return (p.x, p.y, p.z)
+            return None
+            
+        except asyncio.TimeoutError:
+            self.get_logger().warning("[web_gui] TF 转换超时")
+            return None
+        except Exception as e:
+            self.get_logger().warning(f"[web_gui] TF 转换异常: {e}")
+            return None
 
     def _handle_record(self, label: str) -> None:
         """
@@ -293,10 +398,252 @@ class WebInteractiveGui(Node):
         finally:
             loop.close()
 
+    def _handle_grasp(self) -> None:
+        """
+        处理抓取请求（Flask 线程调用，同步）
+
+        在后台线程中异步执行 Action 调用
+        """
+        # 检查状态
+        with self._state_lock:
+            if self._state != State.HIGHLIGHTED:
+                self.get_logger().warning(
+                    f"[web_gui] 当前状态 {self._state.value}，无法抓取"
+                )
+                self._web_server.emit_grasp_result(
+                    success=False, error="没有可抓取的分割结果"
+                )
+                return
+            self._state = State.GRASPING
+
+        # 检查是否有点云
+        with self._cache_lock:
+            if self._point_cloud is None:
+                with self._state_lock:
+                    self._state = State.HIGHLIGHTED
+                self._web_server.emit_grasp_result(
+                    success=False, error="点云数据缺失"
+                )
+                return
+            point_cloud = self._point_cloud
+
+        self.get_logger().info("[web_gui] 开始抓取动作...")
+
+        # 在后台线程执行异步 Action
+        thread = threading.Thread(
+            target=self._run_grasp_async,
+            args=(point_cloud,),
+            daemon=True,
+        )
+        thread.start()
+
+    def _run_grasp_async(self, point_cloud: PointCloud2) -> None:
+        """在后台线程中执行抓取 Action"""
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
+        def on_feedback(phase: str, step_index: int, step_desc: str, progress: float):
+            """抓取进度回调"""
+            self._web_server.emit_grasp_feedback(
+                phase=phase,
+                step_index=step_index,
+                step_desc=step_desc,
+                progress=progress,
+            )
+
+        try:
+            result = loop.run_until_complete(
+                self._robot_skill.grasp(
+                    point_cloud=point_cloud,
+                    context_id="web_grasp",
+                    on_feedback=on_feedback,
+                )
+            )
+
+            if result.success:
+                # 抓取成功，清除高亮
+                self._clear_cache()
+
+                with self._state_lock:
+                    self._state = State.IDLE
+
+                self.get_logger().info(
+                    f"[web_gui] 抓取成功: steps_executed={result.steps_executed}"
+                )
+                self._web_server.emit_grasp_result(
+                    success=True, steps_executed=result.steps_executed
+                )
+            else:
+                # 抓取失败，恢复到高亮状态
+                with self._state_lock:
+                    self._state = State.HIGHLIGHTED
+
+                self.get_logger().warning(f"[web_gui] 抓取失败: {result.error_message}")
+                self._web_server.emit_grasp_result(
+                    success=False, error=result.error_message
+                )
+
+        except Exception as e:
+            with self._state_lock:
+                self._state = State.HIGHLIGHTED
+
+            self.get_logger().error(f"[web_gui] 抓取异常: {e}")
+            self._web_server.emit_grasp_result(success=False, error=str(e))
+
+        finally:
+            loop.close()
+
+    def _handle_grasp_pose(self) -> None:
+        """
+        处理姿态测算请求（Flask 线程调用，同步）
+
+        在后台线程中调用 Grasp Service
+        """
+        # 检查状态
+        with self._state_lock:
+            if self._state != State.HIGHLIGHTED:
+                self.get_logger().warning(
+                    f"[web_gui] 当前状态 {self._state.value}，无法进行姿态测算"
+                )
+                self._web_server.emit_grasp_pose_result(
+                    success=False, error="没有可测算的分割结果"
+                )
+                return
+            self._state = State.POSE_ESTIMATING
+
+        # 检查是否有点云
+        with self._cache_lock:
+            if self._point_cloud is None:
+                with self._state_lock:
+                    self._state = State.HIGHLIGHTED
+                self._web_server.emit_grasp_pose_result(
+                    success=False, error="点云数据缺失"
+                )
+                return
+            point_cloud = self._point_cloud
+
+        self.get_logger().info("[web_gui] 开始姿态测算...")
+
+        # 在后台线程执行服务调用
+        thread = threading.Thread(
+            target=self._run_grasp_pose_async,
+            args=(point_cloud,),
+            daemon=True,
+        )
+        thread.start()
+
+    def _run_grasp_pose_async(self, point_cloud: PointCloud2) -> None:
+        """在后台线程中执行姿态测算 Service 调用"""
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
+        try:
+            result = loop.run_until_complete(self._do_grasp_pose(point_cloud))
+
+            if result["success"]:
+                with self._state_lock:
+                    self._state = State.HIGHLIGHTED
+
+                self.get_logger().info(
+                    f"[web_gui] 姿态测算成功: 返回 {result['candidate_count']} 个候选"
+                )
+                self._web_server.emit_grasp_pose_result(
+                    success=True,
+                    candidates=result["candidates"],
+                    candidate_count=result["candidate_count"],
+                    inference_time_ms=result["inference_time_ms"],
+                )
+            else:
+                with self._state_lock:
+                    self._state = State.HIGHLIGHTED
+
+                self.get_logger().warning(f"[web_gui] 姿态测算失败: {result['error']}")
+                self._web_server.emit_grasp_pose_result(
+                    success=False, error=result["error"]
+                )
+
+        except Exception as e:
+            with self._state_lock:
+                self._state = State.HIGHLIGHTED
+
+            self.get_logger().error(f"[web_gui] 姿态测算异常: {e}")
+            self._web_server.emit_grasp_pose_result(success=False, error=str(e))
+
+        finally:
+            loop.close()
+
+    async def _do_grasp_pose(self, point_cloud: PointCloud2) -> dict:
+        """执行姿态测算 Service 调用（异步）"""
+        # 检查服务是否可用
+        if not self._grasp_client.service_is_ready():
+            if not self._grasp_client.wait_for_service(timeout_sec=5.0):
+                return {
+                    "success": False,
+                    "error": f"Grasp 服务 {GRASP_SERVICE} 不可用",
+                }
+
+        # 构建请求
+        request = Grasp.Request()
+        request.point_cloud = point_cloud
+        request.max_candidates = 50
+        request.min_confidence = 0.5
+
+        try:
+            future = self._grasp_client.call_async(request)
+            # 等待结果
+            await asyncio.wait_for(
+                asyncio.wrap_future(future),
+                timeout=30.0
+            )
+
+            response = future.result()
+            if not response.success:
+                return {
+                    "success": False,
+                    "error": response.error_message or "姿态测算失败",
+                }
+
+            # 转换候选为可序列化的字典格式
+            candidates = []
+            for c in response.candidates[:2]:  # 只取前两个
+                candidates.append({
+                    "position": {
+                        "x": round(c.position.x, 4),
+                        "y": round(c.position.y, 4),
+                        "z": round(c.position.z, 4),
+                    },
+                    "orientation": {
+                        "x": round(c.orientation.x, 4),
+                        "y": round(c.orientation.y, 4),
+                        "z": round(c.orientation.z, 4),
+                        "w": round(c.orientation.w, 4),
+                    },
+                    "width": round(c.width, 4),
+                    "confidence": round(c.confidence, 4),
+                })
+
+            return {
+                "success": True,
+                "candidates": candidates,
+                "candidate_count": response.candidate_count,
+                "inference_time_ms": response.inference_time_ms,
+            }
+
+        except asyncio.TimeoutError:
+            return {
+                "success": False,
+                "error": "姿态测算超时 (> 30s)",
+            }
+        except Exception as e:
+            return {
+                "success": False,
+                "error": f"姿态测算异常: {e}",
+            }
+
     def _handle_cancel(self) -> None:
         """处理取消请求"""
         with self._state_lock:
-            if self._state == State.SEGMENTING or self._state == State.RECORDING:
+            if self._state in (State.SEGMENTING, State.RECORDING, State.GRASPING, State.POSE_ESTIMATING):
                 self.get_logger().warning(
                     f"[web_gui] 当前状态 {self._state.value}，无法取消"
                 )
@@ -320,13 +667,14 @@ class WebInteractiveGui(Node):
         return {
             "state": state.value,
             "has_highlight": has_highlight,
-            "processing": state in (State.SEGMENTING, State.RECORDING),
+            "processing": state in (State.SEGMENTING, State.RECORDING, State.GRASPING, State.POSE_ESTIMATING),
         }
 
     def _get_health(self) -> dict:
         """获取健康状态"""
         camera_ready, camera_msg = self._camera.is_ready()
         perception_ready = self._perception.is_ready()
+        robot_skill_ready = self._robot_skill.is_ready()
         web_ready = self._web_server.is_ready()
 
         all_ready = web_ready  # 最低要求：Web 服务可用
@@ -336,6 +684,7 @@ class WebInteractiveGui(Node):
             "ready": all_ready,
             "camera": {"ready": camera_ready, "message": camera_msg},
             "perception": {"ready": perception_ready},
+            "robot_skill": {"ready": robot_skill_ready},
             "web": {"ready": web_ready},
         }
 
@@ -378,6 +727,8 @@ class WebInteractiveGui(Node):
         with self._cache_lock:
             self._visualization = None
             self._cropped_image = None
+            self._point_cloud = None
+            self._segment_3d_info = None
 
 
 def main(args=None):

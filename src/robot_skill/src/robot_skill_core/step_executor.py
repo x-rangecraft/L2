@@ -156,19 +156,43 @@ class StepExecutor:
 
     async def _execute_joint_move(self, step: SkillStep) -> Tuple[bool, str, str]:
         params = step.params
+        speed_scale = float(params.get('speed_scale', DEFAULT_SPEED_SCALE))
+        timeout = DEFAULT_ACTION_TIMEOUT_SEC
+        label = params.get('label', step.id)
+        relative = bool(params.get('relative', False))
+
+        # Mode 1: all_positions - set all 6 joints at once
+        all_positions = params.get('all_positions')
+        if all_positions is not None:
+            if len(all_positions) != len(JOINT_NAME_ORDER):
+                raise ValueError(
+                    f"Step '{step.id}' all_positions must have {len(JOINT_NAME_ORDER)} values"
+                )
+            goal = JointCommand.Goal()
+            joint_target = JointCommandTarget()
+            joint_state = JointState()
+            joint_state.name = list(JOINT_NAME_ORDER)
+            joint_state.position = [float(p) for p in all_positions]
+            joint_target.joint_state = joint_state
+            joint_target.relative = relative
+            joint_target.speed_scale = speed_scale
+            goal.target = joint_target
+            options = JointCommandOptions()
+            options.timeout = self._seconds_to_duration(timeout)
+            options.label = label
+            goal.options = options
+            return await self._send_goal(self._joint_client, goal, f'{step.id}/joint_all')
+
+        # Mode 2: single joint with positions list (original behavior)
         positions = params.get('positions')
         if not positions:
-            raise ValueError(f"Step '{step.id}' missing positions list")
+            raise ValueError(f"Step '{step.id}' missing positions list or all_positions")
         joint_name = params.get('joint_name')
         if joint_name is None:
             index = params.get('joint_index')
             if index is None or index < 0 or index >= len(JOINT_NAME_ORDER):
                 raise ValueError(f"Invalid joint index in step '{step.id}'")
             joint_name = JOINT_NAME_ORDER[int(index)]
-        speed_scale = float(params.get('speed_scale', DEFAULT_SPEED_SCALE))
-        timeout = DEFAULT_ACTION_TIMEOUT_SEC
-        label = params.get('label', step.id)
-        relative = bool(params.get('relative', False))
 
         for pos in positions:
             goal = JointCommand.Goal()

@@ -33,6 +33,8 @@ class WebServerManager:
         # 回调函数（由 set_callbacks 注入）
         self._on_segment: Optional[Callable[[float, float], None]] = None
         self._on_record: Optional[Callable[[str], None]] = None
+        self._on_grasp: Optional[Callable[[], None]] = None
+        self._on_grasp_pose: Optional[Callable[[], None]] = None
         self._on_cancel: Optional[Callable[[], None]] = None
         self._get_status: Optional[Callable[[], dict]] = None
         self._get_health: Optional[Callable[[], dict]] = None
@@ -75,6 +77,8 @@ class WebServerManager:
         self,
         on_segment: Callable[[float, float], None],
         on_record: Callable[[str], None],
+        on_grasp: Callable[[], None],
+        on_grasp_pose: Callable[[], None],
         on_cancel: Callable[[], None],
         get_status: Callable[[], dict],
         get_health: Callable[[], dict],
@@ -85,12 +89,16 @@ class WebServerManager:
         Args:
             on_segment: 分割请求回调 (x, y)
             on_record: 记录请求回调 (label)
+            on_grasp: 抓取请求回调
+            on_grasp_pose: 姿态测算请求回调
             on_cancel: 取消请求回调
             get_status: 获取状态回调
             get_health: 获取健康状态回调
         """
         self._on_segment = on_segment
         self._on_record = on_record
+        self._on_grasp = on_grasp
+        self._on_grasp_pose = on_grasp_pose
         self._on_cancel = on_cancel
         self._get_status = get_status
         self._get_health = get_health
@@ -152,6 +160,30 @@ class WebServerManager:
 
             try:
                 self._on_record(label)
+                return jsonify({"status": "ok"})
+            except Exception as e:
+                return jsonify({"status": "error", "error": str(e)}), 500
+
+        @self._app.route("/grasp", methods=["POST"])
+        def grasp():
+            """执行抓取动作"""
+            if self._on_grasp is None:
+                return jsonify({"status": "error", "error": "回调未设置"}), 500
+
+            try:
+                self._on_grasp()
+                return jsonify({"status": "ok"})
+            except Exception as e:
+                return jsonify({"status": "error", "error": str(e)}), 500
+
+        @self._app.route("/grasp_pose", methods=["POST"])
+        def grasp_pose():
+            """姿态测算（调用 Grasp Service）"""
+            if self._on_grasp_pose is None:
+                return jsonify({"status": "error", "error": "回调未设置"}), 500
+
+            try:
+                self._on_grasp_pose()
                 return jsonify({"status": "ok"})
             except Exception as e:
                 return jsonify({"status": "error", "error": str(e)}), 500
@@ -250,13 +282,19 @@ class WebServerManager:
 
         self._socketio.emit("image_update", data)
 
-    def emit_segment_result(self, success: bool, error: str = "") -> None:
+    def emit_segment_result(
+        self,
+        success: bool,
+        error: str = "",
+        info_3d: dict = None,
+    ) -> None:
         """
         推送分割结果通知
 
         Args:
             success: 是否成功
             error: 错误信息（失败时）
+            info_3d: 3D 信息字典，包含 center_3d, bbox_min, bbox_max, point_count, confidence, center_3d_base
         """
         if not self._ready:
             return
@@ -264,6 +302,36 @@ class WebServerManager:
         data = {"success": success}
         if not success and error:
             data["error"] = error
+        
+        # 添加 3D 信息
+        if success and info_3d:
+            if info_3d.get("center_3d"):
+                data["center_3d"] = {
+                    "x": round(info_3d["center_3d"][0], 4),
+                    "y": round(info_3d["center_3d"][1], 4),
+                    "z": round(info_3d["center_3d"][2], 4),
+                }
+            if info_3d.get("bbox_min"):
+                data["bbox_min"] = {
+                    "x": round(info_3d["bbox_min"][0], 4),
+                    "y": round(info_3d["bbox_min"][1], 4),
+                    "z": round(info_3d["bbox_min"][2], 4),
+                }
+            if info_3d.get("bbox_max"):
+                data["bbox_max"] = {
+                    "x": round(info_3d["bbox_max"][0], 4),
+                    "y": round(info_3d["bbox_max"][1], 4),
+                    "z": round(info_3d["bbox_max"][2], 4),
+                }
+            # 转换后的 base_link 坐标
+            if info_3d.get("center_3d_base"):
+                data["center_3d_base"] = {
+                    "x": round(info_3d["center_3d_base"][0], 4),
+                    "y": round(info_3d["center_3d_base"][1], 4),
+                    "z": round(info_3d["center_3d_base"][2], 4),
+                }
+            data["point_count"] = info_3d.get("point_count", 0)
+            data["confidence"] = round(info_3d.get("confidence", 0), 4)
 
         self._socketio.emit("segment_result", data)
 
@@ -291,3 +359,87 @@ class WebServerManager:
             data["error"] = error
 
         self._socketio.emit("record_result", data)
+
+    def emit_grasp_feedback(
+        self,
+        phase: str,
+        step_index: int,
+        step_desc: str,
+        progress: float,
+    ) -> None:
+        """
+        推送抓取进度反馈
+
+        Args:
+            phase: 当前阶段 (planning/executing)
+            step_index: 当前步骤索引
+            step_desc: 步骤描述
+            progress: 进度 (0.0-1.0)
+        """
+        if not self._ready:
+            return
+
+        data = {
+            "phase": phase,
+            "step_index": step_index,
+            "step_desc": step_desc,
+            "progress": round(progress, 2),
+        }
+
+        self._socketio.emit("grasp_feedback", data)
+
+    def emit_grasp_result(
+        self,
+        success: bool,
+        steps_executed: int = 0,
+        error: str = "",
+    ) -> None:
+        """
+        推送抓取结果通知
+
+        Args:
+            success: 是否成功
+            steps_executed: 执行的步骤数
+            error: 错误信息（失败时）
+        """
+        if not self._ready:
+            return
+
+        data = {"success": success}
+        if success:
+            data["steps_executed"] = steps_executed
+        if not success and error:
+            data["error"] = error
+
+        self._socketio.emit("grasp_result", data)
+
+    def emit_grasp_pose_result(
+        self,
+        success: bool,
+        candidates: list = None,
+        candidate_count: int = 0,
+        inference_time_ms: float = 0.0,
+        error: str = "",
+    ) -> None:
+        """
+        推送姿态测算结果通知
+
+        Args:
+            success: 是否成功
+            candidates: 抓取候选列表（前2个）
+            candidate_count: 总候选数量
+            inference_time_ms: 推理耗时（毫秒）
+            error: 错误信息（失败时）
+        """
+        if not self._ready:
+            return
+
+        data = {"success": success}
+        if success:
+            data["candidates"] = candidates or []
+            data["candidate_count"] = candidate_count
+            data["inference_time_ms"] = round(inference_time_ms, 2)
+        if not success and error:
+            data["error"] = error
+
+        self._socketio.emit("grasp_pose_result", data)

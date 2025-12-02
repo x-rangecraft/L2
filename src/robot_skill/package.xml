@@ -17,6 +17,7 @@
   <depend>sensor_msgs</depend>
   <depend>std_msgs</depend>
   <depend>tf2_ros</depend>
+  <depend>tf_tools</depend>
   <depend>robot_driver</depend>
   <exec_depend>rosidl_default_runtime</exec_depend>
   <exec_depend>python3-yaml</exec_depend>

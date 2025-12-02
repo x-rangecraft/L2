@@ -192,6 +192,26 @@
             cursor: not-allowed;
         }
         
+        .btn-grasp {
+            background: var(--primary);
+            color: white;
+        }
+        
+        .btn-grasp:hover:not(:disabled) {
+            background: var(--primary-dark);
+            transform: translateY(-1px);
+        }
+        
+        .btn-pose {
+            background: #7c3aed;
+            color: white;
+        }
+        
+        .btn-pose:hover:not(:disabled) {
+            background: #6d28d9;
+            transform: translateY(-1px);
+        }
+        
         .btn-record {
             background: var(--success);
             color: white;
@@ -248,6 +268,157 @@
         
         .info-value.highlight {
             color: var(--primary);
+        }
+        
+        /* 3D 信息面板 */
+        .info-3d-panel {
+            background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
+            border-top: 1px solid var(--gray-200);
+            padding: 16px 20px;
+        }
+        
+        .info-3d-header {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            color: #94a3b8;
+            font-size: 0.85em;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 12px;
+        }
+        
+        .info-3d-icon {
+            font-size: 1.1em;
+        }
+        
+        .info-3d-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 12px;
+        }
+        
+        .info-3d-item {
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 8px;
+            padding: 12px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+        
+        .info-3d-label {
+            font-size: 0.75em;
+            color: #64748b;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 6px;
+        }
+        
+        .info-3d-value {
+            font-size: 1em;
+            font-weight: 600;
+            color: #e2e8f0;
+            font-family: 'SF Mono', 'Monaco', 'Consolas', monospace;
+        }
+        
+        .info-3d-value.highlight {
+            color: #60a5fa;
+        }
+        
+        @media (max-width: 768px) {
+            .info-3d-grid {
+                grid-template-columns: repeat(2, 1fr);
+            }
+        }
+        
+        /* 抓取候选面板 */
+        .grasp-candidates-panel {
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            border-top: 1px solid var(--gray-200);
+            padding: 16px 20px;
+        }
+        
+        .grasp-info-badge {
+            margin-left: auto;
+            font-size: 0.75em;
+            color: #60a5fa;
+            background: rgba(96, 165, 250, 0.1);
+            padding: 2px 8px;
+            border-radius: 10px;
+        }
+        
+        .grasp-candidates-container {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 12px;
+        }
+        
+        @media (max-width: 768px) {
+            .grasp-candidates-container {
+                grid-template-columns: 1fr;
+            }
+        }
+        
+        .grasp-candidate-card {
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            border-radius: 10px;
+            padding: 12px;
+            transition: all 0.2s;
+        }
+        
+        .grasp-candidate-card:hover {
+            background: rgba(255, 255, 255, 0.06);
+            border-color: rgba(124, 58, 237, 0.3);
+        }
+        
+        .grasp-candidate-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 10px;
+            padding-bottom: 8px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+        }
+        
+        .grasp-candidate-rank {
+            font-size: 0.9em;
+            font-weight: 700;
+            color: #a78bfa;
+        }
+        
+        .grasp-candidate-confidence {
+            font-size: 0.8em;
+            color: #10b981;
+            background: rgba(16, 185, 129, 0.15);
+            padding: 2px 8px;
+            border-radius: 8px;
+        }
+        
+        .grasp-candidate-grid {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+        
+        .grasp-candidate-item {
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
+        }
+        
+        .grasp-candidate-label {
+            font-size: 0.7em;
+            color: #64748b;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        
+        .grasp-candidate-value {
+            font-size: 0.85em;
+            font-weight: 500;
+            color: #e2e8f0;
+            font-family: 'SF Mono', 'Monaco', 'Consolas', monospace;
+            word-break: break-all;
         }
         
         /* 状态栏 */
@@ -378,6 +549,12 @@
         </div>
         
         <div class="action-bar" id="action-bar">
+            <button class="action-btn btn-grasp" id="btn-grasp">
+                <span>🤖</span> 抓取
+            </button>
+            <button class="action-btn btn-pose" id="btn-pose">
+                <span>📐</span> 姿态测算
+            </button>
             <button class="action-btn btn-record" id="btn-record">
                 <span>✓</span> 记录物体
             </button>
@@ -408,6 +585,93 @@
             </div>
         </div>
         
+        <!-- 3D 信息面板 -->
+        <div class="info-3d-panel" id="info-3d-panel">
+            <div class="info-3d-header">
+                <span class="info-3d-icon">📍</span>
+                <span>3D 点云信息</span>
+            </div>
+            <div class="info-3d-grid">
+                <div class="info-3d-item">
+                    <div class="info-3d-label">质心-相机系 (m)</div>
+                    <div class="info-3d-value" id="center-3d">--</div>
+                </div>
+                <div class="info-3d-item">
+                    <div class="info-3d-label">质心-基座系 (m)</div>
+                    <div class="info-3d-value highlight" id="center-3d-base">--</div>
+                </div>
+                <div class="info-3d-item">
+                    <div class="info-3d-label">尺寸 (mm)</div>
+                    <div class="info-3d-value" id="bbox-size">--</div>
+                </div>
+                <div class="info-3d-item">
+                    <div class="info-3d-label">边界框 Min (m)</div>
+                    <div class="info-3d-value" id="bbox-min">--</div>
+                </div>
+                <div class="info-3d-item">
+                    <div class="info-3d-label">边界框 Max (m)</div>
+                    <div class="info-3d-value" id="bbox-max">--</div>
+                </div>
+                <div class="info-3d-item">
+                    <div class="info-3d-label">点数 / 置信度</div>
+                    <div class="info-3d-value" id="point-confidence">--</div>
+                </div>
+            </div>
+        </div>
+        
+        <!-- 抓取候选面板 -->
+        <div class="grasp-candidates-panel" id="grasp-candidates-panel">
+            <div class="info-3d-header">
+                <span class="info-3d-icon">🎯</span>
+                <span>抓取候选位姿</span>
+                <span class="grasp-info-badge" id="grasp-info-badge"></span>
+            </div>
+            <div class="grasp-candidates-container" id="grasp-candidates-container">
+                <!-- 候选 1 -->
+                <div class="grasp-candidate-card" id="grasp-candidate-1">
+                    <div class="grasp-candidate-header">
+                        <span class="grasp-candidate-rank">#1</span>
+                        <span class="grasp-candidate-confidence" id="grasp-conf-1">--</span>
+                    </div>
+                    <div class="grasp-candidate-grid">
+                        <div class="grasp-candidate-item">
+                            <div class="grasp-candidate-label">位置 (m)</div>
+                            <div class="grasp-candidate-value" id="grasp-pos-1">--</div>
+                        </div>
+                        <div class="grasp-candidate-item">
+                            <div class="grasp-candidate-label">四元数 (x,y,z,w)</div>
+                            <div class="grasp-candidate-value" id="grasp-quat-1">--</div>
+                        </div>
+                        <div class="grasp-candidate-item">
+                            <div class="grasp-candidate-label">夹爪宽度 (m)</div>
+                            <div class="grasp-candidate-value" id="grasp-width-1">--</div>
+                        </div>
+                    </div>
+                </div>
+                <!-- 候选 2 -->
+                <div class="grasp-candidate-card" id="grasp-candidate-2">
+                    <div class="grasp-candidate-header">
+                        <span class="grasp-candidate-rank">#2</span>
+                        <span class="grasp-candidate-confidence" id="grasp-conf-2">--</span>
+                    </div>
+                    <div class="grasp-candidate-grid">
+                        <div class="grasp-candidate-item">
+                            <div class="grasp-candidate-label">位置 (m)</div>
+                            <div class="grasp-candidate-value" id="grasp-pos-2">--</div>
+                        </div>
+                        <div class="grasp-candidate-item">
+                            <div class="grasp-candidate-label">四元数 (x,y,z,w)</div>
+                            <div class="grasp-candidate-value" id="grasp-quat-2">--</div>
+                        </div>
+                        <div class="grasp-candidate-item">
+                            <div class="grasp-candidate-label">夹爪宽度 (m)</div>
+                            <div class="grasp-candidate-value" id="grasp-width-2">--</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
         <div class="status-bar">
             <div class="connection-status">
                 <div class="status-dot" id="status-dot"></div>
@@ -433,7 +697,9 @@
 <script>
 const TRANSPARENT_PIXEL = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
 const SEGMENT_TIMEOUT_MS = 30000;
+const GRASP_TIMEOUT_MS = 120000;  // 抓取超时 120 秒（机器人移动需要时间）
 let segmentTimeoutId = null;
+let graspTimeoutId = null;
 
 // 状态管理
 const AppState = {
@@ -458,6 +724,8 @@ function initializeApp() {
         processingOverlay: document.getElementById('processing-overlay'),
         processingText: document.getElementById('processing-text'),
         actionBar: document.getElementById('action-bar'),
+        btnGrasp: document.getElementById('btn-grasp'),
+        btnPose: document.getElementById('btn-pose'),
         btnRecord: document.getElementById('btn-record'),
         btnSample: document.getElementById('btn-sample'),
         btnCancel: document.getElementById('btn-cancel'),
@@ -468,7 +736,24 @@ function initializeApp() {
         statusDot: document.getElementById('status-dot'),
         connectionText: document.getElementById('connection-text'),
         nodeStatus: document.getElementById('node-status'),
-        toastContainer: document.getElementById('toast-container')
+        toastContainer: document.getElementById('toast-container'),
+        // 3D 信息面板
+        center3d: document.getElementById('center-3d'),
+        center3dBase: document.getElementById('center-3d-base'),
+        bboxMin: document.getElementById('bbox-min'),
+        bboxMax: document.getElementById('bbox-max'),
+        bboxSize: document.getElementById('bbox-size'),
+        pointConfidence: document.getElementById('point-confidence'),
+        // 抓取候选面板
+        graspInfoBadge: document.getElementById('grasp-info-badge'),
+        graspPos1: document.getElementById('grasp-pos-1'),
+        graspQuat1: document.getElementById('grasp-quat-1'),
+        graspWidth1: document.getElementById('grasp-width-1'),
+        graspConf1: document.getElementById('grasp-conf-1'),
+        graspPos2: document.getElementById('grasp-pos-2'),
+        graspQuat2: document.getElementById('grasp-quat-2'),
+        graspWidth2: document.getElementById('grasp-width-2'),
+        graspConf2: document.getElementById('grasp-conf-2')
     };
     
     // 初始化 Socket.IO
@@ -499,11 +784,20 @@ function initializeSocketIO() {
     socket.on('image_update', handleImageUpdate);
     socket.on('segment_result', handleSegmentResult);
     socket.on('record_result', handleRecordResult);
+    socket.on('grasp_feedback', handleGraspFeedback);
+    socket.on('grasp_result', handleGraspResult);
+    socket.on('grasp_pose_result', handleGraspPoseResult);
 }
 
 function bindEvents() {
     // 图像点击 - 触发分割
     elements.imageContainer.addEventListener('click', handleImageClick);
+    
+    // 抓取按钮
+    elements.btnGrasp.addEventListener('click', handleGrasp);
+    
+    // 姿态测算按钮
+    elements.btnPose.addEventListener('click', handleGraspPose);
     
     // 记录按钮
     elements.btnRecord.addEventListener('click', handleRecord);
@@ -600,13 +894,75 @@ function handleSegmentResult(data) {
         AppState.hasHighlight = true;
         updateActionBar();
         updateStateDisplay('已分割');
+        
+        // 显示 3D 信息
+        update3DInfo(data);
+        // 清除旧的抓取候选
+        clearGraspCandidates();
+        
         showToast('分割成功', 'success');
     } else {
         AppState.hasHighlight = false;
         updateActionBar();
         updateStateDisplay('空闲');
+        clear3DInfo();
+        clearGraspCandidates();
         showToast(data.error || '分割失败', 'error');
     }
+}
+
+function update3DInfo(data) {
+    // 相机坐标系质心
+    if (data.center_3d) {
+        elements.center3d.textContent = `(${data.center_3d.x.toFixed(3)}, ${data.center_3d.y.toFixed(3)}, ${data.center_3d.z.toFixed(3)})`;
+    } else {
+        elements.center3d.textContent = '--';
+    }
+    
+    // 基座坐标系质心（转换后）
+    if (data.center_3d_base) {
+        elements.center3dBase.textContent = `(${data.center_3d_base.x.toFixed(3)}, ${data.center_3d_base.y.toFixed(3)}, ${data.center_3d_base.z.toFixed(3)})`;
+    } else {
+        elements.center3dBase.textContent = '--';
+    }
+    
+    if (data.bbox_min) {
+        elements.bboxMin.textContent = `(${data.bbox_min.x.toFixed(3)}, ${data.bbox_min.y.toFixed(3)}, ${data.bbox_min.z.toFixed(3)})`;
+    } else {
+        elements.bboxMin.textContent = '--';
+    }
+    
+    if (data.bbox_max) {
+        elements.bboxMax.textContent = `(${data.bbox_max.x.toFixed(3)}, ${data.bbox_max.y.toFixed(3)}, ${data.bbox_max.z.toFixed(3)})`;
+    } else {
+        elements.bboxMax.textContent = '--';
+    }
+    
+    // 计算尺寸 (转换为 mm)
+    if (data.bbox_min && data.bbox_max) {
+        const sizeX = ((data.bbox_max.x - data.bbox_min.x) * 1000).toFixed(1);
+        const sizeY = ((data.bbox_max.y - data.bbox_min.y) * 1000).toFixed(1);
+        const sizeZ = ((data.bbox_max.z - data.bbox_min.z) * 1000).toFixed(1);
+        elements.bboxSize.textContent = `${sizeX} × ${sizeY} × ${sizeZ}`;
+    } else {
+        elements.bboxSize.textContent = '--';
+    }
+    
+    // 点数和置信度合并显示
+    const pointStr = data.point_count ? data.point_count.toLocaleString() : '--';
+    const confStr = (data.confidence !== undefined && data.confidence > 0) 
+        ? `${(data.confidence * 100).toFixed(1)}%` 
+        : '--';
+    elements.pointConfidence.textContent = `${pointStr} / ${confStr}`;
+}
+
+function clear3DInfo() {
+    elements.center3d.textContent = '--';
+    elements.center3dBase.textContent = '--';
+    elements.bboxMin.textContent = '--';
+    elements.bboxMax.textContent = '--';
+    elements.bboxSize.textContent = '--';
+    elements.pointConfidence.textContent = '--';
 }
 
 function handleRecord() {
@@ -645,9 +1001,183 @@ function handleRecordResult(data) {
         AppState.hasHighlight = false;
         updateActionBar();
         updateStateDisplay('空闲');
+        clear3DInfo();
+        clearGraspCandidates();
         showToast(`记录成功: ${data.object_id}`, 'success');
     } else {
         showToast(data.error || '记录失败', 'error');
+    }
+}
+
+function handleGrasp() {
+    if (AppState.processing) return;
+    
+    if (!AppState.hasHighlight) {
+        showToast('请先点击图像分割目标物体', 'info');
+        return;
+    }
+    
+    setProcessing(true, '抓取规划中...');
+    startGraspTimeout();
+    
+    fetch('/grasp', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' }
+    })
+    .then(res => res.json())
+    .then(data => {
+        if (data.status === 'error') {
+            clearGraspTimeout();
+            setProcessing(false);
+            showToast(data.error || '抓取请求失败', 'error');
+        }
+        // 成功时等待 grasp_feedback 和 grasp_result 事件
+    })
+    .catch(err => {
+        clearGraspTimeout();
+        setProcessing(false);
+        showToast('网络错误: ' + err.message, 'error');
+    });
+}
+
+function handleGraspPose() {
+    if (AppState.processing) return;
+    
+    if (!AppState.hasHighlight) {
+        showToast('请先点击图像分割目标物体', 'info');
+        return;
+    }
+    
+    setProcessing(true, '姿态测算中...');
+    
+    fetch('/grasp_pose', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' }
+    })
+    .then(res => res.json())
+    .then(data => {
+        if (data.status === 'error') {
+            setProcessing(false);
+            showToast(data.error || '姿态测算请求失败', 'error');
+        }
+        // 成功时等待 grasp_pose_result 事件
+    })
+    .catch(err => {
+        setProcessing(false);
+        showToast('网络错误: ' + err.message, 'error');
+    });
+}
+
+function handleGraspPoseResult(data) {
+    setProcessing(false);
+    
+    if (data.success) {
+        updateGraspCandidates(data);
+        showToast(`姿态测算成功: ${data.candidate_count} 个候选 (${data.inference_time_ms}ms)`, 'success');
+    } else {
+        clearGraspCandidates();
+        showToast(data.error || '姿态测算失败', 'error');
+    }
+}
+
+function updateGraspCandidates(data) {
+    // 更新徽章
+    elements.graspInfoBadge.textContent = `共 ${data.candidate_count} 个候选 · ${data.inference_time_ms}ms`;
+    
+    const candidates = data.candidates || [];
+    
+    // 更新候选 1
+    if (candidates.length >= 1) {
+        const c1 = candidates[0];
+        elements.graspPos1.textContent = `(${c1.position.x}, ${c1.position.y}, ${c1.position.z})`;
+        elements.graspQuat1.textContent = `(${c1.orientation.x}, ${c1.orientation.y}, ${c1.orientation.z}, ${c1.orientation.w})`;
+        elements.graspWidth1.textContent = c1.width.toFixed(4);
+        elements.graspConf1.textContent = `${(c1.confidence * 100).toFixed(1)}%`;
+    } else {
+        clearGraspCandidate(1);
+    }
+    
+    // 更新候选 2
+    if (candidates.length >= 2) {
+        const c2 = candidates[1];
+        elements.graspPos2.textContent = `(${c2.position.x}, ${c2.position.y}, ${c2.position.z})`;
+        elements.graspQuat2.textContent = `(${c2.orientation.x}, ${c2.orientation.y}, ${c2.orientation.z}, ${c2.orientation.w})`;
+        elements.graspWidth2.textContent = c2.width.toFixed(4);
+        elements.graspConf2.textContent = `${(c2.confidence * 100).toFixed(1)}%`;
+    } else {
+        clearGraspCandidate(2);
+    }
+}
+
+function clearGraspCandidate(index) {
+    if (index === 1) {
+        elements.graspPos1.textContent = '--';
+        elements.graspQuat1.textContent = '--';
+        elements.graspWidth1.textContent = '--';
+        elements.graspConf1.textContent = '--';
+    } else if (index === 2) {
+        elements.graspPos2.textContent = '--';
+        elements.graspQuat2.textContent = '--';
+        elements.graspWidth2.textContent = '--';
+        elements.graspConf2.textContent = '--';
+    }
+}
+
+function clearGraspCandidates() {
+    elements.graspInfoBadge.textContent = '';
+    clearGraspCandidate(1);
+    clearGraspCandidate(2);
+}
+
+function handleGraspFeedback(data) {
+    // 收到反馈说明还在执行，重置超时计时器
+    resetGraspTimeout();
+    
+    // 更新进度显示
+    const pct = Math.round(data.progress * 100);
+    const phaseText = data.phase === 'planning' ? '规划中' : '执行中';
+    setProcessing(true, `${phaseText}: ${data.step_desc} (${pct}%)`);
+}
+
+function handleGraspResult(data) {
+    clearGraspTimeout();
+    setProcessing(false);
+    
+    if (data.success) {
+        AppState.hasHighlight = false;
+        updateActionBar();
+        updateStateDisplay('空闲');
+        clear3DInfo();
+        clearGraspCandidates();
+        showToast(`抓取完成: 执行了 ${data.steps_executed} 步`, 'success');
+    } else {
+        // 显示详细错误信息
+        const errorMsg = data.error || '抓取失败';
+        showToast(errorMsg, 'error');
+    }
+}
+
+function startGraspTimeout() {
+    clearGraspTimeout();
+    graspTimeoutId = setTimeout(() => {
+        graspTimeoutId = null;
+        setProcessing(false);
+        showToast('抓取超时 (>120 秒)，请检查机器人状态', 'error');
+    }, GRASP_TIMEOUT_MS);
+}
+
+function clearGraspTimeout() {
+    if (graspTimeoutId !== null) {
+        clearTimeout(graspTimeoutId);
+        graspTimeoutId = null;
+    }
+}
+
+function resetGraspTimeout() {
+    // 收到 feedback 时重置超时，避免长时间执行被误判为超时
+    if (graspTimeoutId !== null) {
+        clearGraspTimeout();
+        startGraspTimeout();
     }
 }
 
@@ -668,6 +1198,8 @@ function handleCancel() {
         AppState.hasHighlight = false;
         updateActionBar();
         updateStateDisplay('空闲');
+        clear3DInfo();
+        clearGraspCandidates();
     })
     .catch(err => {
         showToast('取消失败: ' + err.message, 'error');
@@ -687,6 +1219,8 @@ function setProcessing(isProcessing, text = '处理中...') {
     AppState.processing = isProcessing;
     elements.processingOverlay.classList.toggle('active', isProcessing);
     elements.processingText.textContent = text;
+    elements.btnGrasp.disabled = isProcessing;
+    elements.btnPose.disabled = isProcessing;
     elements.btnRecord.disabled = isProcessing;
     elements.btnCancel.disabled = isProcessing;
     
@@ -730,6 +1264,7 @@ function updateConnectionStatus() {
                 const parts = [];
                 if (data.camera) parts.push(`相机: ${data.camera.ready ? '✓' : '✗'}`);
                 if (data.perception) parts.push(`感知: ${data.perception.ready ? '✓' : '✗'}`);
+                if (data.robot_skill) parts.push(`技能: ${data.robot_skill.ready ? '✓' : '✗'}`);
                 elements.nodeStatus.textContent = parts.join(' | ') || '-';
             })
             .catch(() => {

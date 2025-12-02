@@ -10,7 +10,7 @@ import numpy as np
 from cv_bridge import CvBridge
 from rclpy.action import ActionClient
 from rclpy.node import Node
-from sensor_msgs.msg import CameraInfo, Image
+from sensor_msgs.msg import CameraInfo, Image, PointCloud2
 
 # perception Action 定义
 from perception.action import ObjectRecord, ObjectTarget
@@ -27,7 +27,11 @@ class SegmentResult:
     error_message: str = ""
     visualization: Optional[np.ndarray] = None  # 可视化图（numpy BGR）
     cropped_image: Optional[Image] = None  # 裁剪图（ROS Image，供 record 使用）
+    point_cloud: Optional[PointCloud2] = None  # 原始点云（ROS PointCloud2，供 grasp 使用）
     center_3d: Optional[tuple] = None  # 点云中心 (x, y, z)
+    bbox_min: Optional[tuple] = None  # 3D 边界框最小点 (x, y, z)
+    bbox_max: Optional[tuple] = None  # 3D 边界框最大点 (x, y, z)
+    point_count: int = 0  # 有效点数量
     confidence: float = 0.0
 
 
@@ -177,20 +181,38 @@ class PerceptionClient:
                         f"[PerceptionClient] 可视化图像转换失败: {e}"
                     )
 
-            # 提取点云中心
+            # 提取点云信息
             center_3d = None
+            bbox_min = None
+            bbox_max = None
+            point_count = result.point_count
+            
             if result.point_count > 0:
                 center_3d = (
                     result.center_3d.x,
                     result.center_3d.y,
                     result.center_3d.z,
                 )
+                bbox_min = (
+                    result.bbox_min.x,
+                    result.bbox_min.y,
+                    result.bbox_min.z,
+                )
+                bbox_max = (
+                    result.bbox_max.x,
+                    result.bbox_max.y,
+                    result.bbox_max.z,
+                )
 
             return SegmentResult(
                 success=True,
                 visualization=visualization,
                 cropped_image=result.cropped_image,
+                point_cloud=result.point_cloud if result.point_count > 0 else None,
                 center_3d=center_3d,
+                bbox_min=bbox_min,
+                bbox_max=bbox_max,
+                point_count=point_count,
                 confidence=result.confidence,
             )
 

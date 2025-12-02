@@ -24,7 +24,7 @@ class GraspPlanner:
 
     def __init__(
         self,
-        observe_pose: PoseStamped,
+        observe_step: SkillStep,
         approach_distance: float = 0.08,
         gripper_width_margin: float = 0.02,
     ) -> None:
@@ -32,11 +32,11 @@ class GraspPlanner:
         Initialize the grasp planner.
 
         Args:
-            observe_pose: Fixed pose for object observation/inspection
+            observe_step: SkillStep for moving to observe position (from general_skill.yaml)
             approach_distance: Height offset for pre-grasp pose (default 8cm)
             gripper_width_margin: Extra margin added to gripper width (default 2cm)
         """
-        self._observe_pose = observe_pose
+        self._observe_step = observe_step
         self._approach_distance = approach_distance
         self._gripper_width_margin = gripper_width_margin
 
@@ -235,9 +235,9 @@ class GraspPlanner:
             ),
             SkillStep(
                 id='observe',
-                type='cartesian_move',
-                desc='移到观察位',
-                params={'target_pose': self._observe_pose, 'speed_scale': 1.0},
+                type=self._observe_step.type,
+                desc=self._observe_step.desc,
+                params=self._observe_step.params,
             ),
             SkillStep(
                 id='sweep',

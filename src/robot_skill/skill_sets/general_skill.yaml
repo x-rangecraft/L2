@@ -41,13 +41,16 @@ common_actions:
       speed_scale: 1.0
       label: gripper_close
   move_record_observe:
-    type: cartesian_move
+    type: joint_move
     desc: "移动至观察位"
     params:
-      frame_id: base_link
-      target_pose:
-        position: {x: 0.03586991293867343, y: 0.3111905019299687, z: 0.4428649697650363}
-        orientation: {x: -0.5268686399645887, y: -0.15210254136154186, z: -0.20206340031608086, w: 0.8114460150779765}
+      all_positions:
+        - 0.4774166475928894   # joint1
+        - 1.5581368734264132   # joint2
+        - 0.5003051804379339   # joint3
+        - 1.3052185854886709   # joint4
+        - -1.1110475318532114  # joint5
+        - -2.0410849164568514  # joint6
       speed_scale: 1.0
       label: record_observe
   sweep_joint6_inspect:

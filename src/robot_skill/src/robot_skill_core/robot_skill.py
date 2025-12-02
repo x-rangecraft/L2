@@ -9,18 +9,25 @@ from ament_index_python.packages import get_package_share_directory
 from rclpy.action import ActionServer, CancelResponse, GoalResponse
 from rclpy.action.server import ServerGoalHandle
 from rclpy.node import Node as RclpyNode
+from geometry_msgs.msg import Point
+from builtin_interfaces.msg import Time as TimeMsg
 
 from robot_skill.action import GraspRecord, SkillSequence
+from tf_tools.srv import TransformPoints
 from robot_skill_core.constants import (
     DEFAULT_APPROACH_DISTANCE,
     DEFAULT_GRIPPER_WIDTH_MARGIN,
     DEFAULT_MAX_GRIPPER_WIDTH,
     GRASP_RECORD_ACTION_TOPIC,
-    OBSERVE_POSE,
     SKILL_ACTION_TOPIC,
     SUPPORTED_STEP_TYPES,
     JOINT_NAME_ORDER,
 )
+
+# TF 坐标系配置
+CAMERA_FRAME = 'camera_color_optical_frame'
+ROBOT_BASE_FRAME = 'base_link'
+TF_TRANSFORM_SERVICE = '/tf_tools/service/transform_points'
 from robot_skill_core.grasp_planner import GraspPlanner
 from robot_skill_core.skill_loader import SkillLibrary, SkillStep
 from robot_skill_core.step_executor import StepExecutor
@@ -53,8 +60,10 @@ class RobotSkill(RclpyNode):
         self._step_executor = StepExecutor(self)
 
         # Grasp planner for dynamic grasp operations
+        # Get observe step from common actions (single source of truth)
+        observe_step = self._skill_library.get_common_action('move_record_observe')
         self._grasp_planner = GraspPlanner(
-            observe_pose=OBSERVE_POSE,
+            observe_step=observe_step,
             approach_distance=DEFAULT_APPROACH_DISTANCE,
             gripper_width_margin=DEFAULT_GRIPPER_WIDTH_MARGIN,
         )
@@ -78,6 +87,9 @@ class RobotSkill(RclpyNode):
             cancel_callback=self._grasp_cancel_callback,
             execute_callback=self._execute_grasp_record,
         )
+
+        # TF 转换服务客户端
+        self._tf_client = self.create_client(TransformPoints, TF_TRANSFORM_SERVICE)
 
         self.get_logger().info('robot_skill action servers ready')
 
@@ -151,9 +163,20 @@ class RobotSkill(RclpyNode):
                 raise ValueError("gripper requires 'command'")
             return
         if step.type == 'joint_move':
+            # Mode 1: all_positions - set all 6 joints at once
+            all_positions = params.get('all_positions')
+            if all_positions is not None:
+                if not isinstance(all_positions, (list, tuple)):
+                    raise ValueError("joint_move all_positions must be a list")
+                if len(all_positions) != len(JOINT_NAME_ORDER):
+                    raise ValueError(
+                        f"joint_move all_positions must have {len(JOINT_NAME_ORDER)} values"
+                    )
+                return
+            # Mode 2: single joint with positions list
             positions = params.get('positions')
             if not isinstance(positions, (list, tuple)) or not positions:
-                raise ValueError("joint_move requires a non-empty positions list")
+                raise ValueError("joint_move requires 'positions' or 'all_positions'")
             if params.get('joint_name') is None:
                 index = params.get('joint_index')
                 if index is None:
@@ -253,6 +276,55 @@ class RobotSkill(RclpyNode):
         self.get_logger().info(f'Cancel requested for grasp_record {goal_handle.request.context_id}')
         return CancelResponse.ACCEPT
 
+    async def _transform_points_to_base(
+        self, points: List[Point]
+    ) -> List[Point] | None:
+        """
+        Transform points from camera frame to base_link frame.
+        
+        Args:
+            points: List of points in camera frame
+            
+        Returns:
+            List of points in base_link frame, or None if transform failed
+        """
+        if not self._tf_client.service_is_ready():
+            self.get_logger().warning(
+                f'TF service {TF_TRANSFORM_SERVICE} not available, waiting...'
+            )
+            if not self._tf_client.wait_for_service(timeout_sec=5.0):
+                self.get_logger().error(
+                    f'TF service {TF_TRANSFORM_SERVICE} not available after 5s'
+                )
+                return None
+
+        # Build request
+        request = TransformPoints.Request()
+        request.source_frame = CAMERA_FRAME
+        request.target_frame = ROBOT_BASE_FRAME
+        request.stamp = TimeMsg()  # Use latest transform (sec=0, nanosec=0)
+        request.points_in = points
+
+        try:
+            future = self._tf_client.call_async(request)
+            # Wait for result with timeout
+            rclpy.spin_until_future_complete(self, future, timeout_sec=5.0)
+            
+            if not future.done():
+                self.get_logger().error('TF transform service call timed out')
+                return None
+                
+            response = future.result()
+            if not response.success:
+                self.get_logger().error(f'TF transform failed: {response.message}')
+                return None
+                
+            return list(response.points_out)
+            
+        except Exception as e:
+            self.get_logger().error(f'TF transform exception: {e}')
+            return None
+
     async def _execute_grasp_record(
         self, goal_handle: ServerGoalHandle
     ) -> GraspRecord.Result:
@@ -266,17 +338,38 @@ class RobotSkill(RclpyNode):
             f"max_width={max_gripper_width:.3f}m, context={context_id}"
         )
 
-        # Phase 1: Planning
+        # Phase 0: Transform points from camera frame to base_link
         planning_feedback = GraspRecord.Feedback()
         planning_feedback.phase = 'planning'
         planning_feedback.step_index = 0
-        planning_feedback.step_desc = 'Computing grasp pose'
+        planning_feedback.step_desc = 'Transforming coordinates'
         planning_feedback.progress = 0.0
+        goal_handle.publish_feedback(planning_feedback)
+
+        transformed_points = await self._transform_points_to_base(
+            list(req.boundary_points)
+        )
+        if transformed_points is None:
+            result = GraspRecord.Result()
+            result.success = False
+            result.error_code = 'TF_FAILED'
+            result.message = 'Failed to transform points from camera to base_link'
+            result.steps_executed = 0
+            goal_handle.abort()
+            return result
+
+        self.get_logger().info(
+            f"Points transformed: {len(transformed_points)} points in base_link frame"
+        )
+
+        # Phase 1: Planning
+        planning_feedback.step_desc = 'Computing grasp pose'
+        planning_feedback.progress = 0.1
         goal_handle.publish_feedback(planning_feedback)
 
         try:
             steps = self._grasp_planner.build_grasp_record_steps(
-                list(req.boundary_points),
+                transformed_points,
                 max_gripper_width,
             )
         except ValueError as exc:

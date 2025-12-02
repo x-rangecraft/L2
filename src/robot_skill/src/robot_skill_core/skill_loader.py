@@ -122,5 +122,21 @@ class SkillLibrary:
     def iter_common_actions(self) -> Iterable[SkillStep]:
         return list(self._common_actions.values())
 
+    def get_common_action(self, action_id: str) -> SkillStep:
+        """Get a common action by ID.
+
+        Args:
+            action_id: The action identifier (e.g., 'move_record_observe')
+
+        Returns:
+            SkillStep for the requested action
+
+        Raises:
+            KeyError: If action_id not found in common_actions
+        """
+        if action_id not in self._common_actions:
+            raise KeyError(f"Common action '{action_id}' not found")
+        return deepcopy(self._common_actions[action_id])
+
 
 __all__ = ['SkillLibrary', 'SkillDefinition', 'SkillStep']
