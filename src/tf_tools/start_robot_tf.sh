@@ -41,8 +41,9 @@ usage() {
      - 动态 TF：根据 joint_states 发布机器人关节变换
   
   2. TF 转换服务
-     - /tf_tools/transform_points：坐标转换服务
-     - 支持将点从任意坐标系转换到目标坐标系
+     - /tf_tools/service/transform_points：点坐标转换服务
+     - /tf_tools/service/transform_poses：位姿转换服务
+     - 支持将点或位姿从任意坐标系转换到目标坐标系
 
 示例：
   ./start_robot_tf.sh                 # 后台启动（默认）
@@ -217,10 +218,16 @@ show_status() {
   # Check if service is available
   echo ""
   echo "服务状态："
-  if ros2 service list 2>/dev/null | grep -q "/tf_tools/transform_points"; then
-    echo "  ✅ /tf_tools/transform_points 服务可用"
+  if ros2 service list 2>/dev/null | grep -q "/tf_tools/service/transform_points"; then
+    echo "  ✅ /tf_tools/service/transform_points 服务可用"
   else
-    echo "  ⚠️  /tf_tools/transform_points 服务未就绪"
+    echo "  ⚠️  /tf_tools/service/transform_points 服务未就绪"
+  fi
+  
+  if ros2 service list 2>/dev/null | grep -q "/tf_tools/service/transform_poses"; then
+    echo "  ✅ /tf_tools/service/transform_poses 服务可用"
+  else
+    echo "  ⚠️  /tf_tools/service/transform_poses 服务未就绪"
   fi
 
   return 0

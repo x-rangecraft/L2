@@ -26,6 +26,7 @@ find_package(tf2_ros REQUIRED)
 rosidl_generate_interfaces(${PROJECT_NAME}
   # Services
   "srv/TransformPoints.srv"
+  "srv/TransformPoses.srv"
   
   DEPENDENCIES
     std_msgs
@@ -36,6 +37,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
 # Install Python scripts
 install(PROGRAMS
   src/robot_tf.py
+  src/transform_utils.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

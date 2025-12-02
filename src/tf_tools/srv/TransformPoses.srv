@@ -1,0 +1,16 @@
+# TransformPoses.srv
+# 将位姿数组（位置+姿态四元数）从源坐标系转换到目标坐标系
+
+# Request
+string source_frame              # 源坐标系 (如 camera_color_optical_frame)
+string target_frame              # 目标坐标系 (如 base_link)
+builtin_interfaces/Time stamp    # 采样时间（为 0 时取最新 TF）
+geometry_msgs/Pose[] poses_in    # 输入位姿列表
+
+---
+
+# Response
+bool success                     # 是否成功
+string message                   # 错误信息（失败时）
+geometry_msgs/Pose[] poses_out   # 转换后的位姿列表
+

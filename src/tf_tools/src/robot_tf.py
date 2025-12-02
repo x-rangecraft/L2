@@ -21,12 +21,22 @@ from rclpy.duration import Duration
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
 from rclpy.time import Time
-from geometry_msgs.msg import TransformStamped, Point
+from geometry_msgs.msg import TransformStamped, Point, Pose, PoseStamped
 from sensor_msgs.msg import JointState
 from tf2_ros import TransformBroadcaster, StaticTransformBroadcaster
 from tf2_ros import Buffer, TransformListener
 
-from tf_tools.srv import TransformPoints
+from tf_tools.srv import TransformPoints, TransformPoses
+
+# Import transform utils - both files are in the same directory
+import sys
+from pathlib import Path
+# Add script directory to path for importing transform_utils
+_script_dir = Path(__file__).parent.resolve()
+if str(_script_dir) not in sys.path:
+    sys.path.insert(0, str(_script_dir))
+import transform_utils
+TransformUtils = transform_utils.TransformUtils
 
 
 class URDFJoint:
@@ -103,7 +113,9 @@ class RobotTF(Node):
     功能：
     - 发布静态 TF：固定变换（world→base_link, world→camera_link 等）
     - 发布动态 TF：基于 joint_states 的机器人关节变换
-    - 提供转换服务：/tf_tools/transform_points
+    - 提供转换服务：
+      - /tf_tools/service/transform_points：点转换
+      - /tf_tools/service/transform_poses：位姿转换
     """
 
     def __init__(self):
@@ -181,16 +193,25 @@ class RobotTF(Node):
         self._tf_buffer = Buffer()
         self._tf_listener = TransformListener(self._tf_buffer, self)
 
-        # 创建转换服务
-        self.transform_service = self.create_service(
+        # 创建转换服务（点）
+        self.transform_points_service = self.create_service(
             TransformPoints,
-            '/tf_tools/transform_points',
+            '/tf_tools/service/transform_points',
             self._transform_points_callback
+        )
+
+        # 创建转换服务（位姿）
+        self.transform_poses_service = self.create_service(
+            TransformPoses,
+            '/tf_tools/service/transform_poses',
+            self._transform_poses_callback
         )
 
         self.get_logger().info(
             f'robot_tf started: publishing at {publish_rate} Hz, '
-            f'transform service available at /tf_tools/transform_points'
+            f'transform services available: '
+            f'/tf_tools/service/transform_points, '
+            f'/tf_tools/service/transform_poses'
         )
 
     # ================================================================
@@ -411,7 +432,7 @@ class RobotTF(Node):
             )
 
             # 转换点
-            points_out = self._do_transform_points(points_in, transform)
+            points_out = TransformUtils.transform_points(points_in, transform)
 
             response.success = True
             response.message = ""
@@ -425,70 +446,55 @@ class RobotTF(Node):
 
         return response
 
-    def _do_transform_points(
+    def _transform_poses_callback(
         self,
-        points_in: List[Point],
-        transform: TransformStamped
-    ) -> List[Point]:
+        request: TransformPoses.Request,
+        response: TransformPoses.Response
+    ) -> TransformPoses.Response:
         """
-        Apply transform to points array.
+        Service callback for transforming poses between coordinate frames.
         
         Args:
-            points_in: 输入点列表
-            transform: TF 变换
-            
-        Returns:
-            转换后的点列表
+            request: 包含 source_frame, target_frame, stamp, poses_in
+            response: 包含 success, message, poses_out
         """
-        # 提取变换参数
-        t = transform.transform.translation
-        q = transform.transform.rotation
+        source_frame = request.source_frame
+        target_frame = request.target_frame
+        poses_in = request.poses_in
 
-        # 构建变换矩阵
-        T = self._transform_to_matrix(t.x, t.y, t.z, q.x, q.y, q.z, q.w)
+        # 验证输入
+        if len(poses_in) == 0:
+            response.success = False
+            response.message = "Empty poses list"
+            response.poses_out = []
+            return response
 
-        # 将点列表转换为 (N, 3)
-        points = np.array([[p.x, p.y, p.z] for p in points_in], dtype=float)
+        stamp_msg = request.stamp
+        lookup_time = Time.from_msg(stamp_msg) if (stamp_msg.sec != 0 or stamp_msg.nanosec != 0) else Time()
 
-        # 添加齐次坐标
-        ones = np.ones((points.shape[0], 1))
-        points_homo = np.hstack([points, ones])  # (N, 4)
+        try:
+            # 查询变换
+            transform = self._tf_buffer.lookup_transform(
+                target_frame,
+                source_frame,
+                lookup_time,
+                timeout=Duration(seconds=1.0)
+            )
 
-        # 应用变换
-        transformed = (T @ points_homo.T).T[:, :3]  # (N, 3)
+            # 转换位姿
+            poses_out = TransformUtils.transform_poses(poses_in, transform)
 
-        # 转换回 Point 列表
-        points_out: List[Point] = []
-        for x, y, z in transformed:
-            point = Point()
-            point.x = float(x)
-            point.y = float(y)
-            point.z = float(z)
-            points_out.append(point)
+            response.success = True
+            response.message = ""
+            response.poses_out = poses_out
 
-        return points_out
+        except Exception as e:
+            self.get_logger().error(f'Transform poses failed: {e}')
+            response.success = False
+            response.message = str(e)
+            response.poses_out = []
 
-    @staticmethod
-    def _transform_to_matrix(
-        tx: float, ty: float, tz: float,
-        qx: float, qy: float, qz: float, qw: float
-    ) -> np.ndarray:
-        """
-        Convert translation + quaternion to 4x4 transformation matrix.
-        """
-        # 四元数转旋转矩阵
-        x, y, z, w = qx, qy, qz, qw
-        R = np.array([
-            [1 - 2*(y*y + z*z), 2*(x*y - z*w), 2*(x*z + y*w)],
-            [2*(x*y + z*w), 1 - 2*(x*x + z*z), 2*(y*z - x*w)],
-            [2*(x*z - y*w), 2*(y*z + x*w), 1 - 2*(x*x + y*y)]
-        ])
-
-        # 构建 4x4 变换矩阵
-        T = np.eye(4)
-        T[:3, :3] = R
-        T[:3, 3] = [tx, ty, tz]
-        return T
+        return response
 
 
 def main(args=None):
