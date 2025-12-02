@@ -32,6 +32,7 @@ from sensor_msgs.msg import JointState
 from std_msgs.msg import Empty
 from std_srvs.srv import Trigger
 from robot_driver.action import JointCommand, RobotCommand, SafetyPose
+from robot_driver.srv import SolveIK, SolveFK
 
 from driver.config.parameter_schema import DriverParameters, declare_and_get_parameters
 from driver.config.safe_pose_loader import SafePoseLoader
@@ -200,6 +201,18 @@ class RobotDriverNode(Node):
             Trigger,
             '/robot_driver/service/self_check',
             self._handle_self_check,
+        )
+
+        # IK/FK solver services
+        self._solve_ik_srv = self.create_service(
+            SolveIK,
+            '/robot_driver/service/solve_ik',
+            self._handle_solve_ik,
+        )
+        self._solve_fk_srv = self.create_service(
+            SolveFK,
+            '/robot_driver/service/solve_fk',
+            self._handle_solve_fk,
         )
 
         self._trajectory_action = ActionServer(
@@ -665,6 +678,79 @@ class RobotDriverNode(Node):
         response.success = True
         response.message = 'robot_driver 已安全关闭'
         threading.Thread(target=self._finalize_shutdown, name='robot_driver_exit', daemon=True).start()
+        return response
+
+    def _handle_solve_ik(self, request: SolveIK.Request, response: SolveIK.Response):
+        """Handle IK solving service request."""
+        try:
+            # Extract parameters with defaults
+            xyz_only = request.xyz_only if hasattr(request, 'xyz_only') else False
+            max_iters = request.max_iters if (hasattr(request, 'max_iters') and request.max_iters > 0) else 500
+            seed_joints = request.seed_joints if (hasattr(request, 'seed_joints') and request.seed_joints.name) else None
+
+            # Call KinematicsSolver
+            success, joint_state, error_msg = self._kinematics_solver.solve_ik(
+                request.target_pose,
+                xyz_only=xyz_only,
+                max_iters=max_iters,
+                seed_joints=seed_joints,
+            )
+
+            response.success = success
+            if success:
+                response.joint_state = joint_state
+                response.error_message = ''
+            else:
+                response.joint_state = JointState()
+                response.error_message = error_msg or 'IK solving failed'
+        except Exception as exc:
+            self._logger.error('Exception in solve_ik service: %s', exc, exc_info=True)
+            response.success = False
+            response.joint_state = JointState()
+            response.error_message = f'Service error: {exc}'
+        return response
+
+    def _handle_solve_fk(self, request: SolveFK.Request, response: SolveFK.Response):
+        """Handle FK computation service request."""
+        try:
+            # Extract joint state (empty means use current hardware state)
+            joint_state_msg = request.joint_state if (hasattr(request, 'joint_state') and request.joint_state.name) else None
+
+            # Convert JointState to JointStateData if provided
+            from driver.hardware.hardware_commander import JointStateData
+            joint_state_data = None
+            if joint_state_msg:
+                joint_state_data = JointStateData(
+                    names=list(joint_state_msg.name),
+                    positions=list(joint_state_msg.position),
+                    velocities=list(joint_state_msg.velocity) if joint_state_msg.velocity else [],
+                    efforts=list(joint_state_msg.effort) if joint_state_msg.effort else [],
+                )
+
+            # Call KinematicsSolver
+            pose_stamped, success = self._kinematics_solver.compute_fk_pose(
+                stamp=self.get_clock().now().to_msg(),
+                joint_state=joint_state_data,
+                joint_msg=joint_state_msg,
+            )
+
+            response.success = success
+            if success:
+                response.end_effector_pose = pose_stamped
+                response.error_message = ''
+            else:
+                # Fallback: return empty pose with error message
+                response.end_effector_pose = PoseStamped()
+                response.end_effector_pose.header.frame_id = self._params.tf_base_frame
+                response.end_effector_pose.header.stamp = self.get_clock().now().to_msg()
+                response.error_message = 'FK computation failed or unavailable'
+        except Exception as exc:
+            self._logger.error('Exception in solve_fk service: %s', exc, exc_info=True)
+            response.success = False
+            response.end_effector_pose = PoseStamped()
+            response.end_effector_pose.header.frame_id = self._params.tf_base_frame
+            response.end_effector_pose.header.stamp = self.get_clock().now().to_msg()
+            response.error_message = f'Service error: {exc}'
         return response
 
     def _execute_orderly_shutdown(self) -> tuple[bool, str]:

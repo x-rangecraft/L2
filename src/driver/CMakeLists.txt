@@ -27,10 +27,16 @@ set(action_files
   "action/RobotCommand.action"
 )
 
+set(srv_files
+  "srv/SolveIK.srv"
+  "srv/SolveFK.srv"
+)
+
 rosidl_generate_interfaces(${PROJECT_NAME}
   ${msg_files}
   ${action_files}
-  DEPENDENCIES builtin_interfaces sensor_msgs
+  ${srv_files}
+  DEPENDENCIES builtin_interfaces sensor_msgs geometry_msgs
 )
 
 ament_export_dependencies(rosidl_default_runtime)

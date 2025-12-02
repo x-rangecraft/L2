@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from typing import Optional, Sequence, Tuple
+import numpy as np
 from geometry_msgs.msg import Pose, PoseStamped
 from sensor_msgs.msg import JointState
 
@@ -20,8 +21,22 @@ class KinematicsSolver:
         self._joint_index = {name: idx for idx, name in enumerate(self._joint_names)}
 
     # ------------------------------------------------------------------ public API
-    def solve_ik(self, pose: Pose) -> Tuple[bool, Optional[JointState], str]:
-        """Solve IK for a target pose. Returns (success, JointState, error)."""
+    def solve_ik(
+        self,
+        pose: Pose,
+        *,
+        xyz_only: bool = False,
+        max_iters: int = 500,
+        seed_joints: Optional[JointState] = None,
+    ) -> Tuple[bool, Optional[JointState], str]:
+        """Solve IK for a target pose. Returns (success, JointState, error).
+        
+        Args:
+            pose: Target end-effector pose
+            xyz_only: If True, only constrain position, preserve current orientation
+            max_iters: Maximum iterations (0 means use default 500)
+            seed_joints: Optional initial joint state (None means use current hardware state)
+        """
         target = CartesianTarget(
             x=float(pose.position.x),
             y=float(pose.position.y),
@@ -31,7 +46,26 @@ class KinematicsSolver:
             qz=float(pose.orientation.z),
             qw=float(pose.orientation.w),
         )
-        success, solution = self._commander.solve_ik(target, xyz_only=False)
+        
+        # Convert seed_joints JointState to numpy array if provided
+        seed_array = None
+        if seed_joints is not None and seed_joints.name and seed_joints.position:
+            seed_array = self._positions_from_data(seed_joints.name, seed_joints.position)
+            if seed_array is None:
+                self._logger.warning('Failed to convert seed_joints, using current hardware state')
+        
+        # Use default max_iters if 0 is provided
+        effective_max_iters = max_iters if max_iters > 0 else 500
+        
+        # Convert seed_array to numpy if available
+        seed_np = np.array(seed_array) if seed_array is not None else None
+        
+        success, solution = self._commander.solve_ik(
+            target,
+            xyz_only=xyz_only,
+            max_iters=effective_max_iters,
+            seed_joints=seed_np,
+        )
         if not success or solution is None:
             return False, None, 'IK solver unavailable or failed'
 

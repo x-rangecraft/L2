@@ -712,8 +712,21 @@ class HardwareCommander:
         except Exception as exc:
             self._logger.debug('Failed to read hardware state: %s', exc)
 
-    def solve_ik(self, target: CartesianTarget, *, xyz_only: bool = False, max_iters: int = 500) -> Tuple[bool, Optional[np.ndarray]]:
+    def solve_ik(
+        self,
+        target: CartesianTarget,
+        *,
+        xyz_only: bool = False,
+        max_iters: int = 500,
+        seed_joints: Optional[np.ndarray] = None,
+    ) -> Tuple[bool, Optional[np.ndarray]]:
         """Solve inverse kinematics for a Cartesian target.
+
+        Args:
+            target: Cartesian target pose
+            xyz_only: If True, only constrain position, preserve current orientation
+            max_iters: Maximum iterations
+            seed_joints: Optional initial joint positions (None means use current hardware state)
 
         Returns:
             (success, joint_solution) where joint_solution is a numpy array of joint positions
@@ -737,7 +750,10 @@ class HardwareCommander:
 
         try:
             with self._lock:
-                current_joints = np.array(self._robot.get_joint_pos()[:6])
+                if seed_joints is not None:
+                    current_joints = np.array(seed_joints[:6], dtype=float)
+                else:
+                    current_joints = np.array(self._robot.get_joint_pos()[:6])
 
                 # Build target pose matrix
                 if xyz_only:

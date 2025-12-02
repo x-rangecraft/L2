@@ -1,0 +1,9 @@
+geometry_msgs/Pose target_pose
+bool xyz_only                       # default: false
+int32 max_iters                     # default: 500 (0 means use default)
+sensor_msgs/JointState seed_joints  # default: current hardware state (empty means use current)
+---
+bool success
+sensor_msgs/JointState joint_state
+string error_message
+

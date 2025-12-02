@@ -1,0 +1,6 @@
+sensor_msgs/JointState joint_state  # default: current hardware state (empty means use current)
+---
+bool success
+geometry_msgs/PoseStamped end_effector_pose
+string error_message
+
