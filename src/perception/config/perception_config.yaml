@@ -37,9 +37,19 @@ storage:
   max_objects: 10000
   max_samples_per_object: 100
 
+# 抓取模块配置
+grasp:
+  model_path: "models/contact_graspnet/model.pt"
+  config_path: "models/contact_graspnet/config.yaml"
+  max_candidates: 50
+  min_confidence: 0.5
+  num_input_points: 20000
+  z_range: [0.2, 1.0]  # 点云深度范围（米）
+
 # 超时配置 (秒)
 timeouts:
   segment: 10.0
   pointcloud: 5.0
   vectorize: 15.0
+  grasp: 5.0
   total_process: 45.0

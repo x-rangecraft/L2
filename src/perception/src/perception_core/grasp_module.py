@@ -1,0 +1,633 @@
+"""
+GraspModule - 抓取位姿推理模块
+
+封装 Contact-GraspNet PyTorch 模型，提供 6-DoF 抓取位姿生成能力
+参考: SegmentationModule 的实现模式
+"""
+
+import asyncio
+import logging
+import os
+import sys
+import time
+import threading
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Optional, List, Dict, Any, Tuple
+
+import numpy as np
+import yaml
+
+from .constants import (
+    DEFAULT_MODEL_DIR,
+    GRASP_MODEL_FILENAME,
+    GRASP_CONFIG_FILENAME,
+    DEFAULT_MAX_CANDIDATES,
+    DEFAULT_MIN_GRASP_CONFIDENCE,
+    DEFAULT_NUM_INPUT_POINTS,
+    TIMEOUT_GRASP,
+    Z_RANGE_MIN,
+    Z_RANGE_MAX,
+)
+from .error_codes import PerceptionError, ErrorCode
+from .async_worker import AsyncWorker
+
+# 延迟导入 PyTorch 和 Contact-GraspNet（可能不可用）
+TORCH_AVAILABLE = False
+CONTACT_GRASPNET_AVAILABLE = False
+IMPORT_ERROR = None
+
+try:
+    import torch
+    TORCH_AVAILABLE = True
+except ImportError as exc:
+    IMPORT_ERROR = exc
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class GraspCandidate:
+    """抓取候选结果"""
+    position: np.ndarray              # 夹爪中心位置 (x, y, z)
+    orientation: np.ndarray           # 夹爪朝向四元数 (x, y, z, w)
+    width: float                      # 建议夹爪开口宽度（米）
+    confidence: float                 # 置信度 (0.0 - 1.0)
+    contact_points: np.ndarray        # 接触点 (x, y, z)
+    transform_matrix: np.ndarray      # 4x4 变换矩阵
+
+
+@dataclass
+class GraspResult:
+    """抓取推理结果"""
+    candidates: List[GraspCandidate] = field(default_factory=list)
+    inference_time_ms: float = 0.0
+    point_count: int = 0
+
+
+class GraspModule:
+    """
+    抓取位姿推理模块
+    
+    封装 Contact-GraspNet PyTorch 模型，提供基于点云的抓取位姿生成能力
+    
+    线程安全设计：
+    - 使用 AsyncWorker 在独立线程池中执行推理
+    - 使用 threading.Lock 保护模型访问
+    - 使用独立的 CUDA Stream 执行 GPU 操作
+    """
+    
+    def __init__(self, config: Dict[str, Any], worker: AsyncWorker):
+        """
+        初始化配置
+        
+        Args:
+            config: 配置字典，包含:
+                - model_path: 模型权重路径
+                - config_path: 模型配置路径
+                - max_candidates: 默认最大候选数量
+                - min_confidence: 默认最小置信度
+                - z_range: [min, max] 点云深度范围
+            worker: AsyncWorker 实例（与 SegmentationModule 共享）
+        """
+        if worker is None:
+            raise ValueError("GraspModule 需要有效的 AsyncWorker 实例")
+        
+        self._config = config
+        self._worker = worker
+        self._ready = False
+        
+        # 模型相关
+        self._model = None
+        self._model_config = None
+        self._device = None
+        self._stream = None
+        
+        # ⚠️ 必须：线程锁保护模型访问
+        self._model_lock = threading.Lock()
+        
+        # 配置参数
+        self._max_candidates = config.get('max_candidates', DEFAULT_MAX_CANDIDATES)
+        self._min_confidence = config.get('min_confidence', DEFAULT_MIN_GRASP_CONFIDENCE)
+        self._num_input_points = config.get('num_input_points', DEFAULT_NUM_INPUT_POINTS)
+        self._timeout = config.get('timeout', TIMEOUT_GRASP)
+        z_range = config.get('z_range', [Z_RANGE_MIN, Z_RANGE_MAX])
+        self._z_range_min = z_range[0]
+        self._z_range_max = z_range[1]
+        
+        # 性能统计
+        self._inference_times = []
+        
+        logger.info("GraspModule 配置已加载")
+    
+    @property
+    def is_ready(self) -> bool:
+        """检查模块是否就绪"""
+        return self._ready
+    
+    async def initialize(self) -> bool:
+        """
+        异步初始化，加载 Contact-GraspNet 模型
+        
+        Returns:
+            bool: 是否初始化成功
+            
+        Raises:
+            PerceptionError: 初始化失败时抛出
+        """
+        try:
+            # ⚠️ 必须：通过 run_callable 在 AsyncWorker 线程中执行
+            return await self._worker.run_callable(self._initialize_sync)
+        except PerceptionError:
+            raise
+        except Exception as e:
+            logger.error(f"GraspModule 初始化失败: {e}")
+            raise PerceptionError(
+                ErrorCode.GRASP_MODEL_LOAD_FAILED,
+                f"GraspModule 初始化失败: {str(e)}"
+            )
+
+    def _initialize_sync(self) -> bool:
+        """
+        实际的模型加载流程，在 AsyncWorker 线程池中执行
+        
+        这确保 CUDA context 在正确的线程中创建
+        """
+        # 检查 PyTorch 是否可用
+        if not TORCH_AVAILABLE:
+            raise PerceptionError(
+                ErrorCode.INTERNAL_ERROR,
+                f"PyTorch 未安装: {IMPORT_ERROR}"
+            )
+        
+        # 检查 CUDA
+        if not torch.cuda.is_available():
+            raise PerceptionError(
+                ErrorCode.CUDA_NOT_AVAILABLE,
+                "CUDA 不可用"
+            )
+        
+        # ⚠️ 必须：显式设置 CUDA 设备
+        self._device = torch.device("cuda:0")
+        torch.cuda.set_device(self._device)
+        
+        # ⚠️ 必须：禁用 cuDNN（Jetson 兼容性）
+        torch.backends.cudnn.enabled = False
+        
+        # ⚠️ 必须：创建独立的 CUDA Stream
+        self._stream = torch.cuda.Stream(device=self._device)
+        
+        # 解析模型路径
+        model_path = self._resolve_model_path(
+            self._config.get('model_path', GRASP_MODEL_FILENAME)
+        )
+        config_path = self._resolve_model_path(
+            self._config.get('config_path', GRASP_CONFIG_FILENAME)
+        )
+        
+        # 验证文件存在
+        if not model_path.exists():
+            raise PerceptionError(
+                ErrorCode.INTERNAL_ERROR,
+                f"模型权重文件不存在: {model_path}"
+            )
+        if not config_path.exists():
+            raise PerceptionError(
+                ErrorCode.INTERNAL_ERROR,
+                f"模型配置文件不存在: {config_path}"
+            )
+        
+        logger.info(f"加载 Contact-GraspNet 配置: {config_path}")
+        logger.info(f"加载 Contact-GraspNet 权重: {model_path}")
+        
+        # 加载配置
+        with open(config_path, 'r') as f:
+            self._model_config = yaml.safe_load(f)
+        
+        # 加载模型
+        self._load_model(str(model_path))
+        
+        # Warmup
+        self._warmup()
+        
+        self._ready = True
+        logger.info("GraspModule 初始化完成")
+        return True
+    
+    def _resolve_model_path(self, path_str: str) -> Path:
+        """解析模型文件路径"""
+        path = Path(path_str)
+        if path.is_absolute():
+            return path
+        
+        # 尝试相对于包目录
+        package_dir = Path(__file__).parent.parent.parent
+        candidate = package_dir / path_str
+        if candidate.exists():
+            return candidate
+        
+        # 尝试 models/contact_graspnet 目录
+        models_dir = package_dir / 'models' / 'contact_graspnet'
+        candidate = models_dir / Path(path_str).name
+        if candidate.exists():
+            return candidate
+        
+        return path
+    
+    def _load_model(self, model_path: str):
+        """加载 Contact-GraspNet 模型"""
+        # 添加 external 路径到 sys.path
+        external_dir = Path(__file__).parent.parent.parent.parent.parent / 'external'
+        contact_graspnet_dir = external_dir / 'contact_graspnet_pytorch'
+        
+        if str(contact_graspnet_dir) not in sys.path:
+            sys.path.insert(0, str(contact_graspnet_dir))
+        
+        # 动态导入 Contact-GraspNet
+        try:
+            from contact_graspnet_pytorch.contact_graspnet import ContactGraspnet
+            from contact_graspnet_pytorch.checkpoints import CheckpointIO
+        except ImportError as e:
+            raise PerceptionError(
+                ErrorCode.INTERNAL_ERROR,
+                f"无法导入 Contact-GraspNet: {e}"
+            )
+        
+        # 创建模型
+        self._model = ContactGraspnet(self._model_config, self._device)
+        self._model.to(self._device)
+        
+        # 加载权重
+        checkpoint_dir = Path(model_path).parent
+        checkpoint_io = CheckpointIO(
+            checkpoint_dir=str(checkpoint_dir),
+            model=self._model
+        )
+        
+        try:
+            checkpoint_io.load(Path(model_path).name)
+            logger.info("Contact-GraspNet 权重加载成功")
+        except Exception as e:
+            raise PerceptionError(
+                ErrorCode.INTERNAL_ERROR,
+                f"模型权重加载失败: {e}"
+            )
+        
+        # 设置为评估模式
+        self._model.eval()
+    
+    def _warmup(self):
+        """预热模型"""
+        if self._model is None:
+            return
+        
+        try:
+            # 创建虚拟点云数据
+            dummy_pc = np.random.rand(self._num_input_points, 3).astype(np.float32)
+            dummy_pc[:, 2] = dummy_pc[:, 2] * 0.5 + 0.3  # Z 范围 0.3-0.8
+            
+            # 执行一次推理
+            with self._model_lock:
+                with torch.cuda.stream(self._stream):
+                    with torch.no_grad():
+                        pc_batch = torch.from_numpy(dummy_pc[np.newaxis, :, :]).to(self._device)
+                        _ = self._model(pc_batch)
+                torch.cuda.current_stream().wait_stream(self._stream)
+            
+            logger.info("Contact-GraspNet warmup 完成")
+        except Exception as e:
+            logger.warning(f"Contact-GraspNet warmup 失败: {e}")
+    
+    async def predict(
+        self,
+        point_cloud: np.ndarray,
+        mask: Optional[np.ndarray] = None,
+        max_candidates: Optional[int] = None,
+        min_confidence: Optional[float] = None
+    ) -> GraspResult:
+        """
+        执行抓取位姿推理
+        
+        Args:
+            point_cloud: Nx3 点云数据（相机坐标系）
+            mask: 可选的分割掩码，用于过滤点云
+            max_candidates: 最大候选数量（可选）
+            min_confidence: 最小置信度阈值（可选）
+            
+        Returns:
+            GraspResult: 抓取推理结果
+            
+        Raises:
+            PerceptionError: 推理失败时抛出
+        """
+        if not self._ready:
+            raise PerceptionError(ErrorCode.NODE_NOT_READY, "抓取模块未就绪")
+        
+        # 使用默认值
+        if max_candidates is None:
+            max_candidates = self._max_candidates
+        if min_confidence is None:
+            min_confidence = self._min_confidence
+        
+        try:
+            return await asyncio.wait_for(
+                self._worker.run_callable(
+                    self._predict_sync,
+                    point_cloud,
+                    mask,
+                    max_candidates,
+                    min_confidence
+                ),
+                timeout=self._timeout,
+            )
+        except asyncio.TimeoutError as exc:
+            raise PerceptionError(
+                ErrorCode.GRASP_INFERENCE_TIMEOUT,
+                f"抓取推理超时 (> {self._timeout:.1f}s)"
+            ) from exc
+        except PerceptionError:
+            raise
+        except Exception as e:
+            logger.error(f"抓取推理失败: {e}")
+            raise PerceptionError(
+                ErrorCode.GRASP_INFERENCE_FAILED,
+                f"抓取推理失败: {str(e)}"
+            )
+
+    def _predict_sync(
+        self,
+        point_cloud: np.ndarray,
+        mask: Optional[np.ndarray],
+        max_candidates: int,
+        min_confidence: float
+    ) -> GraspResult:
+        """
+        同步执行抓取推理（运行在 AsyncWorker 的线程池中）
+        
+        Args:
+            point_cloud: Nx3 点云数据
+            mask: 可选掩码
+            max_candidates: 最大候选数量
+            min_confidence: 最小置信度
+        """
+        start_time = time.time()
+        
+        # 验证输入
+        if point_cloud is None or point_cloud.size == 0:
+            raise PerceptionError(
+                ErrorCode.POINT_COUNT_INSUFFICIENT,
+                "输入点云为空"
+            )
+        
+        if point_cloud.ndim != 2 or point_cloud.shape[1] < 3:
+            raise PerceptionError(
+                ErrorCode.INTERNAL_ERROR,
+                f"点云格式错误，期望 (N, 3)，实际 {point_cloud.shape}"
+            )
+        
+        # 只取 XYZ 坐标
+        pc = point_cloud[:, :3].astype(np.float32)
+        
+        # 应用掩码过滤（如果提供）
+        if mask is not None:
+            pc = self._apply_mask_filter(pc, mask)
+        
+        # 深度范围过滤
+        pc = self._filter_by_z_range(pc)
+        
+        if pc.shape[0] < 100:
+            raise PerceptionError(
+                ErrorCode.POINT_COUNT_INSUFFICIENT,
+                f"有效点云数量不足: {pc.shape[0]}"
+            )
+        
+        original_point_count = pc.shape[0]
+        
+        # 预处理点云
+        pc_processed, pc_mean = self._preprocess_point_cloud(pc)
+        
+        # ⚠️ 必须：加锁保护模型访问
+        with self._model_lock:
+            with torch.cuda.stream(self._stream):
+                with torch.no_grad():
+                    # 转换为 batch tensor
+                    pc_batch = torch.from_numpy(
+                        pc_processed[np.newaxis, :, :]
+                    ).to(self._device)
+                    
+                    # 模型推理
+                    pred = self._model(pc_batch)
+                    
+                    # 提取结果
+                    pred_grasps = pred['pred_grasps_cam'].detach().cpu().numpy()
+                    pred_scores = pred['pred_scores'].detach().cpu().numpy()
+                    pred_points = pred['pred_points'].detach().cpu().numpy()
+                    offset_pred = pred['offset_pred'].detach().cpu().numpy()
+            
+            # 同步 CUDA 操作
+            torch.cuda.current_stream().wait_stream(self._stream)
+        
+        # 后处理
+        candidates = self._postprocess_predictions(
+            pred_grasps,
+            pred_scores,
+            pred_points,
+            offset_pred,
+            pc_mean,
+            max_candidates,
+            min_confidence
+        )
+        
+        # 记录推理时间
+        inference_time = (time.time() - start_time) * 1000
+        self._inference_times.append(inference_time)
+        
+        logger.debug(
+            f"抓取推理完成: {len(candidates)} 候选, "
+            f"推理时间={inference_time:.1f}ms, 点数={original_point_count}"
+        )
+        
+        return GraspResult(
+            candidates=candidates,
+            inference_time_ms=inference_time,
+            point_count=original_point_count
+        )
+    
+    def _apply_mask_filter(
+        self,
+        point_cloud: np.ndarray,
+        mask: np.ndarray
+    ) -> np.ndarray:
+        """根据掩码过滤点云"""
+        # 假设掩码是与深度图对应的，需要重新映射
+        # 这里简化处理，假设 mask 是点云的布尔索引
+        if mask.dtype == bool and len(mask) == len(point_cloud):
+            return point_cloud[mask]
+        return point_cloud
+    
+    def _filter_by_z_range(self, point_cloud: np.ndarray) -> np.ndarray:
+        """根据 Z 轴范围过滤点云"""
+        z_mask = (point_cloud[:, 2] >= self._z_range_min) & \
+                 (point_cloud[:, 2] <= self._z_range_max)
+        return point_cloud[z_mask]
+    
+    def _preprocess_point_cloud(
+        self,
+        point_cloud: np.ndarray
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        预处理点云
+        
+        1. 调整点数到 num_input_points
+        2. 转换到内部坐标系
+        3. 中心化
+        """
+        pc = point_cloud.copy()
+        num_points = self._num_input_points
+        
+        # 调整点数
+        if pc.shape[0] > num_points:
+            # 随机下采样
+            indices = np.random.choice(pc.shape[0], num_points, replace=False)
+            pc = pc[indices]
+        elif pc.shape[0] < num_points:
+            # 上采样（重复采样）
+            required = num_points - pc.shape[0]
+            indices = np.random.choice(pc.shape[0], required, replace=True)
+            pc = np.concatenate([pc, pc[indices]], axis=0)
+        
+        # 转换到内部坐标系 (x left, y up, z front)
+        # OpenCV: x right, y down, z front -> Internal: x left, y up, z front
+        pc[:, :2] *= -1
+        
+        # 计算中心并中心化
+        pc_mean = np.mean(pc, axis=0)
+        pc = pc - pc_mean
+        
+        return pc.astype(np.float32), pc_mean
+    
+    def _postprocess_predictions(
+        self,
+        pred_grasps: np.ndarray,
+        pred_scores: np.ndarray,
+        pred_points: np.ndarray,
+        offset_pred: np.ndarray,
+        pc_mean: np.ndarray,
+        max_candidates: int,
+        min_confidence: float
+    ) -> List[GraspCandidate]:
+        """
+        后处理模型预测
+        
+        1. 还原到原始坐标系
+        2. 按置信度排序
+        3. 选择 top-k 候选
+        4. 转换为 GraspCandidate 格式
+        """
+        # Reshape predictions
+        pred_grasps = pred_grasps.reshape(-1, 4, 4)  # N x 4 x 4
+        pred_scores = pred_scores.reshape(-1)        # N
+        pred_points = pred_points.reshape(-1, 3)     # N x 3
+        offset_pred = offset_pred.reshape(-1)        # N
+        
+        # 还原到原始坐标系
+        # Internal -> OpenCV: x left -> x right, y up -> y down
+        pred_grasps[:, :2, :] *= -1
+        pred_points[:, :2] *= -1
+        
+        # 还原中心偏移
+        pred_grasps[:, :3, 3] += pc_mean.reshape(1, 3)
+        pred_points[:, :3] += pc_mean.reshape(1, 3)
+        
+        # 计算夹爪开口宽度
+        gripper_width = self._model_config['DATA']['gripper_width']
+        extra_opening = self._model_config['TEST'].get('extra_opening', 0.005)
+        gripper_openings = np.minimum(offset_pred + extra_opening, gripper_width)
+        
+        # 过滤低置信度
+        valid_mask = pred_scores >= min_confidence
+        
+        # 排序并选择 top-k
+        sorted_indices = np.argsort(pred_scores[valid_mask])[::-1]
+        selected_indices = np.where(valid_mask)[0][sorted_indices[:max_candidates]]
+        
+        candidates = []
+        for idx in selected_indices:
+            # 提取变换矩阵
+            transform = pred_grasps[idx]  # 4x4
+            
+            # 提取位置
+            position = transform[:3, 3]
+            
+            # 提取旋转矩阵并转换为四元数
+            rotation_matrix = transform[:3, :3]
+            quaternion = self._rotation_matrix_to_quaternion(rotation_matrix)
+            
+            candidates.append(GraspCandidate(
+                position=position.copy(),
+                orientation=quaternion.copy(),
+                width=float(gripper_openings[idx]),
+                confidence=float(pred_scores[idx]),
+                contact_points=pred_points[idx].copy(),
+                transform_matrix=transform.copy()
+            ))
+        
+        return candidates
+    
+    def _rotation_matrix_to_quaternion(self, R: np.ndarray) -> np.ndarray:
+        """
+        将旋转矩阵转换为四元数 (x, y, z, w)
+        
+        Args:
+            R: 3x3 旋转矩阵
+            
+        Returns:
+            np.ndarray: 四元数 (x, y, z, w)
+        """
+        # 使用 Shepperd 方法
+        trace = np.trace(R)
+        
+        if trace > 0:
+            s = 0.5 / np.sqrt(trace + 1.0)
+            w = 0.25 / s
+            x = (R[2, 1] - R[1, 2]) * s
+            y = (R[0, 2] - R[2, 0]) * s
+            z = (R[1, 0] - R[0, 1]) * s
+        elif R[0, 0] > R[1, 1] and R[0, 0] > R[2, 2]:
+            s = 2.0 * np.sqrt(1.0 + R[0, 0] - R[1, 1] - R[2, 2])
+            w = (R[2, 1] - R[1, 2]) / s
+            x = 0.25 * s
+            y = (R[0, 1] + R[1, 0]) / s
+            z = (R[0, 2] + R[2, 0]) / s
+        elif R[1, 1] > R[2, 2]:
+            s = 2.0 * np.sqrt(1.0 + R[1, 1] - R[0, 0] - R[2, 2])
+            w = (R[0, 2] - R[2, 0]) / s
+            x = (R[0, 1] + R[1, 0]) / s
+            y = 0.25 * s
+            z = (R[1, 2] + R[2, 1]) / s
+        else:
+            s = 2.0 * np.sqrt(1.0 + R[2, 2] - R[0, 0] - R[1, 1])
+            w = (R[1, 0] - R[0, 1]) / s
+            x = (R[0, 2] + R[2, 0]) / s
+            y = (R[1, 2] + R[2, 1]) / s
+            z = 0.25 * s
+        
+        # 归一化
+        q = np.array([x, y, z, w])
+        q = q / np.linalg.norm(q)
+        
+        return q
+    
+    def get_performance_stats(self) -> Dict[str, float]:
+        """获取性能统计"""
+        stats = {}
+        
+        if self._inference_times:
+            times = np.array(self._inference_times)
+            stats['avg_inference_time_ms'] = float(np.mean(times))
+            stats['max_inference_time_ms'] = float(np.max(times))
+            stats['min_inference_time_ms'] = float(np.min(times))
+            stats['inference_count'] = len(self._inference_times)
+        
+        return stats
+

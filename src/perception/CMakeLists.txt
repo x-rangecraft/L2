@@ -27,6 +27,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   # Messages
   "msg/ObjectInfo.msg"
   "msg/SampleInfo.msg"
+  "msg/GraspCandidate.msg"
   
   # Actions
   "action/Segment.action"
@@ -56,6 +57,9 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   
   # Services - System
   "srv/GetStatus.srv"
+  
+  # Services - Grasp
+  "srv/Grasp.srv"
   
   DEPENDENCIES
     std_msgs

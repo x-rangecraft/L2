@@ -86,6 +86,18 @@ NANOSAM_DECODER_FILENAME = 'nanosam_mask_decoder.engine'
 DINO_MODEL_FILENAME = 'dinov2_vits14.pth'
 
 # =============================================================================
+# 抓取相关
+# =============================================================================
+GRASP_MODEL_FILENAME = 'model.pt'
+GRASP_CONFIG_FILENAME = 'config.yaml'
+DEFAULT_MAX_CANDIDATES = 50           # 默认最大抓取候选数量
+DEFAULT_MIN_GRASP_CONFIDENCE = 0.5    # 默认最小抓取置信度
+DEFAULT_NUM_INPUT_POINTS = 20000      # 点云输入点数
+TIMEOUT_GRASP = 5.0                   # 抓取推理超时（秒）
+Z_RANGE_MIN = 0.2                     # 点云 Z 轴最小距离（米）
+Z_RANGE_MAX = 1.0                     # 点云 Z 轴最大距离（米）
+
+# =============================================================================
 # 坐标系
 # =============================================================================
 DEFAULT_OUTPUT_FRAME_ID = 'camera_color_optical_frame'

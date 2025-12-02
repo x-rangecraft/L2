@@ -55,6 +55,14 @@ class ErrorCode(IntEnum):
     POINTCLOUD_COMPUTE_TIMEOUT = 3006       # 点云计算超时
     
     # =========================================================================
+    # 7xxx - 抓取错误
+    # =========================================================================
+    GRASP_MODEL_LOAD_FAILED = 7001          # 抓取模型加载失败
+    GRASP_INFERENCE_FAILED = 7002           # 抓取推理失败
+    GRASP_INFERENCE_TIMEOUT = 7003          # 抓取推理超时
+    GRASP_NO_CANDIDATES = 7004              # 无有效抓取候选
+    
+    # =========================================================================
     # 4xxx - 向量化错误
     # =========================================================================
     CLIP_ENCODE_FAILED = 4001               # CLIP 编码失败
@@ -123,6 +131,12 @@ ERROR_MESSAGES = {
     ErrorCode.MASK_DEPTH_SIZE_MISMATCH: "掩码与深度图尺寸不匹配",
     ErrorCode.POINT_COUNT_INSUFFICIENT: "有效点数量不足",
     ErrorCode.POINTCLOUD_COMPUTE_TIMEOUT: "点云计算超时",
+    
+    # 7xxx - 抓取错误
+    ErrorCode.GRASP_MODEL_LOAD_FAILED: "抓取模型加载失败",
+    ErrorCode.GRASP_INFERENCE_FAILED: "抓取推理失败",
+    ErrorCode.GRASP_INFERENCE_TIMEOUT: "抓取推理超时",
+    ErrorCode.GRASP_NO_CANDIDATES: "无有效抓取候选",
     
     # 4xxx - 向量化错误
     ErrorCode.CLIP_ENCODE_FAILED: "CLIP 编码失败",

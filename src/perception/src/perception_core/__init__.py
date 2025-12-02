@@ -6,6 +6,7 @@ Perception Core - 视觉分析节点核心模块
 - 点云计算
 - 向量化 (CLIP + DINOv3)
 - 物体存储与检索 (FAISS)
+- 抓取位姿生成 (Contact-GraspNet)
 """
 
 from .constants import *

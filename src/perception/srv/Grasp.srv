@@ -1,0 +1,21 @@
+# Grasp.srv - 抓取位姿生成服务
+# Service: /perception/service/grasp
+# 功能：基于点云生成抓取位姿候选（使用 Contact-GraspNet）
+# 输出坐标系：相机坐标系 (camera_frame)
+
+#==================== Request ====================
+sensor_msgs/PointCloud2 point_cloud    # [必填] 点云数据（相机坐标系，XYZ）
+sensor_msgs/Image mask                 # [可选] 分割掩码，限定目标区域
+int32 max_candidates                   # [可选] 最大候选数量（默认 50，最大 200）
+float32 min_confidence                 # [可选] 最小置信度阈值（默认 0.5）
+
+---
+
+#==================== Response ====================
+bool success                           # 是否成功
+string error_message                   # 错误信息（失败时，格式: [EXXX] 描述）
+
+perception/GraspCandidate[] candidates # 抓取候选数组（按置信度降序排列）
+int32 candidate_count                  # 实际返回的候选数量
+float32 inference_time_ms              # 推理耗时（毫秒）
+

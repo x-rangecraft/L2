@@ -14,7 +14,7 @@ import numpy as np
 import rclpy
 from rclpy.node import Node
 from rclpy.action import ActionServer, CancelResponse, GoalResponse
-from rclpy.callback_groups import ReentrantCallbackGroup
+from rclpy.callback_groups import ReentrantCallbackGroup, MutuallyExclusiveCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 
 from cv_bridge import CvBridge
@@ -44,8 +44,9 @@ from perception.srv import (
     ListSamples,
     ClearAll,
     GetStatus,
+    Grasp,
 )
-from perception.msg import ObjectInfo, SampleInfo
+from perception.msg import ObjectInfo, SampleInfo, GraspCandidate
 
 # 导入核心模块
 from .constants import (
@@ -53,8 +54,13 @@ from .constants import (
     TIMEOUT_SEGMENT,
     TIMEOUT_POINTCLOUD,
     TIMEOUT_VECTORIZE,
+    TIMEOUT_GRASP,
     DEFAULT_TOP_K,
     DEFAULT_MIN_SIMILARITY,
+    DEFAULT_MAX_CANDIDATES,
+    DEFAULT_MIN_GRASP_CONFIDENCE,
+    Z_RANGE_MIN,
+    Z_RANGE_MAX,
 )
 from .error_codes import PerceptionError, ErrorCode
 from .segmentation import SegmentationModule
@@ -63,6 +69,7 @@ from .vectorizer import VectorizerModule
 from .vector_manager import VectorManager
 from .object_storage_manager import ObjectStorageManager
 from .async_worker import AsyncWorker
+from .grasp_module import GraspModule, GraspResult
 
 logger = logging.getLogger(__name__)
 
@@ -127,11 +134,23 @@ class PerceptionNode(Node):
         self._vector_config = {
             'index_type': 'IndexFlatL2',
         }
+        
+        self._grasp_config = {
+            'model_path': str(self._package_dir / 'models' / 'contact_graspnet' / 'model.pt'),
+            'config_path': str(self._package_dir / 'models' / 'contact_graspnet' / 'config.yaml'),
+            'max_candidates': DEFAULT_MAX_CANDIDATES,
+            'min_confidence': DEFAULT_MIN_GRASP_CONFIDENCE,
+            'z_range': [Z_RANGE_MIN, Z_RANGE_MAX],
+            'timeout': TIMEOUT_GRASP,
+        }
     
     def _create_modules(self):
         """创建模块实例"""
+        # 创建共享的 AsyncWorker（所有模块共享）
         self._worker = AsyncWorker(name="perception_async_worker")
         self._worker.start()
+        
+        # 核心模块
         self._segmentation = SegmentationModule(self._segmentation_config, self._worker)
         self._pointcloud = PointCloudModule(self._pointcloud_config, self._worker)
         self._vectorizer = VectorizerModule(self._vectorizer_config, self._worker)
@@ -146,6 +165,9 @@ class PerceptionNode(Node):
             self._vector_manager,
             self._worker
         )
+        
+        # 抓取模块（共享同一个 worker）
+        self._grasp = GraspModule(self._grasp_config, self._worker)
     
     def _init_timer_callback(self):
         """初始化定时器回调"""
@@ -171,6 +193,10 @@ class PerceptionNode(Node):
             # 串行初始化依赖模块
             await self._storage.initialize()
             
+            # 初始化抓取模块（单独初始化，因为加载时间较长）
+            self.get_logger().info("初始化抓取模块（Contact-GraspNet）...")
+            await self._grasp.initialize()
+            
             # 检查所有模块就绪
             if not all([
                 self._segmentation.is_ready,
@@ -178,6 +204,7 @@ class PerceptionNode(Node):
                 self._vectorizer.is_ready,
                 self._vector_manager.is_ready,
                 self._storage.is_ready,
+                self._grasp.is_ready,
             ]):
                 raise RuntimeError("部分模块初始化失败")
             
@@ -282,7 +309,12 @@ class PerceptionNode(Node):
         self.create_service(GetStatus, '/perception/service/get_status',
                            self._get_status_callback, callback_group=self._callback_group)
         
-        self.get_logger().info("注册 13 个 Service Server")
+        # ⚠️ 抓取服务 - 使用 MutuallyExclusiveCallbackGroup 避免并发 GPU 冲突
+        self._grasp_callback_group = MutuallyExclusiveCallbackGroup()
+        self.create_service(Grasp, '/perception/service/grasp',
+                           self._grasp_callback, callback_group=self._grasp_callback_group)
+        
+        self.get_logger().info("注册 14 个 Service Server（含 grasp 服务）")
     
     def _goal_callback(self, goal_request):
         """Action Goal 回调"""
@@ -998,6 +1030,9 @@ class PerceptionNode(Node):
             response.vectorizer_ready = self._vectorizer.is_ready
             response.storage_ready = self._storage.is_ready
             
+            # 抓取模块状态（如果 GetStatus.srv 中有该字段）
+            # response.grasp_ready = self._grasp.is_ready
+            
             # GPU 内存（尝试获取）
             try:
                 import torch
@@ -1021,6 +1056,173 @@ class PerceptionNode(Node):
             self.get_logger().error(f"GetStatus 错误: {e}")
         
         return response
+    
+    def _grasp_callback(self, request, response):
+        """
+        Grasp Service 回调
+        
+        接收点云数据，返回抓取候选位姿
+        """
+        start_time = time.time()
+        
+        try:
+            # 检查模块是否就绪
+            if not self._grasp.is_ready:
+                raise PerceptionError(ErrorCode.NODE_NOT_READY, "抓取模块未就绪")
+            
+            # 解析点云数据
+            point_cloud = self._parse_pointcloud2(request.point_cloud)
+            
+            if point_cloud is None or point_cloud.shape[0] == 0:
+                raise PerceptionError(ErrorCode.POINT_COUNT_INSUFFICIENT, "点云数据为空")
+            
+            self.get_logger().debug(
+                f"[grasp] 收到点云: {point_cloud.shape[0]} 点"
+            )
+            
+            # 解析可选的掩码
+            mask = None
+            if request.mask.data and len(request.mask.data) > 0:
+                mask_img = self._bridge.imgmsg_to_cv2(request.mask, 'mono8')
+                mask = mask_img.flatten() > 0  # 转为布尔掩码
+            
+            # 解析参数
+            max_candidates = request.max_candidates if request.max_candidates > 0 else DEFAULT_MAX_CANDIDATES
+            min_confidence = request.min_confidence if request.min_confidence > 0 else DEFAULT_MIN_GRASP_CONFIDENCE
+            
+            # 执行推理（同步等待异步结果）
+            # 使用 asyncio.run 创建新的事件循环来等待结果
+            grasp_result = asyncio.run(
+                self._grasp.predict(
+                    point_cloud=point_cloud,
+                    mask=mask,
+                    max_candidates=max_candidates,
+                    min_confidence=min_confidence
+                )
+            )
+            
+            # 构造响应
+            response.success = True
+            response.candidates = [
+                self._grasp_candidate_to_msg(c) for c in grasp_result.candidates
+            ]
+            response.candidate_count = len(grasp_result.candidates)
+            response.inference_time_ms = grasp_result.inference_time_ms
+            response.error_message = ""
+            
+            self._requests_processed += 1
+            
+            total_time = (time.time() - start_time) * 1000
+            self.get_logger().info(
+                f"[grasp] 完成: {len(grasp_result.candidates)} 候选, "
+                f"推理={grasp_result.inference_time_ms:.1f}ms, 总计={total_time:.1f}ms"
+            )
+            
+        except PerceptionError as e:
+            response.success = False
+            response.error_message = e.to_error_message()
+            response.candidates = []
+            response.candidate_count = 0
+            response.inference_time_ms = 0.0
+            self._requests_failed += 1
+            self.get_logger().error(f"[grasp] 错误: {e.to_error_message()}")
+            
+        except Exception as e:
+            response.success = False
+            response.error_message = f"[E9003] 内部异常: {e}"
+            response.candidates = []
+            response.candidate_count = 0
+            response.inference_time_ms = 0.0
+            self._requests_failed += 1
+            self.get_logger().error(f"[grasp] 内部异常: {e}")
+        
+        return response
+    
+    def _parse_pointcloud2(self, msg: PointCloud2) -> Optional[np.ndarray]:
+        """
+        解析 PointCloud2 消息为 numpy 数组
+        
+        Args:
+            msg: sensor_msgs/PointCloud2 消息
+            
+        Returns:
+            np.ndarray: Nx3 点云数组 (x, y, z)，如果解析失败返回 None
+        """
+        import struct
+        
+        if msg.width == 0 or msg.height == 0:
+            return None
+        
+        # 计算点数
+        point_count = msg.width * msg.height
+        
+        # 查找 x, y, z 字段的偏移量
+        field_offsets = {}
+        for field in msg.fields:
+            if field.name in ('x', 'y', 'z'):
+                field_offsets[field.name] = field.offset
+        
+        if not all(k in field_offsets for k in ('x', 'y', 'z')):
+            self.get_logger().error("PointCloud2 缺少 x, y, z 字段")
+            return None
+        
+        # 解析点云数据
+        points = np.zeros((point_count, 3), dtype=np.float32)
+        data = msg.data
+        point_step = msg.point_step
+        
+        for i in range(point_count):
+            base = i * point_step
+            try:
+                points[i, 0] = struct.unpack_from('f', data, base + field_offsets['x'])[0]
+                points[i, 1] = struct.unpack_from('f', data, base + field_offsets['y'])[0]
+                points[i, 2] = struct.unpack_from('f', data, base + field_offsets['z'])[0]
+            except struct.error:
+                continue
+        
+        # 过滤无效点（NaN 或无穷大）
+        valid_mask = np.isfinite(points).all(axis=1)
+        points = points[valid_mask]
+        
+        return points
+    
+    def _grasp_candidate_to_msg(self, candidate) -> GraspCandidate:
+        """
+        将 GraspCandidate 数据类转换为 ROS 消息
+        
+        Args:
+            candidate: grasp_module.GraspCandidate 实例
+            
+        Returns:
+            GraspCandidate: ROS 消息
+        """
+        from geometry_msgs.msg import Point, Quaternion
+        
+        msg = GraspCandidate()
+        
+        # 位置
+        msg.position = Point(
+            x=float(candidate.position[0]),
+            y=float(candidate.position[1]),
+            z=float(candidate.position[2])
+        )
+        
+        # 姿态四元数 (x, y, z, w)
+        msg.orientation = Quaternion(
+            x=float(candidate.orientation[0]),
+            y=float(candidate.orientation[1]),
+            z=float(candidate.orientation[2]),
+            w=float(candidate.orientation[3])
+        )
+        
+        # 参数
+        msg.width = float(candidate.width)
+        msg.confidence = float(candidate.confidence)
+        
+        # 变换矩阵（展平为 16 个 float64）
+        msg.transform_matrix = [float(x) for x in candidate.transform_matrix.flatten().tolist()]
+        
+        return msg
     
     # =========================================================================
     # 辅助方法
