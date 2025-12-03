@@ -51,3 +51,8 @@ htmlcov/
 *.temp
 .DS_Store
 Thumbs.db
+
+# Large model files
+*.pth
+*.pt
+*.engine
