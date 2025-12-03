@@ -624,10 +624,10 @@
                 <span class="grasp-info-badge" id="grasp-info-badge"></span>
             </div>
             <div class="grasp-candidates-container" id="grasp-candidates-container">
-                <!-- 候选 1 -->
+                <!-- 相机坐标系 -->
                 <div class="grasp-candidate-card" id="grasp-candidate-1">
                     <div class="grasp-candidate-header">
-                        <span class="grasp-candidate-rank">#1</span>
+                        <span class="grasp-candidate-rank" id="grasp-frame-1">camera</span>
                         <span class="grasp-candidate-confidence" id="grasp-conf-1">--</span>
                     </div>
                     <div class="grasp-candidate-grid">
@@ -645,10 +645,10 @@
                         </div>
                     </div>
                 </div>
-                <!-- 候选 2 -->
+                <!-- 机器人坐标系 -->
                 <div class="grasp-candidate-card" id="grasp-candidate-2">
                     <div class="grasp-candidate-header">
-                        <span class="grasp-candidate-rank">#2</span>
+                        <span class="grasp-candidate-rank" id="grasp-frame-2">base_link</span>
                         <span class="grasp-candidate-confidence" id="grasp-conf-2">--</span>
                     </div>
                     <div class="grasp-candidate-grid">
@@ -742,10 +742,12 @@ function initializeApp() {
         pointConfidence: document.getElementById('point-confidence'),
         // 抓取候选面板
         graspInfoBadge: document.getElementById('grasp-info-badge'),
+        graspFrame1: document.getElementById('grasp-frame-1'),
         graspPos1: document.getElementById('grasp-pos-1'),
         graspQuat1: document.getElementById('grasp-quat-1'),
         graspWidth1: document.getElementById('grasp-width-1'),
         graspConf1: document.getElementById('grasp-conf-1'),
+        graspFrame2: document.getElementById('grasp-frame-2'),
         graspPos2: document.getElementById('grasp-pos-2'),
         graspQuat2: document.getElementById('grasp-quat-2'),
         graspWidth2: document.getElementById('grasp-width-2'),
@@ -1079,9 +1081,10 @@ function updateGraspCandidates(data) {
     
     const candidates = data.candidates || [];
     
-    // 更新候选 1
+    // 更新第一行（相机坐标系）
     if (candidates.length >= 1) {
         const c1 = candidates[0];
+        elements.graspFrame1.textContent = c1.frame || 'camera';
         elements.graspPos1.textContent = `(${c1.position.x}, ${c1.position.y}, ${c1.position.z})`;
         elements.graspQuat1.textContent = `(${c1.orientation.x}, ${c1.orientation.y}, ${c1.orientation.z}, ${c1.orientation.w})`;
         elements.graspWidth1.textContent = c1.width.toFixed(4);
@@ -1090,9 +1093,10 @@ function updateGraspCandidates(data) {
         clearGraspCandidate(1);
     }
     
-    // 更新候选 2
+    // 更新第二行（base_link 坐标系）
     if (candidates.length >= 2) {
         const c2 = candidates[1];
+        elements.graspFrame2.textContent = c2.frame || 'base_link';
         elements.graspPos2.textContent = `(${c2.position.x}, ${c2.position.y}, ${c2.position.z})`;
         elements.graspQuat2.textContent = `(${c2.orientation.x}, ${c2.orientation.y}, ${c2.orientation.z}, ${c2.orientation.w})`;
         elements.graspWidth2.textContent = c2.width.toFixed(4);
@@ -1104,11 +1108,13 @@ function updateGraspCandidates(data) {
 
 function clearGraspCandidate(index) {
     if (index === 1) {
+        elements.graspFrame1.textContent = 'camera';
         elements.graspPos1.textContent = '--';
         elements.graspQuat1.textContent = '--';
         elements.graspWidth1.textContent = '--';
         elements.graspConf1.textContent = '--';
     } else if (index === 2) {
+        elements.graspFrame2.textContent = 'base_link';
         elements.graspPos2.textContent = '--';
         elements.graspQuat2.textContent = '--';
         elements.graspWidth2.textContent = '--';

@@ -14,11 +14,12 @@ import numpy as np
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Image, PointCloud2
-from geometry_msgs.msg import Point
+from geometry_msgs.msg import Point, Pose
 from builtin_interfaces.msg import Time as TimeMsg
 
-from tf_tools.srv import TransformPoints
+from tf_tools.srv import TransformPoints, TransformPoses
 from perception.srv import Grasp
+from perception.msg import GraspCandidate
 
 from .camera_manager import CameraManager
 from .perception_client import PerceptionClient, SegmentResult
@@ -29,6 +30,7 @@ from .web_server import WebServerManager
 CAMERA_FRAME = 'camera_color_optical_frame'
 ROBOT_BASE_FRAME = 'base_link'
 TF_TRANSFORM_SERVICE = '/tf_tools/service/transform_points'
+TF_POSES_SERVICE = '/tf_tools/service/transform_poses'
 GRASP_SERVICE = '/perception/service/grasp'
 
 
@@ -63,6 +65,11 @@ class WebInteractiveGui(Node):
         self._cropped_image: Optional[Image] = None  # 裁剪图（ROS Image）
         self._point_cloud: Optional[PointCloud2] = None  # 点云（ROS PointCloud2）
         self._segment_3d_info: Optional[dict] = None  # 3D 信息缓存
+        
+        # 抓取候选缓存
+        self._grasp_candidates_camera: list = []  # grasp 返回的原始数据（相机坐标系）
+        self._grasp_candidates_base: list = []    # TF 转换后的数据（base_link 坐标系）
+        
         self._cache_lock = threading.Lock()
 
         # 2. 创建模块
@@ -73,6 +80,7 @@ class WebInteractiveGui(Node):
         
         # TF 转换服务客户端
         self._tf_client = self.create_client(TransformPoints, TF_TRANSFORM_SERVICE)
+        self._tf_poses_client = self.create_client(TransformPoses, TF_POSES_SERVICE)
         
         # Grasp 姿态测算服务客户端
         self._grasp_client = self.create_client(Grasp, GRASP_SERVICE)
@@ -586,7 +594,7 @@ class WebInteractiveGui(Node):
 
     async def _do_grasp_pose(self, point_cloud: PointCloud2) -> dict:
         """执行姿态测算 Service 调用（异步）"""
-        # 检查服务是否可用
+        # 检查 Grasp 服务是否可用
         if not self._grasp_client.service_is_ready():
             if not self._grasp_client.wait_for_service(timeout_sec=5.0):
                 return {
@@ -601,24 +609,19 @@ class WebInteractiveGui(Node):
         request.min_confidence = 0.1  # Contact-GraspNet输出范围约0-0.2，使用0.1作为阈值
 
         try:
+            # ========== Step 1: 调用 Grasp 服务 ==========
             future = self._grasp_client.call_async(request)
-            # ROS2 Service Future 不是标准的 concurrent.futures.Future
-            # 需要在事件循环中等待完成
             timeout_sec = 30.0
             start_time = time.time()
             
             while not future.done():
-                # 检查超时
                 elapsed = time.time() - start_time
                 if elapsed > timeout_sec:
                     return {
                         "success": False,
                         "error": f"姿态测算超时 (> {timeout_sec:.1f}s)",
                     }
-                
-                # 让 ROS2 处理一次
                 rclpy.spin_once(self, timeout_sec=0.1)
-                # 让出控制权给事件循环
                 await asyncio.sleep(0.01)
 
             response = future.result()
@@ -628,28 +631,98 @@ class WebInteractiveGui(Node):
                     "error": response.error_message or "姿态测算失败",
                 }
 
-            # 转换候选为可序列化的字典格式
-            candidates = []
-            for c in response.candidates[:2]:  # 只取前两个
-                candidates.append({
+            if response.candidate_count == 0:
+                return {
+                    "success": False,
+                    "error": "未找到有效的抓取候选",
+                }
+
+            # ========== Step 2: 保存原始候选（相机坐标系） ==========
+            candidates_camera = []
+            for c in response.candidates:
+                candidates_camera.append({
                     "position": {
-                        "x": round(c.position.x, 4),
-                        "y": round(c.position.y, 4),
-                        "z": round(c.position.z, 4),
+                        "x": float(c.position.x),
+                        "y": float(c.position.y),
+                        "z": float(c.position.z),
                     },
                     "orientation": {
-                        "x": round(c.orientation.x, 4),
-                        "y": round(c.orientation.y, 4),
-                        "z": round(c.orientation.z, 4),
-                        "w": round(c.orientation.w, 4),
+                        "x": float(c.orientation.x),
+                        "y": float(c.orientation.y),
+                        "z": float(c.orientation.z),
+                        "w": float(c.orientation.w),
                     },
-                    "width": round(c.width, 4),
-                    "confidence": round(c.confidence, 4),
+                    "width": float(c.width),
+                    "confidence": float(c.confidence),
+                })
+
+            # ========== Step 3: 调用 TF 转换服务 ==========
+            candidates_base = await self._transform_grasp_candidates_to_base(
+                response.candidates
+            )
+            
+            if candidates_base is None:
+                return {
+                    "success": False,
+                    "error": "TF 坐标转换失败",
+                }
+
+            # ========== Step 4: 保存到缓存 ==========
+            with self._cache_lock:
+                self._grasp_candidates_camera = candidates_camera
+                self._grasp_candidates_base = candidates_base
+
+            self.get_logger().info(
+                f"[web_gui] 抓取候选已缓存: {len(candidates_camera)} 个 (camera), "
+                f"{len(candidates_base)} 个 (base_link)"
+            )
+
+            # ========== Step 5: 返回前端展示数据（第一个候选的两个坐标系） ==========
+            display_candidates = []
+            
+            # 第一行：camera 坐标系（原始数据）
+            if candidates_camera:
+                c = candidates_camera[0]
+                display_candidates.append({
+                    "frame": "camera",
+                    "position": {
+                        "x": round(c["position"]["x"], 4),
+                        "y": round(c["position"]["y"], 4),
+                        "z": round(c["position"]["z"], 4),
+                    },
+                    "orientation": {
+                        "x": round(c["orientation"]["x"], 4),
+                        "y": round(c["orientation"]["y"], 4),
+                        "z": round(c["orientation"]["z"], 4),
+                        "w": round(c["orientation"]["w"], 4),
+                    },
+                    "width": round(c["width"], 4),
+                    "confidence": round(c["confidence"], 4),
+                })
+            
+            # 第二行：base_link 坐标系（转换后）
+            if candidates_base:
+                c = candidates_base[0]
+                display_candidates.append({
+                    "frame": "base_link",
+                    "position": {
+                        "x": round(c["position"]["x"], 4),
+                        "y": round(c["position"]["y"], 4),
+                        "z": round(c["position"]["z"], 4),
+                    },
+                    "orientation": {
+                        "x": round(c["orientation"]["x"], 4),
+                        "y": round(c["orientation"]["y"], 4),
+                        "z": round(c["orientation"]["z"], 4),
+                        "w": round(c["orientation"]["w"], 4),
+                    },
+                    "width": round(c["width"], 4),
+                    "confidence": round(c["confidence"], 4),
                 })
 
             return {
                 "success": True,
-                "candidates": candidates,
+                "candidates": display_candidates,
                 "candidate_count": response.candidate_count,
                 "inference_time_ms": response.inference_time_ms,
             }
@@ -660,10 +733,103 @@ class WebInteractiveGui(Node):
                 "error": "姿态测算超时 (> 30s)",
             }
         except Exception as e:
+            self.get_logger().error(f"[web_gui] 姿态测算异常: {e}")
             return {
                 "success": False,
                 "error": f"姿态测算异常: {e}",
             }
+
+    async def _transform_grasp_candidates_to_base(
+        self, candidates: list
+    ) -> list | None:
+        """
+        将抓取候选从相机坐标系转换到 base_link 坐标系
+        
+        Args:
+            candidates: GraspCandidate 列表（ROS 消息）
+            
+        Returns:
+            转换后的候选列表（字典格式），或 None 如果转换失败
+        """
+        if not candidates:
+            return []
+        
+        # 检查 TF Poses 服务是否可用
+        if not self._tf_poses_client.service_is_ready():
+            if not self._tf_poses_client.wait_for_service(timeout_sec=3.0):
+                self.get_logger().warning(
+                    f"[web_gui] TF Poses 服务 {TF_POSES_SERVICE} 不可用"
+                )
+                return None
+
+        # 构建请求
+        request = TransformPoses.Request()
+        request.source_frame = CAMERA_FRAME
+        request.target_frame = ROBOT_BASE_FRAME
+        request.stamp = TimeMsg()  # 使用最新 TF
+        
+        # 将 GraspCandidate 转换为 Pose
+        poses_in = []
+        for c in candidates:
+            pose = Pose()
+            pose.position.x = float(c.position.x)
+            pose.position.y = float(c.position.y)
+            pose.position.z = float(c.position.z)
+            pose.orientation.x = float(c.orientation.x)
+            pose.orientation.y = float(c.orientation.y)
+            pose.orientation.z = float(c.orientation.z)
+            pose.orientation.w = float(c.orientation.w)
+            poses_in.append(pose)
+        
+        request.poses_in = poses_in
+
+        try:
+            future = self._tf_poses_client.call_async(request)
+            timeout_sec = 5.0
+            start_time = time.time()
+            
+            while not future.done():
+                elapsed = time.time() - start_time
+                if elapsed > timeout_sec:
+                    self.get_logger().warning(
+                        f"[web_gui] TF Poses 转换超时 (> {timeout_sec:.1f}s)"
+                    )
+                    return None
+                rclpy.spin_once(self, timeout_sec=0.1)
+                await asyncio.sleep(0.01)
+            
+            response = future.result()
+            if not response.success:
+                self.get_logger().warning(
+                    f"[web_gui] TF Poses 转换失败: {response.message}"
+                )
+                return None
+
+            # 组装转换后的候选（保留 width 和 confidence）
+            candidates_base = []
+            for i, pose_out in enumerate(response.poses_out):
+                original = candidates[i]
+                candidates_base.append({
+                    "position": {
+                        "x": float(pose_out.position.x),
+                        "y": float(pose_out.position.y),
+                        "z": float(pose_out.position.z),
+                    },
+                    "orientation": {
+                        "x": float(pose_out.orientation.x),
+                        "y": float(pose_out.orientation.y),
+                        "z": float(pose_out.orientation.z),
+                        "w": float(pose_out.orientation.w),
+                    },
+                    "width": float(original.width),          # 保留原值
+                    "confidence": float(original.confidence),  # 保留原值
+                })
+
+            return candidates_base
+
+        except Exception as e:
+            self.get_logger().error(f"[web_gui] TF Poses 转换异常: {e}")
+            return None
 
     def _handle_cancel(self) -> None:
         """处理取消请求"""
@@ -754,6 +920,9 @@ class WebInteractiveGui(Node):
             self._cropped_image = None
             self._point_cloud = None
             self._segment_3d_info = None
+            # 清除抓取候选缓存
+            self._grasp_candidates_camera = []
+            self._grasp_candidates_base = []
 
 
 def main(args=None):
