@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import threading
+import time
 from enum import Enum
 from typing import Optional
 
@@ -293,11 +294,22 @@ class WebInteractiveGui(Node):
 
         try:
             future = self._tf_client.call_async(request)
-            # 等待结果
-            await asyncio.wait_for(
-                asyncio.wrap_future(future),
-                timeout=3.0
-            )
+            # ROS2 Service Future 不是标准的 concurrent.futures.Future
+            # 需要在事件循环中等待完成
+            timeout_sec = 3.0
+            start_time = time.time()
+            
+            while not future.done():
+                # 检查超时
+                elapsed = time.time() - start_time
+                if elapsed > timeout_sec:
+                    self.get_logger().warning(f"[web_gui] TF 转换超时 (> {timeout_sec:.1f}s)")
+                    return None
+                
+                # 让 ROS2 处理一次
+                rclpy.spin_once(self, timeout_sec=0.1)
+                # 让出控制权给事件循环
+                await asyncio.sleep(0.01)
             
             response = future.result()
             if not response.success:
@@ -590,11 +602,24 @@ class WebInteractiveGui(Node):
 
         try:
             future = self._grasp_client.call_async(request)
-            # 等待结果
-            await asyncio.wait_for(
-                asyncio.wrap_future(future),
-                timeout=30.0
-            )
+            # ROS2 Service Future 不是标准的 concurrent.futures.Future
+            # 需要在事件循环中等待完成
+            timeout_sec = 30.0
+            start_time = time.time()
+            
+            while not future.done():
+                # 检查超时
+                elapsed = time.time() - start_time
+                if elapsed > timeout_sec:
+                    return {
+                        "success": False,
+                        "error": f"姿态测算超时 (> {timeout_sec:.1f}s)",
+                    }
+                
+                # 让 ROS2 处理一次
+                rclpy.spin_once(self, timeout_sec=0.1)
+                # 让出控制权给事件循环
+                await asyncio.sleep(0.01)
 
             response = future.result()
             if not response.success:
