@@ -16,7 +16,6 @@ HTTP_MESH_SOURCE_DIR="${SCRIPT_DIR}/meshes"
 HTTP_MESH_STAGING_ROOT="${HTTP_MESH_STAGING_ROOT:-/tmp/robot_desc_mesh_http}"
 HTTP_MESH_SERVE_DIR="${HTTP_MESH_STAGING_ROOT}/meshes"
 HTTP_MESH_LOG_FILE="${LOG_DIR}/mesh_http_server.log"
-HTTP_MESH_PID_FILE="${LOG_DIR}/mesh_http_server.pid"
 HTTP_MESH_PROBE_FILE="${HTTP_MESH_PROBE_FILE:-base_link_visual.stl}"
 
 mkdir -p "${LOG_DIR}"
@@ -86,6 +85,19 @@ prepare_mesh_http_payload() {
     return 0
 }
 
+get_port_pid() {
+    # Get the PID of the process listening on the mesh HTTP port
+    local pid=""
+    if command -v lsof >/dev/null 2>&1; then
+        pid=$(lsof -ti :"${HTTP_MESH_PORT}" 2>/dev/null | head -n1)
+    elif command -v fuser >/dev/null 2>&1; then
+        pid=$(fuser "${HTTP_MESH_PORT}/tcp" 2>/dev/null | awk '{print $1}')
+    elif command -v ss >/dev/null 2>&1; then
+        pid=$(ss -tlnp "sport = :${HTTP_MESH_PORT}" 2>/dev/null | grep -oP 'pid=\K\d+' | head -n1)
+    fi
+    echo "${pid}"
+}
+
 start_mesh_http_server() {
     if ! prepare_mesh_http_payload; then
         return 1
@@ -95,16 +107,17 @@ start_mesh_http_server() {
     (
         cd "${HTTP_MESH_STAGING_ROOT}" &&
         nohup python3 -m http.server "${HTTP_MESH_PORT}" --bind "${HTTP_MESH_BIND_HOST}" \
-            > "${HTTP_MESH_LOG_FILE}" 2>&1 & echo $! > "${HTTP_MESH_PID_FILE}"
+            > "${HTTP_MESH_LOG_FILE}" 2>&1 &
     )
-    local server_pid
-    server_pid=$(cat "${HTTP_MESH_PID_FILE}" 2>/dev/null || true)
     sleep 2
     if check_mesh_http_server; then
         printf '[%s] Mesh HTTP server ready at http://%s:%s/meshes/\n' \
             "$(date --iso-8601=seconds)" "${HTTP_MESH_ADVERTISE_HOST}" "${HTTP_MESH_PORT}" | tee -a "${LOG_FILE}"
         return 0
     fi
+    # If server failed to start, try to clean up any process on that port
+    local server_pid
+    server_pid=$(get_port_pid)
     if [[ -n "${server_pid}" ]]; then
         kill "${server_pid}" 2>/dev/null || true
     fi
