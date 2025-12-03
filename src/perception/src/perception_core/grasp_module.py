@@ -236,17 +236,54 @@ class GraspModule:
         load_start = time.time()
         self._load_model(str(model_path))
         load_time = time.time() - load_start
-        logger.info(f"Contact-GraspNet 模型加载完成 (耗时={load_time:.2f}s)")
+        
+        # 记录模型加载后的内存状态
+        try:
+            if torch.cuda.is_available():
+                allocated_after_load = torch.cuda.memory_allocated() / 1024**2
+                reserved_after_load = torch.cuda.memory_reserved() / 1024**2
+                logger.info(
+                    f"Contact-GraspNet 模型加载完成 (耗时={load_time:.2f}s) | "
+                    f"GPU内存: 已分配={allocated_after_load:.1f}MB, 已保留={reserved_after_load:.1f}MB"
+                )
+        except Exception as e:
+            logger.debug(f"无法记录模型加载后的内存状态: {e}")
         
         # Warmup
         warmup_start = time.time()
         self._warmup()
         warmup_time = time.time() - warmup_start
-        logger.info(f"Contact-GraspNet warmup 完成 (耗时={warmup_time:.2f}s)")
+        
+        # 记录warmup后的内存状态
+        try:
+            if torch.cuda.is_available():
+                allocated_after_warmup = torch.cuda.memory_allocated() / 1024**2
+                reserved_after_warmup = torch.cuda.memory_reserved() / 1024**2
+                logger.info(
+                    f"Contact-GraspNet warmup 完成 (耗时={warmup_time:.2f}s) | "
+                    f"GPU内存: 已分配={allocated_after_warmup:.1f}MB, 已保留={reserved_after_warmup:.1f}MB"
+                )
+        except Exception as e:
+            logger.debug(f"无法记录warmup后的内存状态: {e}")
         
         self._ready = True
         total_time = time.time() - start_time
-        logger.info(f"GraspModule 初始化完成 (总耗时={total_time:.2f}s)")
+        
+        # 记录最终初始化完成的内存状态
+        try:
+            if torch.cuda.is_available():
+                allocated_final = torch.cuda.memory_allocated() / 1024**2
+                reserved_final = torch.cuda.memory_reserved() / 1024**2
+                total_final = torch.cuda.get_device_properties(0).total_memory / 1024**2
+                free_final = total_final - reserved_final
+                logger.info(
+                    f"GraspModule 初始化完成 (总耗时={total_time:.2f}s) | "
+                    f"GPU内存: 已分配={allocated_final:.1f}MB, 已保留={reserved_final:.1f}MB, "
+                    f"总计={total_final:.1f}MB, 可用={free_final:.1f}MB"
+                )
+        except Exception as e:
+            logger.debug(f"无法记录初始化完成的内存状态: {e}")
+        
         return True
     
     def _resolve_model_path(self, path_str: str) -> Path:
@@ -541,7 +578,7 @@ class GraspModule:
             logger.debug(f"[Grasp推理] 等待模型锁...")
             print(f"[Grasp-Inference] Waiting for model lock...")
             
-            with self._model_lock:
+        with self._model_lock:
                 lock_acquired_time = time.time() - lock_start
                 if lock_acquired_time > 0.1:
                     logger.warning(f"[Grasp推理] 获取模型锁耗时{lock_acquired_time:.2f}s（可能被其他推理占用）")
@@ -550,33 +587,33 @@ class GraspModule:
                 logger.debug(f"[Grasp推理] 开始GPU推理...")
                 print(f"[Grasp-Inference] Starting GPU inference...")
                 
-                with torch.cuda.stream(self._stream):
-                    with torch.no_grad():
-                        # 转换为 batch tensor
+            with torch.cuda.stream(self._stream):
+                with torch.no_grad():
+                    # 转换为 batch tensor
                         tensor_start = time.time()
-                        pc_batch = torch.from_numpy(
-                            pc_processed[np.newaxis, :, :]
-                        ).to(self._device)
+                    pc_batch = torch.from_numpy(
+                        pc_processed[np.newaxis, :, :]
+                    ).to(self._device)
                         tensor_time = time.time() - tensor_start
                         if tensor_time > 0.5:
                             logger.warning(f"[Grasp推理] Tensor转换耗时{tensor_time:.2f}s（可能内存分配慢）")
                             print(f"[Grasp-Inference-WARN] Tensor creation took {tensor_time:.2f}s")
-                        
-                        # 模型推理
+                    
+                    # 模型推理
                         model_start = time.time()
                         logger.debug(f"[Grasp推理] 执行模型前向传播...")
                         print(f"[Grasp-Inference] Running model forward pass...")
-                        pred = self._model(pc_batch)
+                    pred = self._model(pc_batch)
                         model_time = time.time() - model_start
                         logger.info(f"[Grasp推理] 模型推理完成，耗时={model_time:.2f}s")
                         print(f"[Grasp-Inference] Model inference done: {model_time:.2f}s")
-                        
+                    
                         # 提取结果到CPU（立即释放GPU内存）
                         extract_start = time.time()
-                        pred_grasps = pred['pred_grasps_cam'].detach().cpu().numpy()
-                        pred_scores = pred['pred_scores'].detach().cpu().numpy()
-                        pred_points = pred['pred_points'].detach().cpu().numpy()
-                        offset_pred = pred['offset_pred'].detach().cpu().numpy()
+                    pred_grasps = pred['pred_grasps_cam'].detach().cpu().numpy()
+                    pred_scores = pred['pred_scores'].detach().cpu().numpy()
+                    pred_points = pred['pred_points'].detach().cpu().numpy()
+                    offset_pred = pred['offset_pred'].detach().cpu().numpy()
                         extract_time = time.time() - extract_start
                         logger.debug(f"[Grasp推理] 结果提取完成，耗时={extract_time:.2f}s")
                         print(f"[Grasp-Inference] Results extracted: {extract_time:.2f}s")
@@ -586,10 +623,10 @@ class GraspModule:
                         pc_batch = None
                         del pred
                         pred = None
-                
-                # 同步 CUDA 操作
+            
+            # 同步 CUDA 操作
                 sync_start = time.time()
-                torch.cuda.current_stream().wait_stream(self._stream)
+            torch.cuda.current_stream().wait_stream(self._stream)
                 sync_time = time.time() - sync_start
                 if sync_time > 0.1:
                     logger.warning(f"[Grasp推理] CUDA同步耗时{sync_time:.2f}s")
@@ -782,8 +819,39 @@ class GraspModule:
         extra_opening = self._model_config['TEST'].get('extra_opening', 0.005)
         gripper_openings = np.minimum(offset_pred + extra_opening, gripper_width)
         
+        # ⚠️ 诊断：记录模型输出的统计信息
+        total_predictions = len(pred_scores)
+        max_score = float(np.max(pred_scores)) if total_predictions > 0 else 0.0
+        min_score = float(np.min(pred_scores)) if total_predictions > 0 else 0.0
+        mean_score = float(np.mean(pred_scores)) if total_predictions > 0 else 0.0
+        
+        logger.info(
+            f"[Grasp后处理] 模型输出统计: "
+            f"总数={total_predictions}, "
+            f"最大置信度={max_score:.3f}, "
+            f"最小置信度={min_score:.3f}, "
+            f"平均置信度={mean_score:.3f}, "
+            f"阈值={min_confidence:.3f}"
+        )
+        print(f"[Grasp-PostProcess] Total={total_predictions}, Max={max_score:.3f}, Min={min_score:.3f}, Mean={mean_score:.3f}, Threshold={min_confidence:.3f}")
+        
         # 过滤低置信度
         valid_mask = pred_scores >= min_confidence
+        valid_count = int(np.sum(valid_mask))
+        
+        logger.info(
+            f"[Grasp后处理] 置信度过滤: "
+            f"有效候选={valid_count}/{total_predictions}, "
+            f"过滤掉={total_predictions - valid_count}个"
+        )
+        print(f"[Grasp-PostProcess] Valid candidates: {valid_count}/{total_predictions}")
+        
+        if valid_count == 0:
+            logger.warning(
+                f"[Grasp后处理] ⚠️ 所有候选都被过滤！"
+                f"最大置信度={max_score:.3f} < 阈值={min_confidence:.3f}"
+            )
+            print(f"[Grasp-PostProcess-WARN] All candidates filtered! Max={max_score:.3f} < Threshold={min_confidence:.3f}")
         
         # 排序并选择 top-k
         sorted_indices = np.argsort(pred_scores[valid_mask])[::-1]

@@ -1127,6 +1127,38 @@ class PerceptionNode(Node):
         start_time = time.time()
         
         try:
+            # ⚠️ 打印请求参数（原始值）
+            self.get_logger().info("=" * 80)
+            self.get_logger().info("[Grasp服务] 收到请求，开始解析参数...")
+            
+            # 打印请求参数
+            self.get_logger().info(
+                f"[Grasp服务] 请求参数: "
+                f"max_candidates={request.max_candidates}, "
+                f"min_confidence={request.min_confidence}"
+            )
+            
+            # 打印点云消息信息
+            pc_msg = request.point_cloud
+            self.get_logger().info(
+                f"[Grasp服务] 点云消息: "
+                f"width={pc_msg.width}, height={pc_msg.height}, "
+                f"point_step={pc_msg.point_step}, row_step={pc_msg.row_step}, "
+                f"data_size={len(pc_msg.data)} bytes, "
+                f"frame_id={pc_msg.header.frame_id}"
+            )
+            
+            # 打印掩码信息
+            if request.mask.data and len(request.mask.data) > 0:
+                self.get_logger().info(
+                    f"[Grasp服务] 掩码消息: "
+                    f"width={request.mask.width}, height={request.mask.height}, "
+                    f"encoding={request.mask.encoding}, "
+                    f"data_size={len(request.mask.data)} bytes"
+                )
+            else:
+                self.get_logger().info("[Grasp服务] 掩码: 未提供")
+            
             # 检查模块是否就绪
             if not self._grasp.is_ready:
                 raise PerceptionError(ErrorCode.NODE_NOT_READY, "抓取模块未就绪")
@@ -1137,19 +1169,61 @@ class PerceptionNode(Node):
             if point_cloud is None or point_cloud.shape[0] == 0:
                 raise PerceptionError(ErrorCode.POINT_COUNT_INSUFFICIENT, "点云数据为空")
             
-            self.get_logger().debug(
-                f"[grasp] 收到点云: {point_cloud.shape[0]} 点"
-            )
+            # ⚠️ 详细打印点云统计信息（与web端对比）
+            pc_points = point_cloud.shape[0]
+            pc_shape = point_cloud.shape
+            
+            # 计算质心（相机坐标系）
+            centroid = np.mean(point_cloud[:, :3], axis=0)
+            
+            # 计算边界框
+            bbox_min = np.min(point_cloud[:, :3], axis=0)
+            bbox_max = np.max(point_cloud[:, :3], axis=0)
+            bbox_size = bbox_max - bbox_min  # 尺寸（米）
+            
+            # 计算点云范围
+            pc_range_x = (np.min(point_cloud[:, 0]), np.max(point_cloud[:, 0]))
+            pc_range_y = (np.min(point_cloud[:, 1]), np.max(point_cloud[:, 1]))
+            pc_range_z = (np.min(point_cloud[:, 2]), np.max(point_cloud[:, 2]))
+            
+            # 计算标准差（用于评估点云分布）
+            pc_std = np.std(point_cloud[:, :3], axis=0)
+            
+            self.get_logger().info("=" * 80)
+            self.get_logger().info("[Grasp服务] 点云数据统计（解析后）:")
+            self.get_logger().info(f"  点数: {pc_points:,}")
+            self.get_logger().info(f"  形状: {pc_shape}")
+            self.get_logger().info(f"  质心-相机系 (m): ({centroid[0]:.3f}, {centroid[1]:.3f}, {centroid[2]:.3f})")
+            self.get_logger().info(f"  边界框 Min (m): ({bbox_min[0]:.3f}, {bbox_min[1]:.3f}, {bbox_min[2]:.3f})")
+            self.get_logger().info(f"  边界框 Max (m): ({bbox_max[0]:.3f}, {bbox_max[1]:.3f}, {bbox_max[2]:.3f})")
+            self.get_logger().info(f"  尺寸 (mm): {bbox_size[0]*1000:.1f} × {bbox_size[1]*1000:.1f} × {bbox_size[2]*1000:.1f}")
+            self.get_logger().info(f"  X范围 (m): [{pc_range_x[0]:.3f}, {pc_range_x[1]:.3f}]")
+            self.get_logger().info(f"  Y范围 (m): [{pc_range_y[0]:.3f}, {pc_range_y[1]:.3f}]")
+            self.get_logger().info(f"  Z范围 (m): [{pc_range_z[0]:.3f}, {pc_range_z[1]:.3f}]")
+            self.get_logger().info(f"  标准差 (m): ({pc_std[0]:.3f}, {pc_std[1]:.3f}, {pc_std[2]:.3f})")
             
             # 解析可选的掩码
             mask = None
+            mask_info = "无"
             if request.mask.data and len(request.mask.data) > 0:
                 mask_img = self._bridge.imgmsg_to_cv2(request.mask, 'mono8')
                 mask = mask_img.flatten() > 0  # 转为布尔掩码
+                mask_true_count = np.sum(mask)
+                mask_ratio = mask_true_count / len(mask) if len(mask) > 0 else 0.0
+                mask_info = f"有 ({mask_true_count}/{len(mask)} 点, {mask_ratio*100:.1f}%)"
+                self.get_logger().info(f"[Grasp服务] 掩码解析: {mask_info}")
             
             # 解析参数
             max_candidates = request.max_candidates if request.max_candidates > 0 else DEFAULT_MAX_CANDIDATES
             min_confidence = request.min_confidence if request.min_confidence > 0 else DEFAULT_MIN_GRASP_CONFIDENCE
+            
+            self.get_logger().info(
+                f"[Grasp服务] 最终参数: "
+                f"max_candidates={max_candidates}, "
+                f"min_confidence={min_confidence:.3f}, "
+                f"掩码={mask_info}"
+            )
+            self.get_logger().info("=" * 80)
             
             # 执行推理（同步等待异步结果）
             # 使用 asyncio.run 创建新的事件循环来等待结果
