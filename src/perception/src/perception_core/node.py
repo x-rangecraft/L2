@@ -576,6 +576,34 @@ class PerceptionNode(Node):
                 image, seg_result.mask, (goal.click_x, goal.click_y)
             )
             
+            # ⚠️ 输出详细结果日志
+            bbox_size = (
+                (pc_result.bbox_max[0] - pc_result.bbox_min[0]) * 1000,
+                (pc_result.bbox_max[1] - pc_result.bbox_min[1]) * 1000,
+                (pc_result.bbox_max[2] - pc_result.bbox_min[2]) * 1000,
+            )
+            self.get_logger().info("=" * 80)
+            self.get_logger().info("[object_target] 结果统计:")
+            self.get_logger().info(f"  分割置信度: {seg_result.confidence:.3f}")
+            self.get_logger().info(f"  掩码面积: {seg_result.mask_area:,} 像素")
+            self.get_logger().info(f"  点云点数: {pc_result.point_count:,}")
+            self.get_logger().info(
+                f"  质心 (m): ({pc_result.center_3d[0]:.3f}, "
+                f"{pc_result.center_3d[1]:.3f}, {pc_result.center_3d[2]:.3f})"
+            )
+            self.get_logger().info(
+                f"  边界框 Min (m): ({pc_result.bbox_min[0]:.3f}, "
+                f"{pc_result.bbox_min[1]:.3f}, {pc_result.bbox_min[2]:.3f})"
+            )
+            self.get_logger().info(
+                f"  边界框 Max (m): ({pc_result.bbox_max[0]:.3f}, "
+                f"{pc_result.bbox_max[1]:.3f}, {pc_result.bbox_max[2]:.3f})"
+            )
+            self.get_logger().info(
+                f"  尺寸 (mm): {bbox_size[0]:.1f} × {bbox_size[1]:.1f} × {bbox_size[2]:.1f}"
+            )
+            self.get_logger().info("=" * 80)
+            
             # 填充结果
             result.success = True
             result.mask = self._bridge.cv2_to_imgmsg(seg_result.mask, 'mono8')

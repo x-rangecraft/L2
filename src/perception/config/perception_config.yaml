@@ -41,7 +41,7 @@ grasp:
   model_path: "models/contact_graspnet/model.pt"
   config_path: "models/contact_graspnet/config.yaml"
   max_candidates: 50
-  min_confidence: 0.5
+  min_confidence: 0.1  # Contact-GraspNet 输出范围约 0-0.2
   num_input_points: 20000
   z_range: [0.2, 1.0]  # 点云深度范围（米）
 

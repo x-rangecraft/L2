@@ -14,6 +14,8 @@ import numpy as np
 
 from sensor_msgs.msg import PointCloud2, PointField, CameraInfo
 
+import cv2
+
 from .constants import (
     MIN_POINT_COUNT,
     MAX_INVALID_DEPTH_RATIO,
@@ -21,6 +23,12 @@ from .constants import (
     MAX_DEPTH_MM,
     DEFAULT_OUTPUT_FRAME_ID,
     TIMEOUT_POINTCLOUD,
+    EDGE_FILTER_ENABLED,
+    MASK_EROSION_PIXELS,
+    DEPTH_GRADIENT_FILTER_ENABLED,
+    DEPTH_GRADIENT_THRESHOLD,
+    DEPTH_OUTLIER_FILTER_ENABLED,
+    DEPTH_OUTLIER_MAD_RATIO,
 )
 from .error_codes import PerceptionError, ErrorCode
 from .async_worker import AsyncWorker
@@ -71,7 +79,27 @@ class PointCloudModule:
         self._max_invalid_ratio = config.get('max_invalid_depth_ratio', MAX_INVALID_DEPTH_RATIO)
         self._compute_timeout = config.get('timeout', TIMEOUT_POINTCLOUD)
         
-        logger.info("PointCloudModule 配置已加载")
+        # 边缘深度过滤配置（解决 RealSense flying pixels 问题）
+        # 三重过滤：Mask 腐蚀 → 深度梯度过滤 → 中位数+MAD 统计过滤
+        self._edge_filter_enabled = config.get('edge_filter_enabled', EDGE_FILTER_ENABLED)
+        
+        # Step 1: Mask 腐蚀
+        self._mask_erosion_pixels = config.get('mask_erosion_pixels', MASK_EROSION_PIXELS)
+        
+        # Step 2: 深度梯度过滤
+        self._depth_gradient_filter_enabled = config.get('depth_gradient_filter_enabled', DEPTH_GRADIENT_FILTER_ENABLED)
+        self._depth_gradient_threshold = config.get('depth_gradient_threshold', DEPTH_GRADIENT_THRESHOLD)
+        
+        # Step 3: 中位数+MAD 统计过滤
+        self._depth_outlier_filter_enabled = config.get('depth_outlier_filter_enabled', DEPTH_OUTLIER_FILTER_ENABLED)
+        self._depth_outlier_mad_ratio = config.get('depth_outlier_mad_ratio', DEPTH_OUTLIER_MAD_RATIO)
+        
+        logger.info(
+            f"PointCloudModule 配置已加载 - 三重过滤: "
+            f"[1]腐蚀={self._mask_erosion_pixels}px, "
+            f"[2]梯度={self._depth_gradient_filter_enabled}(阈值={self._depth_gradient_threshold}mm), "
+            f"[3]MAD={self._depth_outlier_filter_enabled}(ratio={self._depth_outlier_mad_ratio})"
+        )
     
     @property
     def is_ready(self) -> bool:
@@ -189,7 +217,14 @@ class PointCloudModule:
         cy: float,
         frame_id: str,
     ) -> PointCloudResult:
-        """计算点云（同步方法，在线程池中执行）"""
+        """
+        计算点云（同步方法，在线程池中执行）
+        
+        三重过滤流程：
+        1. Mask 腐蚀：排除边缘像素
+        2. 深度梯度过滤：排除 2D 深度图中的深度跳变区域
+        3. 中位数+MAD 统计过滤：排除 Z 轴上的异常深度值
+        """
         h, w = depth_image.shape[:2]
         
         # 确保深度图是单通道
@@ -201,14 +236,44 @@ class PointCloudModule:
         
         # 获取掩码内的有效像素
         mask_bool = mask > 0
+        original_mask_pixels = int(np.sum(mask_bool))
+        
+        # =====================================================================
+        # 三重过滤 Step 1: Mask 腐蚀（排除边缘像素）
+        # =====================================================================
+        if self._edge_filter_enabled and self._mask_erosion_pixels > 0:
+            mask_bool = self._erode_mask(mask_bool, self._mask_erosion_pixels)
+            after_erosion_pixels = int(np.sum(mask_bool))
+            logger.info(
+                f"[三重过滤 1/3] Mask 腐蚀: {original_mask_pixels:,} -> {after_erosion_pixels:,} 像素 "
+                f"(排除 {original_mask_pixels - after_erosion_pixels:,} 边缘像素)"
+            )
+        else:
+            after_erosion_pixels = original_mask_pixels
+        
+        # =====================================================================
+        # 三重过滤 Step 2: 深度梯度过滤（排除深度跳变区域）
+        # =====================================================================
+        if self._edge_filter_enabled and self._depth_gradient_filter_enabled:
+            gradient_mask = self._compute_depth_gradient_mask(
+                depth, mask_bool, self._depth_gradient_threshold
+            )
+            mask_bool = mask_bool & gradient_mask
+            after_gradient_pixels = int(np.sum(mask_bool))
+            logger.info(
+                f"[三重过滤 2/3] 深度梯度过滤: {after_erosion_pixels:,} -> {after_gradient_pixels:,} 像素 "
+                f"(排除 {after_erosion_pixels - after_gradient_pixels:,} 深度跳变像素)"
+            )
+        else:
+            after_gradient_pixels = after_erosion_pixels
         
         # 深度有效性检查
         valid_depth = (depth >= self._min_depth_mm) & (depth <= self._max_depth_mm)
         valid_mask = mask_bool & valid_depth
         
         # 检查无效点比例
-        total_mask_pixels = np.sum(mask_bool)
-        valid_pixels = np.sum(valid_mask)
+        total_mask_pixels = int(np.sum(mask_bool))
+        valid_pixels = int(np.sum(valid_mask))
         
         if total_mask_pixels > 0:
             invalid_ratio = 1.0 - (valid_pixels / total_mask_pixels)
@@ -238,22 +303,50 @@ class PointCloudModule:
         
         # 组合点云
         points = np.stack([x, y, z], axis=1).astype(np.float32)
+        points_before_mad_filter = len(points)
+        
+        # =====================================================================
+        # 三重过滤 Step 3: 中位数+MAD 统计过滤（排除 Z 轴异常值）
+        # =====================================================================
+        if self._edge_filter_enabled and self._depth_outlier_filter_enabled and len(points) > 0:
+            points = self._filter_depth_outliers_mad(points, self._depth_outlier_mad_ratio)
+            points_after_mad_filter = len(points)
+            logger.info(
+                f"[三重过滤 3/3] 中位数+MAD 过滤: {points_before_mad_filter:,} -> {points_after_mad_filter:,} 点 "
+                f"(排除 {points_before_mad_filter - points_after_mad_filter:,} Z轴异常点)"
+            )
+        else:
+            points_after_mad_filter = points_before_mad_filter
+        
+        if len(points) < self._min_point_count:
+            raise PerceptionError(
+                ErrorCode.POINT_COUNT_INSUFFICIENT,
+                f"过滤后有效点数 {len(points)} < {self._min_point_count}"
+            )
         
         # 计算质心
-        center_x = float(np.mean(x))
-        center_y = float(np.mean(y))
-        center_z = float(np.mean(z))
+        center_x = float(np.mean(points[:, 0]))
+        center_y = float(np.mean(points[:, 1]))
+        center_z = float(np.mean(points[:, 2]))
         
         # 计算边界框
-        bbox_min = (float(np.min(x)), float(np.min(y)), float(np.min(z)))
-        bbox_max = (float(np.max(x)), float(np.max(y)), float(np.max(z)))
+        bbox_min = (float(np.min(points[:, 0])), float(np.min(points[:, 1])), float(np.min(points[:, 2])))
+        bbox_max = (float(np.max(points[:, 0])), float(np.max(points[:, 1])), float(np.max(points[:, 2])))
+        
+        # 计算最终尺寸用于日志
+        size_mm = (
+            (bbox_max[0] - bbox_min[0]) * 1000,
+            (bbox_max[1] - bbox_min[1]) * 1000,
+            (bbox_max[2] - bbox_min[2]) * 1000,
+        )
         
         # 创建 PointCloud2 消息
         point_cloud = self._create_pointcloud2(points, frame_id)
         
-        logger.debug(
-            f"点云计算完成: {len(points)} 点, "
-            f"中心=({center_x:.3f}, {center_y:.3f}, {center_z:.3f})"
+        logger.info(
+            f"[点云计算完成] {len(points):,} 点, "
+            f"尺寸={size_mm[0]:.1f}×{size_mm[1]:.1f}×{size_mm[2]:.1f}mm, "
+            f"质心=({center_x:.3f}, {center_y:.3f}, {center_z:.3f})m"
         )
         
         return PointCloudResult(
@@ -263,6 +356,132 @@ class PointCloudModule:
             bbox_max=bbox_max,
             point_count=len(points)
         )
+    
+    def _erode_mask(self, mask_bool: np.ndarray, erosion_pixels: int) -> np.ndarray:
+        """
+        对 mask 进行形态学腐蚀，排除边缘像素
+        
+        Args:
+            mask_bool: 布尔掩码
+            erosion_pixels: 腐蚀像素数
+            
+        Returns:
+            腐蚀后的布尔掩码
+        """
+        if erosion_pixels <= 0:
+            return mask_bool
+        
+        # 转换为 uint8 用于 OpenCV 操作
+        mask_uint8 = mask_bool.astype(np.uint8) * 255
+        
+        # 创建腐蚀核（圆形核效果更好）
+        kernel_size = erosion_pixels * 2 + 1
+        kernel = cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE, 
+            (kernel_size, kernel_size)
+        )
+        
+        # 执行腐蚀
+        eroded = cv2.erode(mask_uint8, kernel, iterations=1)
+        
+        return eroded > 0
+    
+    def _compute_depth_gradient_mask(
+        self, 
+        depth: np.ndarray, 
+        mask_bool: np.ndarray, 
+        threshold: float
+    ) -> np.ndarray:
+        """
+        计算深度梯度掩码，排除深度跳变区域
+        
+        使用 Sobel 算子检测深度图中的梯度，排除梯度过大的像素
+        
+        Args:
+            depth: 深度图 (H, W)，单位 mm
+            mask_bool: 布尔掩码
+            threshold: 梯度阈值 (mm)
+            
+        Returns:
+            布尔掩码，True 表示深度连续（保留），False 表示深度跳变（排除）
+        """
+        # 只在 mask 区域内计算梯度
+        # 先将 mask 外的深度设为 0，避免边界影响
+        depth_masked = depth.copy()
+        depth_masked[~mask_bool] = 0
+        
+        # 使用 Sobel 算子计算梯度
+        # ksize=3 是 3x3 的 Sobel 核
+        grad_x = cv2.Sobel(depth_masked, cv2.CV_32F, 1, 0, ksize=3)
+        grad_y = cv2.Sobel(depth_masked, cv2.CV_32F, 0, 1, ksize=3)
+        
+        # 计算梯度幅值
+        gradient_magnitude = np.sqrt(grad_x**2 + grad_y**2)
+        
+        # 梯度小于阈值的像素认为是深度连续的
+        gradient_mask = gradient_magnitude < threshold
+        
+        # 只在 mask 区域内应用
+        gradient_mask = gradient_mask | (~mask_bool)
+        
+        # 统计信息
+        if logger.isEnabledFor(logging.DEBUG):
+            masked_gradients = gradient_magnitude[mask_bool]
+            if len(masked_gradients) > 0:
+                logger.debug(
+                    f"[深度梯度] 梯度统计: "
+                    f"max={np.max(masked_gradients):.1f}mm, "
+                    f"mean={np.mean(masked_gradients):.1f}mm, "
+                    f"median={np.median(masked_gradients):.1f}mm, "
+                    f"threshold={threshold:.1f}mm"
+                )
+        
+        return gradient_mask
+    
+    def _filter_depth_outliers_mad(self, points: np.ndarray, mad_ratio: float) -> np.ndarray:
+        """
+        使用中位数 + MAD（中位数绝对偏差）过滤深度异常值
+        
+        MAD 比标准差对异常值更鲁棒：
+        - 中位数不受异常值影响
+        - MAD = median(|X - median(X)|) 也不受异常值影响
+        
+        Args:
+            points: Nx3 点云数组
+            mad_ratio: MAD 倍数阈值（推荐 2.5-3.5）
+            
+        Returns:
+            过滤后的点云数组
+        """
+        if len(points) == 0:
+            return points
+        
+        z_values = points[:, 2]
+        
+        # 计算中位数
+        z_median = np.median(z_values)
+        
+        # 计算 MAD（中位数绝对偏差）
+        z_mad = np.median(np.abs(z_values - z_median))
+        
+        if z_mad < 1e-6:
+            # MAD 太小，所有点深度几乎相同，不过滤
+            return points
+        
+        # 计算有效范围
+        z_min_valid = z_median - mad_ratio * z_mad
+        z_max_valid = z_median + mad_ratio * z_mad
+        
+        # 过滤
+        valid_mask = (z_values >= z_min_valid) & (z_values <= z_max_valid)
+        filtered_points = points[valid_mask]
+        
+        logger.debug(
+            f"[MAD过滤] Z范围: [{z_min_valid:.3f}, {z_max_valid:.3f}]m "
+            f"(中位数={z_median:.3f}m, MAD={z_mad:.4f}m, ratio={mad_ratio})"
+        )
+        
+        return filtered_points
     
     def _create_pointcloud2(self, points: np.ndarray, frame_id: str) -> PointCloud2:
         """

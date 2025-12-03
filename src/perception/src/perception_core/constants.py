@@ -26,6 +26,21 @@ MAX_INVALID_DEPTH_RATIO = 0.8         # 最大深度无效点占比
 MIN_DEPTH_MM = 100                    # 最小有效深度（mm）
 MAX_DEPTH_MM = 10000                  # 最大有效深度（mm）
 
+# 边缘深度过滤（解决 RealSense 边缘 flying pixels 问题）
+# 三重过滤：Mask 腐蚀 → 深度梯度过滤 → 中位数+MAD 统计过滤
+EDGE_FILTER_ENABLED = True            # 是否启用边缘过滤（总开关）
+
+# Step 1: Mask 腐蚀（排除边缘像素）
+MASK_EROSION_PIXELS = 1               # Mask 腐蚀像素数（排除边缘 N 像素）
+
+# Step 2: 深度梯度过滤（检测 2D 深度图中的深度跳变）
+DEPTH_GRADIENT_FILTER_ENABLED = True  # 是否启用深度梯度过滤
+DEPTH_GRADIENT_THRESHOLD = 50.0       # 深度梯度阈值（mm）
+
+# Step 3: 中位数+MAD 统计过滤（排除深度异常值）
+DEPTH_OUTLIER_FILTER_ENABLED = True   # 是否启用深度异常值过滤
+DEPTH_OUTLIER_MAD_RATIO = 3.5         # MAD 倍数阈值
+
 # =============================================================================
 # 向量相关
 # =============================================================================
@@ -94,7 +109,7 @@ SAM2_ENGINE_FILENAME = 'sam2_encoder_multi_1024_fp16.engine'
 GRASP_MODEL_FILENAME = 'model.pt'
 GRASP_CONFIG_FILENAME = 'config.yaml'
 DEFAULT_MAX_CANDIDATES = 50           # 默认最大抓取候选数量
-DEFAULT_MIN_GRASP_CONFIDENCE = 0.5    # 默认最小抓取置信度
+DEFAULT_MIN_GRASP_CONFIDENCE = 0.1    # 默认最小抓取置信度（Contact-GraspNet 模型输出范围约 0-0.2）
 DEFAULT_NUM_INPUT_POINTS = 20000      # 点云输入点数
 TIMEOUT_GRASP = 10.0                  # 抓取推理超时（秒）- 增加到10秒以应对内存不足时的慢速推理
 Z_RANGE_MIN = 0.2                     # 点云 Z 轴最小距离（米）
