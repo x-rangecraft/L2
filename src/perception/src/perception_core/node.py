@@ -1215,7 +1215,19 @@ class PerceptionNode(Node):
             
             # 解析参数
             max_candidates = request.max_candidates if request.max_candidates > 0 else DEFAULT_MAX_CANDIDATES
-            min_confidence = request.min_confidence if request.min_confidence > 0 else DEFAULT_MIN_GRASP_CONFIDENCE
+            
+            # Contact-GraspNet输出范围约0-0.2，如果传入的值超出此范围，使用默认值
+            if request.min_confidence <= 0:
+                min_confidence = DEFAULT_MIN_GRASP_CONFIDENCE
+            elif request.min_confidence > 0.2:
+                # 传入的值超出Contact-GraspNet的正常输出范围，使用默认值
+                self.get_logger().warning(
+                    f"[Grasp服务] 警告：传入的min_confidence={request.min_confidence:.3f} "
+                    f"超出Contact-GraspNet输出范围(0-0.2)，将使用默认值{DEFAULT_MIN_GRASP_CONFIDENCE:.3f}"
+                )
+                min_confidence = DEFAULT_MIN_GRASP_CONFIDENCE
+            else:
+                min_confidence = request.min_confidence
             
             self.get_logger().info(
                 f"[Grasp服务] 最终参数: "

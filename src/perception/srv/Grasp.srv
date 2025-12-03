@@ -7,7 +7,7 @@
 sensor_msgs/PointCloud2 point_cloud    # [必填] 点云数据（相机坐标系，XYZ）
 sensor_msgs/Image mask                 # [可选] 分割掩码，限定目标区域
 int32 max_candidates                   # [可选] 最大候选数量（默认 50，最大 200）
-float32 min_confidence                 # [可选] 最小置信度阈值（默认 0.5）
+float32 min_confidence                 # [可选] 最小置信度阈值（默认 0.1，Contact-GraspNet输出范围约0-0.2）
 
 ---
 

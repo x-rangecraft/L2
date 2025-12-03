@@ -586,7 +586,7 @@ class WebInteractiveGui(Node):
         request = Grasp.Request()
         request.point_cloud = point_cloud
         request.max_candidates = 50
-        request.min_confidence = 0.5
+        request.min_confidence = 0.1  # Contact-GraspNet输出范围约0-0.2，使用0.1作为阈值
 
         try:
             future = self._grasp_client.call_async(request)

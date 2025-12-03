@@ -578,7 +578,7 @@ class GraspModule:
             logger.debug(f"[Grasp推理] 等待模型锁...")
             print(f"[Grasp-Inference] Waiting for model lock...")
             
-        with self._model_lock:
+            with self._model_lock:
                 lock_acquired_time = time.time() - lock_start
                 if lock_acquired_time > 0.1:
                     logger.warning(f"[Grasp推理] 获取模型锁耗时{lock_acquired_time:.2f}s（可能被其他推理占用）")
@@ -587,33 +587,33 @@ class GraspModule:
                 logger.debug(f"[Grasp推理] 开始GPU推理...")
                 print(f"[Grasp-Inference] Starting GPU inference...")
                 
-            with torch.cuda.stream(self._stream):
-                with torch.no_grad():
-                    # 转换为 batch tensor
+                with torch.cuda.stream(self._stream):
+                    with torch.no_grad():
+                        # 转换为 batch tensor
                         tensor_start = time.time()
-                    pc_batch = torch.from_numpy(
-                        pc_processed[np.newaxis, :, :]
-                    ).to(self._device)
+                        pc_batch = torch.from_numpy(
+                            pc_processed[np.newaxis, :, :]
+                        ).to(self._device)
                         tensor_time = time.time() - tensor_start
                         if tensor_time > 0.5:
                             logger.warning(f"[Grasp推理] Tensor转换耗时{tensor_time:.2f}s（可能内存分配慢）")
                             print(f"[Grasp-Inference-WARN] Tensor creation took {tensor_time:.2f}s")
-                    
-                    # 模型推理
+                        
+                        # 模型推理
                         model_start = time.time()
                         logger.debug(f"[Grasp推理] 执行模型前向传播...")
                         print(f"[Grasp-Inference] Running model forward pass...")
-                    pred = self._model(pc_batch)
+                        pred = self._model(pc_batch)
                         model_time = time.time() - model_start
                         logger.info(f"[Grasp推理] 模型推理完成，耗时={model_time:.2f}s")
                         print(f"[Grasp-Inference] Model inference done: {model_time:.2f}s")
-                    
+                        
                         # 提取结果到CPU（立即释放GPU内存）
                         extract_start = time.time()
-                    pred_grasps = pred['pred_grasps_cam'].detach().cpu().numpy()
-                    pred_scores = pred['pred_scores'].detach().cpu().numpy()
-                    pred_points = pred['pred_points'].detach().cpu().numpy()
-                    offset_pred = pred['offset_pred'].detach().cpu().numpy()
+                        pred_grasps = pred['pred_grasps_cam'].detach().cpu().numpy()
+                        pred_scores = pred['pred_scores'].detach().cpu().numpy()
+                        pred_points = pred['pred_points'].detach().cpu().numpy()
+                        offset_pred = pred['offset_pred'].detach().cpu().numpy()
                         extract_time = time.time() - extract_start
                         logger.debug(f"[Grasp推理] 结果提取完成，耗时={extract_time:.2f}s")
                         print(f"[Grasp-Inference] Results extracted: {extract_time:.2f}s")
@@ -623,10 +623,10 @@ class GraspModule:
                         pc_batch = None
                         del pred
                         pred = None
-            
-            # 同步 CUDA 操作
+                
+                # 同步 CUDA 操作
                 sync_start = time.time()
-            torch.cuda.current_stream().wait_stream(self._stream)
+                torch.cuda.current_stream().wait_stream(self._stream)
                 sync_time = time.time() - sync_start
                 if sync_time > 0.1:
                     logger.warning(f"[Grasp推理] CUDA同步耗时{sync_time:.2f}s")

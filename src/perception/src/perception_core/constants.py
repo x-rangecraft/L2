@@ -41,6 +41,17 @@ DEPTH_GRADIENT_THRESHOLD = 50.0       # 深度梯度阈值（mm）
 DEPTH_OUTLIER_FILTER_ENABLED = True   # 是否启用深度异常值过滤
 DEPTH_OUTLIER_MAD_RATIO = 3.5         # MAD 倍数阈值
 
+# 深度图预处理（在反投影前）
+DEPTH_MEDIAN_FILTER_ENABLED = True    # 是否启用深度图中值滤波
+DEPTH_MEDIAN_FILTER_SIZE = 5         # 中值滤波核大小（必须是奇数，3/5/7）
+
+# 3D空间统计过滤（增强版MAD过滤）
+DEPTH_3D_MAD_FILTER_ENABLED = True    # 是否启用3D空间MAD过滤（替代仅Z轴过滤）
+DEPTH_3D_MAD_RATIO = 3.0              # 3D空间MAD倍数阈值（通常比Z轴更严格）
+
+# 加权质心计算
+WEIGHTED_CENTER_ENABLED = True        # 是否启用加权质心（距离加权）
+
 # =============================================================================
 # 向量相关
 # =============================================================================

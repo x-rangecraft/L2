@@ -250,7 +250,7 @@ pointnet2_ops/
 sensor_msgs/PointCloud2 point_cloud    # [必填] 点云数据（相机坐标系）
 sensor_msgs/Image mask                 # [可选] 分割掩码，限定目标区域
 int32 max_candidates                   # [可选] 最大候选数量，默认 50
-float32 min_confidence                 # [可选] 最小置信度阈值，默认 0.5
+float32 min_confidence                 # [可选] 最小置信度阈值，默认 0.1（Contact-GraspNet输出范围约0-0.2）
 ---
 #==================== Response ====================
 bool success                           # 是否成功
@@ -322,7 +322,7 @@ class GraspModule:
         point_cloud: np.ndarray,
         mask: Optional[np.ndarray] = None,
         max_candidates: int = 50,
-        min_confidence: float = 0.5
+        min_confidence: float = 0.1  # Contact-GraspNet输出范围约0-0.2
     ) -> List[GraspCandidate]:
         """
         执行抓取推理
@@ -370,7 +370,7 @@ async def _grasp_callback(
         # 解析可选参数
         mask = self._parse_mask(request.mask) if request.mask else None
         max_candidates = request.max_candidates or 50
-        min_confidence = request.min_confidence or 0.5
+        min_confidence = request.min_confidence if request.min_confidence > 0 else 0.1  # Contact-GraspNet输出范围约0-0.2
         
         # 执行推理
         candidates = await self._grasp_module.predict(
@@ -419,7 +419,7 @@ async def _grasp_callback(
 grasp:
   enabled: true
   model_path: "models/contact_graspnet.pth"
-  min_confidence: 0.5
+  min_confidence: 0.1  # Contact-GraspNet输出范围约0-0.2
   max_candidates: 50
   use_fp16: false  # 后续可开启
   timeout: 5.0     # 推理超时（秒）
@@ -776,7 +776,7 @@ class PerceptionNode(Node):
             point_cloud = self._parse_pointcloud(request.point_cloud)
             mask = self._parse_mask(request.mask) if request.mask.data else None
             max_candidates = request.max_candidates if request.max_candidates > 0 else 50
-            min_confidence = request.min_confidence if request.min_confidence > 0 else 0.5
+            min_confidence = request.min_confidence if request.min_confidence > 0 else 0.1  # Contact-GraspNet输出范围约0-0.2
             
             # ⚠️ 关键：同步等待异步结果
             # 方式1：使用 AsyncWorker 的 awaitable（推荐）

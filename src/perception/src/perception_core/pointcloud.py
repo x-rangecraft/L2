@@ -29,6 +29,11 @@ from .constants import (
     DEPTH_GRADIENT_THRESHOLD,
     DEPTH_OUTLIER_FILTER_ENABLED,
     DEPTH_OUTLIER_MAD_RATIO,
+    DEPTH_MEDIAN_FILTER_ENABLED,
+    DEPTH_MEDIAN_FILTER_SIZE,
+    DEPTH_3D_MAD_FILTER_ENABLED,
+    DEPTH_3D_MAD_RATIO,
+    WEIGHTED_CENTER_ENABLED,
 )
 from .error_codes import PerceptionError, ErrorCode
 from .async_worker import AsyncWorker
@@ -94,11 +99,23 @@ class PointCloudModule:
         self._depth_outlier_filter_enabled = config.get('depth_outlier_filter_enabled', DEPTH_OUTLIER_FILTER_ENABLED)
         self._depth_outlier_mad_ratio = config.get('depth_outlier_mad_ratio', DEPTH_OUTLIER_MAD_RATIO)
         
+        # 深度图预处理
+        self._depth_median_filter_enabled = config.get('depth_median_filter_enabled', DEPTH_MEDIAN_FILTER_ENABLED)
+        self._depth_median_filter_size = config.get('depth_median_filter_size', DEPTH_MEDIAN_FILTER_SIZE)
+        
+        # 3D空间MAD过滤（增强版）
+        self._depth_3d_mad_filter_enabled = config.get('depth_3d_mad_filter_enabled', DEPTH_3D_MAD_FILTER_ENABLED)
+        self._depth_3d_mad_ratio = config.get('depth_3d_mad_ratio', DEPTH_3D_MAD_RATIO)
+        
+        # 加权质心
+        self._weighted_center_enabled = config.get('weighted_center_enabled', WEIGHTED_CENTER_ENABLED)
+        
         logger.info(
-            f"PointCloudModule 配置已加载 - 三重过滤: "
-            f"[1]腐蚀={self._mask_erosion_pixels}px, "
-            f"[2]梯度={self._depth_gradient_filter_enabled}(阈值={self._depth_gradient_threshold}mm), "
-            f"[3]MAD={self._depth_outlier_filter_enabled}(ratio={self._depth_outlier_mad_ratio})"
+            f"PointCloudModule 配置已加载 - 三项优化: "
+            f"[优化1]深度图预处理={self._depth_median_filter_enabled}(size={self._depth_median_filter_size}), "
+            f"[优化2]3D空间MAD={self._depth_3d_mad_filter_enabled}(ratio={self._depth_3d_mad_ratio}), "
+            f"[优化3]加权质心={self._weighted_center_enabled} | "
+            f"基础过滤: [腐蚀={self._mask_erosion_pixels}px, 梯度={self._depth_gradient_filter_enabled}]"
         )
     
     @property
@@ -231,8 +248,22 @@ class PointCloudModule:
         if depth_image.ndim == 3:
             depth_image = depth_image[:, :, 0]
         
-        # 转换深度图类型
-        depth = depth_image.astype(np.float32)
+        # =====================================================================
+        # 优化1: 深度图预处理 - 中值滤波（在反投影前减少噪声）
+        # =====================================================================
+        if self._depth_median_filter_enabled:
+            # 转换为uint16进行中值滤波（OpenCV要求）
+            depth_uint16 = depth_image.astype(np.uint16)
+            # 确保核大小为奇数
+            ksize = self._depth_median_filter_size
+            if ksize % 2 == 0:
+                ksize += 1
+            depth_filtered = cv2.medianBlur(depth_uint16, ksize)
+            depth = depth_filtered.astype(np.float32)
+            logger.info(f"[优化1-深度图预处理] 中值滤波完成 (核大小={ksize})")
+        else:
+            # 转换深度图类型
+            depth = depth_image.astype(np.float32)
         
         # 获取掩码内的有效像素
         mask_bool = mask > 0
@@ -306,17 +337,27 @@ class PointCloudModule:
         points_before_mad_filter = len(points)
         
         # =====================================================================
-        # 三重过滤 Step 3: 中位数+MAD 统计过滤（排除 Z 轴异常值）
+        # 优化2: 3D空间MAD过滤（排除空间异常值）
         # =====================================================================
-        if self._edge_filter_enabled and self._depth_outlier_filter_enabled and len(points) > 0:
-            points = self._filter_depth_outliers_mad(points, self._depth_outlier_mad_ratio)
-            points_after_mad_filter = len(points)
-            logger.info(
-                f"[三重过滤 3/3] 中位数+MAD 过滤: {points_before_mad_filter:,} -> {points_after_mad_filter:,} 点 "
-                f"(排除 {points_before_mad_filter - points_after_mad_filter:,} Z轴异常点)"
-            )
-        else:
-            points_after_mad_filter = points_before_mad_filter
+        points_after_mad_filter = points_before_mad_filter
+        
+        if len(points) > 0:
+            # 优先使用3D空间MAD过滤（更全面，同时检测X/Y/Z方向）
+            if self._depth_3d_mad_filter_enabled:
+                points = self._filter_3d_outliers_mad(points, self._depth_3d_mad_ratio)
+                points_after_mad_filter = len(points)
+                logger.info(
+                    f"[优化2-3D空间MAD过滤] {points_before_mad_filter:,} -> {points_after_mad_filter:,} 点 "
+                    f"(排除 {points_before_mad_filter - points_after_mad_filter:,} 空间异常点, ratio={self._depth_3d_mad_ratio})"
+                )
+            # 否则使用Z轴MAD过滤（向后兼容）
+            elif self._edge_filter_enabled and self._depth_outlier_filter_enabled:
+                points = self._filter_depth_outliers_mad(points, self._depth_outlier_mad_ratio)
+                points_after_mad_filter = len(points)
+                logger.info(
+                    f"[三重过滤 3/3] Z轴MAD过滤: {points_before_mad_filter:,} -> {points_after_mad_filter:,} 点 "
+                    f"(排除 {points_before_mad_filter - points_after_mad_filter:,} Z轴异常点)"
+                )
         
         if len(points) < self._min_point_count:
             raise PerceptionError(
@@ -324,10 +365,16 @@ class PointCloudModule:
                 f"过滤后有效点数 {len(points)} < {self._min_point_count}"
             )
         
-        # 计算质心
-        center_x = float(np.mean(points[:, 0]))
-        center_y = float(np.mean(points[:, 1]))
-        center_z = float(np.mean(points[:, 2]))
+        # =====================================================================
+        # 优化3: 加权质心计算（提升质心精度）
+        # =====================================================================
+        if self._weighted_center_enabled:
+            center_x, center_y, center_z = self._compute_weighted_center(points)
+            logger.debug(f"[优化3-加权质心] 使用距离加权计算质心")
+        else:
+            center_x = float(np.mean(points[:, 0]))
+            center_y = float(np.mean(points[:, 1]))
+            center_z = float(np.mean(points[:, 2]))
         
         # 计算边界框
         bbox_min = (float(np.min(points[:, 0])), float(np.min(points[:, 1])), float(np.min(points[:, 2])))
@@ -482,6 +529,93 @@ class PointCloudModule:
         )
         
         return filtered_points
+    
+    def _filter_3d_outliers_mad(self, points: np.ndarray, mad_ratio: float) -> np.ndarray:
+        """
+        使用3D空间MAD（中位数绝对偏差）过滤空间异常值
+        
+        相比仅Z轴过滤，3D空间MAD能同时检测X、Y、Z方向的异常点
+        通过计算每个点到质心的3D距离，然后对距离做MAD过滤
+        
+        Args:
+            points: Nx3 点云数组
+            mad_ratio: MAD 倍数阈值（推荐 2.5-3.5）
+            
+        Returns:
+            过滤后的点云数组
+        """
+        if len(points) == 0:
+            return points
+        
+        # 使用中位数作为初始质心（比均值更鲁棒）
+        center_3d = np.median(points, axis=0)
+        
+        # 计算每个点到质心的3D欧氏距离
+        distances = np.linalg.norm(points - center_3d, axis=1)
+        
+        # 计算距离的中位数
+        dist_median = np.median(distances)
+        
+        # 计算距离的MAD（中位数绝对偏差）
+        dist_mad = np.median(np.abs(distances - dist_median))
+        
+        if dist_mad < 1e-6:
+            # MAD 太小，所有点距离几乎相同，不过滤
+            return points
+        
+        # 计算有效距离范围
+        dist_max_valid = dist_median + mad_ratio * dist_mad
+        
+        # 过滤：保留距离在有效范围内的点
+        valid_mask = distances <= dist_max_valid
+        filtered_points = points[valid_mask]
+        
+        logger.debug(
+            f"[3D-MAD过滤] 距离范围: [0, {dist_max_valid:.4f}]m "
+            f"(中位数={dist_median:.4f}m, MAD={dist_mad:.4f}m, ratio={mad_ratio}), "
+            f"过滤后保留 {len(filtered_points)}/{len(points)} 点"
+        )
+        
+        return filtered_points
+    
+    def _compute_weighted_center(self, points: np.ndarray) -> Tuple[float, float, float]:
+        """
+        计算加权质心
+        
+        使用距离加权：距离初始质心越近的点权重越大
+        这样可以减少异常点对质心计算的影响
+        
+        Args:
+            points: Nx3 点云数组
+            
+        Returns:
+            加权质心坐标 (x, y, z)
+        """
+        if len(points) == 0:
+            return 0.0, 0.0, 0.0
+        
+        # 使用中位数作为初始质心（比均值更鲁棒）
+        center_initial = np.median(points, axis=0)
+        
+        # 计算每个点到初始质心的距离
+        distances = np.linalg.norm(points - center_initial, axis=1)
+        
+        # 计算权重：距离越近权重越大（使用倒数，加小值避免除零）
+        # 也可以使用高斯权重：weights = np.exp(-distances**2 / (2 * sigma**2))
+        weights = 1.0 / (distances + 1e-6)
+        
+        # 归一化权重
+        weights = weights / np.sum(weights)
+        
+        # 计算加权平均
+        center_weighted = np.average(points, axis=0, weights=weights)
+        
+        logger.debug(
+            f"[加权质心] 初始质心={center_initial}, 加权质心={center_weighted}, "
+            f"平均距离={np.mean(distances):.4f}m"
+        )
+        
+        return float(center_weighted[0]), float(center_weighted[1]), float(center_weighted[2])
     
     def _create_pointcloud2(self, points: np.ndarray, frame_id: str) -> PointCloud2:
         """
