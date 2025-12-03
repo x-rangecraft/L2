@@ -21,8 +21,8 @@ class ErrorCode(IntEnum):
     # =========================================================================
     # 1xxx - 初始化错误
     # =========================================================================
-    NANOSAM_ENGINE_LOAD_FAILED = 1001       # NanoSAM 引擎加载失败
-    NANOSAM_DECODER_LOAD_FAILED = 1002      # NanoSAM 解码器加载失败
+    SAM2_ENGINE_LOAD_FAILED = 1001          # SAM2 引擎加载失败
+    SAM2_MODEL_LOAD_FAILED = 1002           # SAM2 模型加载失败
     CLIP_MODEL_LOAD_FAILED = 1003           # CLIP 模型加载失败
     DINO_MODEL_LOAD_FAILED = 1004           # DINOv3 模型加载失败
     FAISS_INDEX_LOAD_FAILED = 1005          # FAISS 索引加载失败
@@ -40,8 +40,8 @@ class ErrorCode(IntEnum):
     SEGMENT_RESULT_EMPTY = 2004             # 分割结果为空（未检测到目标）
     CONFIDENCE_TOO_LOW = 2005               # 分割置信度过低
     MASK_AREA_TOO_SMALL = 2006              # 掩码面积过小
-    NANOSAM_INFERENCE_TIMEOUT = 2007        # NanoSAM 推理超时
-    NANOSAM_INFERENCE_ERROR = 2008          # NanoSAM 推理异常
+    SAM2_INFERENCE_TIMEOUT = 2007           # SAM2 推理超时
+    SAM2_INFERENCE_ERROR = 2008             # SAM2 推理异常
     MASK_AREA_TOO_LARGE = 2009              # 掩码面积过大
     
     # =========================================================================
@@ -103,8 +103,8 @@ class ErrorCode(IntEnum):
 # 错误码描述映射
 ERROR_MESSAGES = {
     # 1xxx - 初始化错误
-    ErrorCode.NANOSAM_ENGINE_LOAD_FAILED: "NanoSAM 引擎加载失败",
-    ErrorCode.NANOSAM_DECODER_LOAD_FAILED: "NanoSAM 解码器加载失败",
+    ErrorCode.SAM2_ENGINE_LOAD_FAILED: "SAM2 引擎加载失败",
+    ErrorCode.SAM2_MODEL_LOAD_FAILED: "SAM2 模型加载失败",
     ErrorCode.CLIP_MODEL_LOAD_FAILED: "CLIP 模型加载失败",
     ErrorCode.DINO_MODEL_LOAD_FAILED: "DINOv3 模型加载失败",
     ErrorCode.FAISS_INDEX_LOAD_FAILED: "FAISS 索引加载失败",
@@ -120,8 +120,8 @@ ERROR_MESSAGES = {
     ErrorCode.SEGMENT_RESULT_EMPTY: "分割结果为空（未检测到目标）",
     ErrorCode.CONFIDENCE_TOO_LOW: "分割置信度过低",
     ErrorCode.MASK_AREA_TOO_SMALL: "掩码面积过小",
-    ErrorCode.NANOSAM_INFERENCE_TIMEOUT: "NanoSAM 推理超时",
-    ErrorCode.NANOSAM_INFERENCE_ERROR: "NanoSAM 推理异常",
+    ErrorCode.SAM2_INFERENCE_TIMEOUT: "SAM2 推理超时",
+    ErrorCode.SAM2_INFERENCE_ERROR: "SAM2 推理异常",
     ErrorCode.MASK_AREA_TOO_LARGE: "掩码面积过大",
     
     # 3xxx - 点云错误

@@ -9,11 +9,8 @@ from ament_index_python.packages import get_package_share_directory
 from rclpy.action import ActionServer, CancelResponse, GoalResponse
 from rclpy.action.server import ServerGoalHandle
 from rclpy.node import Node as RclpyNode
-from geometry_msgs.msg import Point
-from builtin_interfaces.msg import Time as TimeMsg
 
 from robot_skill.action import GraspRecord, SkillSequence
-from tf_tools.srv import TransformPoints
 from robot_skill_core.constants import (
     DEFAULT_APPROACH_DISTANCE,
     DEFAULT_GRIPPER_WIDTH_MARGIN,
@@ -23,12 +20,7 @@ from robot_skill_core.constants import (
     SUPPORTED_STEP_TYPES,
     JOINT_NAME_ORDER,
 )
-
-# TF 坐标系配置
-CAMERA_FRAME = 'camera_color_optical_frame'
-ROBOT_BASE_FRAME = 'base_link'
-TF_TRANSFORM_SERVICE = '/tf_tools/service/transform_points'
-from robot_skill_core.grasp_planner import GraspPlanner
+from robot_skill_core.grasp_executor import GraspExecutor
 from robot_skill_core.skill_loader import SkillLibrary, SkillStep
 from robot_skill_core.step_executor import StepExecutor
 
@@ -59,13 +51,15 @@ class RobotSkill(RclpyNode):
         # Shared step executor
         self._step_executor = StepExecutor(self)
 
-        # Grasp planner for dynamic grasp operations
+        # Grasp executor for dynamic grasp operations
         # Get observe step from common actions (single source of truth)
         observe_step = self._skill_library.get_common_action('move_record_observe')
-        self._grasp_planner = GraspPlanner(
+        self._grasp_executor = GraspExecutor(
+            node=self,
             observe_step=observe_step,
             approach_distance=DEFAULT_APPROACH_DISTANCE,
             gripper_width_margin=DEFAULT_GRIPPER_WIDTH_MARGIN,
+            max_gripper_width=DEFAULT_MAX_GRIPPER_WIDTH,
         )
 
         # Action Server 1: skill_sequence (YAML-defined skills)
@@ -87,9 +81,6 @@ class RobotSkill(RclpyNode):
             cancel_callback=self._grasp_cancel_callback,
             execute_callback=self._execute_grasp_record,
         )
-
-        # TF 转换服务客户端
-        self._tf_client = self.create_client(TransformPoints, TF_TRANSFORM_SERVICE)
 
         self.get_logger().info('robot_skill action servers ready')
 
@@ -264,11 +255,8 @@ class RobotSkill(RclpyNode):
     # GraspRecord Action callbacks
     # ------------------------------------------------------------------ #
     def _grasp_goal_callback(self, goal_request: GraspRecord.Goal) -> GoalResponse:
-        if not goal_request.boundary_points:
-            self.get_logger().warning('Rejecting grasp goal without boundary_points')
-            return GoalResponse.REJECT
-        if goal_request.max_gripper_width <= 0:
-            self.get_logger().warning('Rejecting grasp goal with invalid max_gripper_width')
+        if not goal_request.grasp_candidates:
+            self.get_logger().warning('Rejecting grasp goal without grasp_candidates')
             return GoalResponse.REJECT
         return GoalResponse.ACCEPT
 
@@ -276,123 +264,73 @@ class RobotSkill(RclpyNode):
         self.get_logger().info(f'Cancel requested for grasp_record {goal_handle.request.context_id}')
         return CancelResponse.ACCEPT
 
-    async def _transform_points_to_base(
-        self, points: List[Point]
-    ) -> List[Point] | None:
-        """
-        Transform points from camera frame to base_link frame.
-        
-        Args:
-            points: List of points in camera frame
-            
-        Returns:
-            List of points in base_link frame, or None if transform failed
-        """
-        if not self._tf_client.service_is_ready():
-            self.get_logger().warning(
-                f'TF service {TF_TRANSFORM_SERVICE} not available, waiting...'
-            )
-            if not self._tf_client.wait_for_service(timeout_sec=5.0):
-                self.get_logger().error(
-                    f'TF service {TF_TRANSFORM_SERVICE} not available after 5s'
-                )
-                return None
-
-        # Build request
-        request = TransformPoints.Request()
-        request.source_frame = CAMERA_FRAME
-        request.target_frame = ROBOT_BASE_FRAME
-        request.stamp = TimeMsg()  # Use latest transform (sec=0, nanosec=0)
-        request.points_in = points
-
-        try:
-            future = self._tf_client.call_async(request)
-            # Wait for result with timeout
-            rclpy.spin_until_future_complete(self, future, timeout_sec=5.0)
-            
-            if not future.done():
-                self.get_logger().error('TF transform service call timed out')
-                return None
-                
-            response = future.result()
-            if not response.success:
-                self.get_logger().error(f'TF transform failed: {response.message}')
-                return None
-                
-            return list(response.points_out)
-            
-        except Exception as e:
-            self.get_logger().error(f'TF transform exception: {e}')
-            return None
-
     async def _execute_grasp_record(
         self, goal_handle: ServerGoalHandle
     ) -> GraspRecord.Result:
-        """Execute dynamic grasp-observe-place operation."""
+        """Execute dynamic grasp-observe-place operation using pre-computed grasp candidates."""
         req = goal_handle.request
         context_id = req.context_id
-        max_gripper_width = req.max_gripper_width or DEFAULT_MAX_GRIPPER_WIDTH
+        candidates = list(req.grasp_candidates)
 
         self.get_logger().info(
-            f"Executing grasp_record: {len(req.boundary_points)} points, "
-            f"max_width={max_gripper_width:.3f}m, context={context_id}"
+            f"Executing grasp_record: {len(candidates)} candidates, context={context_id}"
         )
 
-        # Phase 0: Transform points from camera frame to base_link
-        planning_feedback = GraspRecord.Feedback()
-        planning_feedback.phase = 'planning'
-        planning_feedback.step_index = 0
-        planning_feedback.step_desc = 'Transforming coordinates'
-        planning_feedback.progress = 0.0
-        goal_handle.publish_feedback(planning_feedback)
+        # Phase 1: TF 转换 + IK 验证
+        tf_feedback = GraspRecord.Feedback()
+        tf_feedback.phase = 'tf_converting'
+        tf_feedback.step_index = 0
+        tf_feedback.step_desc = 'Transforming candidate poses to base_link'
+        tf_feedback.progress = 0.0
+        tf_feedback.current_candidate_index = 0
+        goal_handle.publish_feedback(tf_feedback)
 
-        transformed_points = await self._transform_points_to_base(
-            list(req.boundary_points)
-        )
-        if transformed_points is None:
-            result = GraspRecord.Result()
-            result.success = False
-            result.error_code = 'TF_FAILED'
-            result.message = 'Failed to transform points from camera to base_link'
-            result.steps_executed = 0
-            goal_handle.abort()
-            return result
+        # 使用 GraspExecutor 查找可执行的候选
+        ik_feedback = GraspRecord.Feedback()
+        ik_feedback.phase = 'ik_testing'
+        ik_feedback.step_index = 0
+        ik_feedback.step_desc = 'Validating IK solutions'
+        ik_feedback.progress = 0.1
+        ik_feedback.current_candidate_index = 0
+        goal_handle.publish_feedback(ik_feedback)
 
-        self.get_logger().info(
-            f"Points transformed: {len(transformed_points)} points in base_link frame"
-        )
+        candidate_idx, grasp_pose, pre_grasp_pose, gripper_width = \
+            await self._grasp_executor.find_executable_candidate(candidates)
 
-        # Phase 1: Planning
-        planning_feedback.step_desc = 'Computing grasp pose'
-        planning_feedback.progress = 0.1
-        goal_handle.publish_feedback(planning_feedback)
-
-        try:
-            steps = self._grasp_planner.build_grasp_record_steps(
-                transformed_points,
-                max_gripper_width,
+        if candidate_idx < 0:
+            self.get_logger().error(
+                f'All {len(candidates)} candidates failed IK validation'
             )
-        except ValueError as exc:
-            self.get_logger().error(f'Grasp planning failed: {exc}')
             result = GraspRecord.Result()
             result.success = False
-            result.error_code = 'PLANNING_FAILED'
-            result.message = str(exc)
+            result.error_code = 'ALL_IK_FAILED'
+            result.message = f'尝试了 {len(candidates)} 个候选，均无法解算 IK'
             result.steps_executed = 0
+            result.candidate_used = -1
             goal_handle.abort()
             return result
 
+        self.get_logger().info(
+            f'Using candidate {candidate_idx} (confidence={candidates[candidate_idx].confidence:.3f}), '
+            f'gripper_width={gripper_width:.3f}m'
+        )
+
+        # Phase 2: 生成步骤序列
+        steps = self._grasp_executor.build_grasp_steps(
+            grasp_pose, pre_grasp_pose, gripper_width
+        )
         total_steps = len(steps)
         self.get_logger().info(f'Grasp plan generated: {total_steps} steps')
 
-        # Phase 2: Executing
+        # Phase 3: 执行步骤
         def on_progress(index: int, step: SkillStep) -> None:
-            progress = float(index) / float(total_steps) if total_steps else 0.0
+            progress = 0.2 + 0.8 * float(index) / float(total_steps) if total_steps else 0.2
             feedback = GraspRecord.Feedback()
             feedback.phase = 'executing'
             feedback.step_index = index
             feedback.step_desc = step.desc
             feedback.progress = progress
+            feedback.current_candidate_index = candidate_idx
             goal_handle.publish_feedback(feedback)
 
         success, code, message, steps_executed = await self._step_executor.execute_steps(
@@ -406,6 +344,7 @@ class RobotSkill(RclpyNode):
         result.error_code = code
         result.message = message
         result.steps_executed = steps_executed
+        result.candidate_used = candidate_idx
 
         if success:
             goal_handle.succeed()
@@ -430,4 +369,3 @@ def main() -> None:
 
 
 __all__ = ['RobotSkill', 'main']
-

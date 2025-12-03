@@ -1,17 +1,18 @@
 # Goal
-geometry_msgs/Point[] boundary_points     # Object boundary point cloud
-float32 max_gripper_width                 # Maximum gripper opening width (meters)
-string context_id                         # Context identifier for tracking
+perception/GraspCandidate[] grasp_candidates  # 抓取候选数组（相机坐标系，按置信度降序）
+string context_id                             # 任务上下文标识
 ---
 # Result
 bool success
 string error_code
 string message
 int32 steps_executed
+int32 candidate_used                          # 实际使用的候选索引（-1 表示全部失败）
 ---
 # Feedback
-string phase                              # Current phase: planning / executing
+string phase                                  # 当前阶段: tf_converting / ik_testing / executing
 int32 step_index
 string step_desc
 float32 progress
+int32 current_candidate_index                 # 当前尝试的候选索引
 

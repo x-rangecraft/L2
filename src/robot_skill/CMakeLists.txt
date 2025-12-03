@@ -6,6 +6,7 @@ find_package(ament_cmake_python REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(builtin_interfaces REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
+find_package(perception REQUIRED)
 
 ament_python_install_package(
   robot_skill_core
@@ -24,7 +25,7 @@ install(PROGRAMS scripts/robot_skill_node.py
 rosidl_generate_interfaces(${PROJECT_NAME}
   "action/SkillSequence.action"
   "action/GraspRecord.action"
-  DEPENDENCIES geometry_msgs builtin_interfaces
+  DEPENDENCIES geometry_msgs builtin_interfaces perception
 )
 
 if(BUILD_TESTING)

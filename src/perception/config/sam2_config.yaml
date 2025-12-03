@@ -1,0 +1,46 @@
+# SAM2 Segmentation Configuration for L2 Perception
+
+sam2:
+  # Model settings
+  model_type: "hiera_small"  # hiera_tiny, hiera_small, hiera_large
+  model_path: "sam2.1_hiera_small.pt"
+  config_path: "sam2.1/sam2.1_hiera_s"
+  
+  # TensorRT acceleration - ENABLED with 1024x1024 multi-output engine
+  use_tensorrt: true
+  tensorrt_engine_path: "sam2_encoder_multi_1024_fp16.engine"
+  tensorrt_precision: "fp16"  # fp32, fp16, int8
+  
+  # Image processing
+  image_size: [1024, 1024]  # Input image size (matches TensorRT engine)
+  normalize_mean: [0.485, 0.456, 0.406]
+  normalize_std: [0.229, 0.224, 0.225]
+  
+  # Segmentation parameters
+  confidence_threshold: 0.5
+  stability_score_threshold: 0.95
+  
+  # Prompt encoding
+  point_prompt:
+    default_label: 1  # 1 for foreground, 0 for background
+    multimask_output: false  # Generate multiple masks or single best
+  
+  # Feature caching
+  cache_features: true
+  cache_timeout: 5.0  # seconds, re-encode if image unchanged for this long
+  
+  # Post-processing
+  post_process:
+    morphology:
+      enabled: true
+      kernel_size: 5
+      operation: "close"  # open, close, dilate, erode
+    largest_component: true  # Keep only largest connected component
+    smooth_boundary: true
+    smooth_kernel_size: 3
+  
+  # Performance
+  device: "cuda"
+  num_workers: 4
+  prefetch: true
+

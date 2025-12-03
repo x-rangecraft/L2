@@ -549,9 +549,6 @@
         </div>
         
         <div class="action-bar" id="action-bar">
-            <button class="action-btn btn-grasp" id="btn-grasp">
-                <span>🤖</span> 抓取
-            </button>
             <button class="action-btn btn-pose" id="btn-pose">
                 <span>📐</span> 姿态测算
             </button>
@@ -724,7 +721,6 @@ function initializeApp() {
         processingOverlay: document.getElementById('processing-overlay'),
         processingText: document.getElementById('processing-text'),
         actionBar: document.getElementById('action-bar'),
-        btnGrasp: document.getElementById('btn-grasp'),
         btnPose: document.getElementById('btn-pose'),
         btnRecord: document.getElementById('btn-record'),
         btnSample: document.getElementById('btn-sample'),
@@ -792,9 +788,6 @@ function initializeSocketIO() {
 function bindEvents() {
     // 图像点击 - 触发分割
     elements.imageContainer.addEventListener('click', handleImageClick);
-    
-    // 抓取按钮
-    elements.btnGrasp.addEventListener('click', handleGrasp);
     
     // 姿态测算按钮
     elements.btnPose.addEventListener('click', handleGraspPose);
@@ -1219,7 +1212,6 @@ function setProcessing(isProcessing, text = '处理中...') {
     AppState.processing = isProcessing;
     elements.processingOverlay.classList.toggle('active', isProcessing);
     elements.processingText.textContent = text;
-    elements.btnGrasp.disabled = isProcessing;
     elements.btnPose.disabled = isProcessing;
     elements.btnRecord.disabled = isProcessing;
     elements.btnCancel.disabled = isProcessing;

@@ -81,9 +81,12 @@ ID_MAPPING_FILENAME = 'id_mapping.json'
 # 模型配置
 # =============================================================================
 CLIP_MODEL_NAME = 'openai/clip-vit-base-patch32'
-NANOSAM_ENCODER_FILENAME = 'nanosam_image_encoder.engine'
-NANOSAM_DECODER_FILENAME = 'nanosam_mask_decoder.engine'
-DINO_MODEL_FILENAME = 'dinov2_vits14.pth'
+DINO_MODEL_FILENAME = 'dinov3_vits16_pretrain_lvd1689m-08c60483.pth'
+
+# SAM2 配置
+SAM2_CONFIG_FILENAME = 'sam2_config.yaml'
+SAM2_MODEL_FILENAME = 'sam2.1_hiera_small.pt'
+SAM2_ENGINE_FILENAME = 'sam2_encoder_multi_1024_fp16.engine'
 
 # =============================================================================
 # 抓取相关
@@ -93,7 +96,7 @@ GRASP_CONFIG_FILENAME = 'config.yaml'
 DEFAULT_MAX_CANDIDATES = 50           # 默认最大抓取候选数量
 DEFAULT_MIN_GRASP_CONFIDENCE = 0.5    # 默认最小抓取置信度
 DEFAULT_NUM_INPUT_POINTS = 20000      # 点云输入点数
-TIMEOUT_GRASP = 5.0                   # 抓取推理超时（秒）
+TIMEOUT_GRASP = 10.0                  # 抓取推理超时（秒）- 增加到10秒以应对内存不足时的慢速推理
 Z_RANGE_MIN = 0.2                     # 点云 Z 轴最小距离（米）
 Z_RANGE_MAX = 1.0                     # 点云 Z 轴最大距离（米）
 

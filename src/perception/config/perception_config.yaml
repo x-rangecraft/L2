@@ -1,11 +1,10 @@
 # Perception Node 配置文件
 
-# 分割模块配置
+# 分割模块配置 (SAM2)
 segmentation:
-  engine_path: "models/nanosam_image_encoder.engine"
-  decoder_path: "models/nanosam_mask_decoder.engine"
+  config_path: "config/sam2_config.yaml"
+  models_dir: "models"
   confidence_threshold: 0.5
-  warmup_iterations: 1
 
 # 点云模块配置
 pointcloud:

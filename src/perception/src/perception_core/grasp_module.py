@@ -153,6 +153,8 @@ class GraspModule:
         
         这确保 CUDA context 在正确的线程中创建
         """
+        start_time = time.time()
+        
         # 检查 PyTorch 是否可用
         if not TORCH_AVAILABLE:
             raise PerceptionError(
@@ -174,8 +176,34 @@ class GraspModule:
         # ⚠️ 必须：禁用 cuDNN（Jetson 兼容性）
         torch.backends.cudnn.enabled = False
         
+        # ⚠️ 注意：内存分配配置必须在导入torch之前设置才有效
+        # 这里只是确保配置存在（应该在入口脚本中已设置）
+        # 如果未设置，尝试设置（虽然可能无效）
+        if 'PYTORCH_CUDA_ALLOC_CONF' not in os.environ:
+            logger.warning("PYTORCH_CUDA_ALLOC_CONF未在导入torch前设置，内存配置可能无效")
+            os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'max_split_size_mb:128,expandable_segments:False'
+        else:
+            logger.info(f"PyTorch CUDA内存配置: {os.environ.get('PYTORCH_CUDA_ALLOC_CONF')}")
+        
         # ⚠️ 必须：创建独立的 CUDA Stream
         self._stream = torch.cuda.Stream(device=self._device)
+        
+        # 清理初始化前的缓存并记录内存状态
+        try:
+            if torch.cuda.is_available():
+                allocated_init = torch.cuda.memory_allocated() / 1024**2
+                reserved_init = torch.cuda.memory_reserved() / 1024**2
+                total_init = torch.cuda.get_device_properties(0).total_memory / 1024**2
+                logger.info(
+                    f"[GPU内存] GraspModule初始化前: "
+                    f"已分配={allocated_init:.1f}MB, "
+                    f"已保留={reserved_init:.1f}MB, "
+                    f"总计={total_init:.1f}MB"
+                )
+            
+            torch.cuda.empty_cache()
+        except Exception as e:
+            logger.warning(f"初始化前清理缓存失败（可忽略）: {e}")
         
         # 解析模型路径
         model_path = self._resolve_model_path(
@@ -205,13 +233,20 @@ class GraspModule:
             self._model_config = yaml.safe_load(f)
         
         # 加载模型
+        load_start = time.time()
         self._load_model(str(model_path))
+        load_time = time.time() - load_start
+        logger.info(f"Contact-GraspNet 模型加载完成 (耗时={load_time:.2f}s)")
         
         # Warmup
+        warmup_start = time.time()
         self._warmup()
+        warmup_time = time.time() - warmup_start
+        logger.info(f"Contact-GraspNet warmup 完成 (耗时={warmup_time:.2f}s)")
         
         self._ready = True
-        logger.info("GraspModule 初始化完成")
+        total_time = time.time() - start_time
+        logger.info(f"GraspModule 初始化完成 (总耗时={total_time:.2f}s)")
         return True
     
     def _resolve_model_path(self, path_str: str) -> Path:
@@ -237,7 +272,9 @@ class GraspModule:
     def _load_model(self, model_path: str):
         """加载 Contact-GraspNet 模型"""
         # 添加 external 路径到 sys.path
-        external_dir = Path(__file__).parent.parent.parent.parent.parent / 'external'
+        # 使用 .resolve() 解析符号链接，确保从源代码目录计算路径
+        source_file = Path(__file__).resolve()
+        external_dir = source_file.parent.parent.parent.parent.parent / 'external'
         contact_graspnet_dir = external_dir / 'contact_graspnet_pytorch'
         
         if str(contact_graspnet_dir) not in sys.path:
@@ -291,12 +328,25 @@ class GraspModule:
                 with torch.cuda.stream(self._stream):
                     with torch.no_grad():
                         pc_batch = torch.from_numpy(dummy_pc[np.newaxis, :, :]).to(self._device)
-                        _ = self._model(pc_batch)
+                        pred = self._model(pc_batch)
+                        # 显式删除warmup的tensor
+                        del pc_batch
+                        del pred
                 torch.cuda.current_stream().wait_stream(self._stream)
             
+            # warmup后清理缓存
+            try:
+                torch.cuda.empty_cache()
+            except Exception as e:
+                logger.warning(f"Warmup后清理缓存失败（可忽略）: {e}")
             logger.info("Contact-GraspNet warmup 完成")
         except Exception as e:
             logger.warning(f"Contact-GraspNet warmup 失败: {e}")
+            # warmup失败后也尝试清理
+            try:
+                torch.cuda.empty_cache()
+            except Exception:
+                pass
     
     async def predict(
         self,
@@ -371,6 +421,8 @@ class GraspModule:
             min_confidence: 最小置信度
         """
         start_time = time.time()
+        logger.info(f"[Grasp推理] 开始推理: 点数={point_cloud.shape[0] if point_cloud is not None else 0}")
+        print(f"[Grasp-Inference] START: points={point_cloud.shape[0] if point_cloud is not None else 0}")
         
         # 验证输入
         if point_cloud is None or point_cloud.size == 0:
@@ -406,28 +458,208 @@ class GraspModule:
         # 预处理点云
         pc_processed, pc_mean = self._preprocess_point_cloud(pc)
         
-        # ⚠️ 必须：加锁保护模型访问
-        with self._model_lock:
-            with torch.cuda.stream(self._stream):
-                with torch.no_grad():
-                    # 转换为 batch tensor
-                    pc_batch = torch.from_numpy(
-                        pc_processed[np.newaxis, :, :]
-                    ).to(self._device)
-                    
-                    # 模型推理
-                    pred = self._model(pc_batch)
-                    
-                    # 提取结果
-                    pred_grasps = pred['pred_grasps_cam'].detach().cpu().numpy()
-                    pred_scores = pred['pred_scores'].detach().cpu().numpy()
-                    pred_points = pred['pred_points'].detach().cpu().numpy()
-                    offset_pred = pred['offset_pred'].detach().cpu().numpy()
+        # ⚠️ 推理前：激进的内存清理策略
+        # 1. 清理PyTorch缓存
+        # 2. 同步CUDA操作，确保所有操作完成
+        # 3. 重置内存统计（如果支持）
+        memory_before_cleanup = None
+        try:
+            if torch.cuda.is_available():
+                allocated_before = torch.cuda.memory_allocated() / 1024**2
+                reserved_before = torch.cuda.memory_reserved() / 1024**2
+                memory_before_cleanup = (allocated_before, reserved_before)
             
-            # 同步 CUDA 操作
-            torch.cuda.current_stream().wait_stream(self._stream)
+            # 同步所有CUDA操作
+            torch.cuda.synchronize()
+            # 清理缓存
+            torch.cuda.empty_cache()
+            # 尝试重置内存峰值统计（释放一些内部缓存）
+            if hasattr(torch.cuda, 'reset_peak_memory_stats'):
+                torch.cuda.reset_peak_memory_stats()
+        except Exception as e:
+            logger.warning(f"推理前清理缓存失败（可忽略）: {e}")
+        
+        # ⚠️ 详细的内存状态监控和日志（强制输出，即使NVML失败）
+        memory_info = {}
+        memory_query_failed = False
+        try:
+            if torch.cuda.is_available():
+                allocated = torch.cuda.memory_allocated() / 1024**2  # MB
+                reserved = torch.cuda.memory_reserved() / 1024**2    # MB
+                total = torch.cuda.get_device_properties(0).total_memory / 1024**2  # MB
+                free = total - reserved
+                
+                memory_info = {
+                    'allocated': allocated,
+                    'reserved': reserved,
+                    'total': total,
+                    'free': free
+                }
+                
+                # 计算清理效果
+                cleanup_effect = ""
+                if memory_before_cleanup:
+                    allocated_before, reserved_before = memory_before_cleanup
+                    allocated_freed = allocated_before - allocated
+                    reserved_freed = reserved_before - reserved
+                    cleanup_effect = f" (清理释放: 已分配-{allocated_freed:.1f}MB, 已保留-{reserved_freed:.1f}MB)"
+                
+                # ⚠️ 强制输出内存信息（使用error级别确保输出）
+                msg = (
+                    f"[GPU内存] 推理前状态: "
+                    f"已分配={allocated:.1f}MB, "
+                    f"已保留={reserved:.1f}MB, "
+                    f"总计={total:.1f}MB, "
+                    f"可用={free:.1f}MB"
+                    f"{cleanup_effect}"
+                )
+                logger.info(msg)
+                # 同时print确保输出（用于调试）
+                print(f"[GPU-MEM] {msg}")
+                
+                # 如果可用内存不足500MB，发出警告
+                if free < 500:
+                    logger.error(f"[GPU内存] ⚠️ 严重警告: 仅剩{free:.1f}MB可用，推理很可能失败！")
+                    print(f"[GPU-MEM-ERROR] 仅剩{free:.1f}MB可用！")
+                elif free < 1000:
+                    logger.warning(f"[GPU内存] ⚠️ 警告: 可用内存仅{free:.1f}MB，推理可能失败")
+                    print(f"[GPU-MEM-WARN] 可用内存仅{free:.1f}MB")
+        except Exception as e:
+            # NVML查询失败是正常的（Jetson上常见），但强制记录
+            memory_query_failed = True
+            error_msg = f"[GPU内存] ⚠️ 无法查询GPU内存状态（NVML可能不可用）: {e}"
+            logger.warning(error_msg)
+            print(f"[GPU-MEM-ERROR] {error_msg}")
+            memory_info = {'error': str(e)}
+        
+        # ⚠️ 必须：加锁保护模型访问
+        pc_batch = None
+        pred = None
+        inference_start_time = time.time()
+        try:
+            lock_start = time.time()
+            logger.debug(f"[Grasp推理] 等待模型锁...")
+            print(f"[Grasp-Inference] Waiting for model lock...")
+            
+            with self._model_lock:
+                lock_acquired_time = time.time() - lock_start
+                if lock_acquired_time > 0.1:
+                    logger.warning(f"[Grasp推理] 获取模型锁耗时{lock_acquired_time:.2f}s（可能被其他推理占用）")
+                    print(f"[Grasp-Inference-WARN] Lock acquired after {lock_acquired_time:.2f}s")
+                
+                logger.debug(f"[Grasp推理] 开始GPU推理...")
+                print(f"[Grasp-Inference] Starting GPU inference...")
+                
+                with torch.cuda.stream(self._stream):
+                    with torch.no_grad():
+                        # 转换为 batch tensor
+                        tensor_start = time.time()
+                        pc_batch = torch.from_numpy(
+                            pc_processed[np.newaxis, :, :]
+                        ).to(self._device)
+                        tensor_time = time.time() - tensor_start
+                        if tensor_time > 0.5:
+                            logger.warning(f"[Grasp推理] Tensor转换耗时{tensor_time:.2f}s（可能内存分配慢）")
+                            print(f"[Grasp-Inference-WARN] Tensor creation took {tensor_time:.2f}s")
+                        
+                        # 模型推理
+                        model_start = time.time()
+                        logger.debug(f"[Grasp推理] 执行模型前向传播...")
+                        print(f"[Grasp-Inference] Running model forward pass...")
+                        pred = self._model(pc_batch)
+                        model_time = time.time() - model_start
+                        logger.info(f"[Grasp推理] 模型推理完成，耗时={model_time:.2f}s")
+                        print(f"[Grasp-Inference] Model inference done: {model_time:.2f}s")
+                        
+                        # 提取结果到CPU（立即释放GPU内存）
+                        extract_start = time.time()
+                        pred_grasps = pred['pred_grasps_cam'].detach().cpu().numpy()
+                        pred_scores = pred['pred_scores'].detach().cpu().numpy()
+                        pred_points = pred['pred_points'].detach().cpu().numpy()
+                        offset_pred = pred['offset_pred'].detach().cpu().numpy()
+                        extract_time = time.time() - extract_start
+                        logger.debug(f"[Grasp推理] 结果提取完成，耗时={extract_time:.2f}s")
+                        print(f"[Grasp-Inference] Results extracted: {extract_time:.2f}s")
+                        
+                        # ⚠️ 显式删除GPU tensor，立即释放内存
+                        del pc_batch
+                        pc_batch = None
+                        del pred
+                        pred = None
+                
+                # 同步 CUDA 操作
+                sync_start = time.time()
+                torch.cuda.current_stream().wait_stream(self._stream)
+                sync_time = time.time() - sync_start
+                if sync_time > 0.1:
+                    logger.warning(f"[Grasp推理] CUDA同步耗时{sync_time:.2f}s")
+                    print(f"[Grasp-Inference-WARN] CUDA sync took {sync_time:.2f}s")
+                
+                inference_total_time = time.time() - inference_start_time
+                logger.info(f"[Grasp推理] GPU推理阶段总耗时={inference_total_time:.2f}s")
+                print(f"[Grasp-Inference] GPU inference total: {inference_total_time:.2f}s")
+        finally:
+            # ⚠️ 确保异常情况下也能清理GPU tensor
+            if pc_batch is not None:
+                try:
+                    del pc_batch
+                except Exception:
+                    pass
+            if pred is not None:
+                try:
+                    del pred
+                except Exception:
+                    pass
+            
+        # ⚠️ 推理后：清理GPU缓存，释放中间分配的内存
+        # 确保内存及时释放，避免累积导致OOM
+        memory_after_inference = None
+        try:
+            if torch.cuda.is_available() and not memory_query_failed:
+                try:
+                    allocated_after = torch.cuda.memory_allocated() / 1024**2
+                    reserved_after = torch.cuda.memory_reserved() / 1024**2
+                    memory_after_inference = (allocated_after, reserved_after)
+                except Exception:
+                    pass  # NVML可能失败，忽略
+            
+            torch.cuda.empty_cache()
+            
+            # 记录清理后的内存状态（强制输出）
+            if torch.cuda.is_available() and memory_info and not memory_query_failed:
+                try:
+                    allocated_final = torch.cuda.memory_allocated() / 1024**2
+                    reserved_final = torch.cuda.memory_reserved() / 1024**2
+                    total = memory_info.get('total', 0)
+                    free_final = total - reserved_final
+                    
+                    # 计算推理过程中的内存变化
+                    if memory_after_inference:
+                        allocated_after, reserved_after = memory_after_inference
+                        inference_allocated = allocated_after - memory_info.get('allocated', 0)
+                        inference_reserved = reserved_after - memory_info.get('reserved', 0)
+                        cleanup_freed = reserved_after - reserved_final
+                        
+                        msg = (
+                            f"[GPU内存] 推理后状态: "
+                            f"已分配={allocated_final:.1f}MB, "
+                            f"已保留={reserved_final:.1f}MB, "
+                            f"可用={free_final:.1f}MB | "
+                            f"推理占用: +{inference_allocated:.1f}MB(分配)/+{inference_reserved:.1f}MB(保留), "
+                            f"清理释放: {cleanup_freed:.1f}MB"
+                        )
+                        logger.info(msg)
+                        print(f"[GPU-MEM] {msg}")
+                except Exception as e:
+                    logger.debug(f"推理后无法查询内存状态: {e}")
+        except Exception as e:
+            logger.warning(f"推理后清理缓存失败（可忽略）: {e}")
         
         # 后处理
+        postprocess_start = time.time()
+        logger.debug(f"[Grasp推理] 开始后处理...")
+        print(f"[Grasp-Inference] Starting post-processing...")
+        
         candidates = self._postprocess_predictions(
             pred_grasps,
             pred_scores,
@@ -438,14 +670,20 @@ class GraspModule:
             min_confidence
         )
         
+        postprocess_time = time.time() - postprocess_start
+        logger.debug(f"[Grasp推理] 后处理完成，耗时={postprocess_time:.2f}s，候选数={len(candidates)}")
+        print(f"[Grasp-Inference] Post-processing done: {postprocess_time:.2f}s, candidates={len(candidates)}")
+        
         # 记录推理时间
         inference_time = (time.time() - start_time) * 1000
         self._inference_times.append(inference_time)
         
-        logger.debug(
-            f"抓取推理完成: {len(candidates)} 候选, "
-            f"推理时间={inference_time:.1f}ms, 点数={original_point_count}"
+        total_time = time.time() - start_time
+        logger.info(
+            f"[Grasp推理] 完成: {len(candidates)} 候选, "
+            f"推理时间={inference_time:.1f}ms, 总耗时={total_time:.2f}s, 点数={original_point_count}"
         )
+        print(f"[Grasp-Inference] COMPLETE: {len(candidates)} candidates, total={total_time:.2f}s")
         
         return GraspResult(
             candidates=candidates,

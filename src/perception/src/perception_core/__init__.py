@@ -2,7 +2,7 @@
 Perception Core - 视觉分析节点核心模块
 
 提供以下能力:
-- 目标分割 (NanoSAM)
+- 目标分割 (SAM2 + TensorRT)
 - 点云计算
 - 向量化 (CLIP + DINOv3)
 - 物体存储与检索 (FAISS)

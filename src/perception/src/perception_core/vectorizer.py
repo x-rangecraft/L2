@@ -150,7 +150,9 @@ class VectorizerModule:
     
     def _load_clip(self):
         """加载 CLIP 模型（可选，失败时禁用文本检索功能）"""
-        logger.info(f"加载 CLIP 模型: {self._clip_model_name}")
+        import time as _time
+        start_time = _time.time()
+        logger.info(f"加载 CLIP 模型: {self._clip_model_name}...")
         
         try:
             # 使用 safetensors 格式加载，避免 torch.load 的安全限制
@@ -167,7 +169,8 @@ class VectorizerModule:
             self._clip_model.to(self._clip_device)
             self._clip_model.eval()
             
-            logger.info(f"CLIP 模型加载完成 (device={self._clip_device})")
+            elapsed = _time.time() - start_time
+            logger.info(f"CLIP 模型加载完成 (device={self._clip_device}, 耗时={elapsed:.2f}s)")
             
         except Exception as e:
             # CLIP 加载失败不阻止服务启动，只是禁用文本检索功能
@@ -176,29 +179,32 @@ class VectorizerModule:
             self._clip_processor = None
     
     def _load_dino(self):
-        """加载 DINOv3 模型"""
-        logger.info(f"加载 DINOv3 模型")
+        """加载 DINOv3 模型（使用 timm 架构 + 本地权重）"""
+        import time as _time
+        start_time = _time.time()
+        logger.info(f"加载 DINOv3 模型...")
         
         try:
             # 解析模型路径
             model_path = self._resolve_model_path(self._dino_model_path)
             
-            if model_path.exists():
-                logger.info(f"从本地加载 DINOv3: {model_path}")
-                self._dino_model = self._load_dino_from_checkpoint(model_path)
-            else:
-                logger.info("从 torch.hub 加载 DINOv3")
-                self._dino_model = torch.hub.load(
-                    'facebookresearch/dinov2',
-                    'dinov2_vits14',
-                    pretrained=True
+            if not model_path.exists():
+                raise PerceptionError(
+                    ErrorCode.DINO_MODEL_LOAD_FAILED,
+                    f"DINOv3 模型文件不存在: {model_path}"
                 )
+            
+            logger.info(f"从本地加载 DINOv3: {model_path}")
+            self._dino_model = self._load_dino_from_checkpoint(model_path)
             
             self._dino_model.to(self._dino_device)
             self._dino_model.eval()
             
-            logger.info(f"DINOv3 模型加载完成 (device={self._dino_device})")
+            elapsed = _time.time() - start_time
+            logger.info(f"DINOv3 模型加载完成 (device={self._dino_device}, 耗时={elapsed:.2f}s)")
             
+        except PerceptionError:
+            raise
         except Exception as e:
             raise PerceptionError(
                 ErrorCode.DINO_MODEL_LOAD_FAILED,
@@ -226,24 +232,43 @@ class VectorizerModule:
         
         return path
     
+    def _build_dinov3_model(self):
+        """使用 timm 构建 DINOv3 模型架构"""
+        try:
+            import timm
+            # ViT-S/16 架构，与 DINOv3 vits16 匹配
+            model = timm.create_model(
+                'vit_small_patch16_224',
+                pretrained=False,
+                num_classes=0,  # 移除分类头
+                global_pool=''  # 不使用全局池化，保留所有 token
+            )
+            return model
+        except ImportError:
+            raise PerceptionError(
+                ErrorCode.DINO_MODEL_LOAD_FAILED,
+                "timm 库未安装，请运行: pip install timm"
+            )
+    
     def _load_dino_from_checkpoint(self, model_path: Path):
-        """从本地 checkpoint 加载 DINOv3"""
-        checkpoint = torch.load(str(model_path), map_location=self._dino_device)
+        """从本地 checkpoint 加载 DINOv3（使用 timm 架构）"""
+        # 加载权重文件
+        checkpoint = torch.load(str(model_path), map_location=self._dino_device, weights_only=False)
         
-        # 尝试从 torch.hub 获取架构
-        model = torch.hub.load(
-            'facebookresearch/dinov2',
-            'dinov2_vits14',
-            pretrained=False
-        )
+        # 构建模型架构
+        model = self._build_dinov3_model()
         
-        # 加载权重
+        # 加载权重（支持多种 checkpoint 格式）
         if 'model' in checkpoint:
-            model.load_state_dict(checkpoint['model'], strict=False)
+            state_dict = checkpoint['model']
         elif 'teacher' in checkpoint:
-            model.load_state_dict(checkpoint['teacher'], strict=False)
+            state_dict = checkpoint['teacher']
         else:
-            model.load_state_dict(checkpoint, strict=False)
+            state_dict = checkpoint
+        
+        # 尝试加载权重，允许部分不匹配
+        model.load_state_dict(state_dict, strict=False)
+        logger.info("DINOv3 权重加载成功")
         
         return model
     

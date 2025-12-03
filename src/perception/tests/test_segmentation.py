@@ -45,8 +45,8 @@ class TestSegmentationModule:
         from perception_core.segmentation import SegmentationModule
         
         config = {
-            'engine_path': 'models/nanosam_image_encoder.engine',
-            'decoder_path': 'models/nanosam_mask_decoder.engine',
+            'config_path': 'config/sam2_config.yaml',
+            'models_dir': 'models',
             'min_confidence': 0.3,
             'min_mask_area': 100,
         }
@@ -86,8 +86,8 @@ class TestSegmentationIntegration:
         from perception_core.segmentation import SegmentationModule
         
         config = {
-            'engine_path': 'models/nanosam_image_encoder.engine',
-            'decoder_path': 'models/nanosam_mask_decoder.engine',
+            'config_path': 'config/sam2_config.yaml',
+            'models_dir': 'models',
         }
         
         module = SegmentationModule(config, async_worker)

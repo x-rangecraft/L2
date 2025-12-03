@@ -110,16 +110,31 @@ class PerceptionNode(Node):
     
     def _load_config(self):
         """加载配置"""
-        # 获取包路径
-        self._package_dir = Path(__file__).parent.parent.parent
+        # 获取包路径（源码目录，用于模型和数据存储）
+        # 优先使用环境变量，否则使用默认路径
+        import os
+        models_dir = os.environ.get('PERCEPTION_MODELS_DIR')
+        if models_dir:
+            self._models_dir = Path(models_dir)
+        else:
+            # 默认使用源码目录下的 models
+            self._models_dir = Path('/home/jetson/L2/src/perception/models')
         
-        # 存储目录
-        self._storage_dir = self._package_dir / DEFAULT_STORAGE_DIR
+        data_dir = os.environ.get('PERCEPTION_DATA_DIR')
+        if data_dir:
+            self._storage_dir = Path(data_dir)
+        else:
+            # 默认使用源码目录下的 data
+            self._storage_dir = Path('/home/jetson/L2/src/perception/data')
+        
+        self.get_logger().info(f"模型目录: {self._models_dir}")
+        self.get_logger().info(f"数据目录: {self._storage_dir}")
         
         # 模块配置
+        # SAM2 配置
         self._segmentation_config = {
-            'engine_path': str(self._package_dir / 'models' / 'nanosam_image_encoder.engine'),
-            'decoder_path': str(self._package_dir / 'models' / 'nanosam_mask_decoder.engine'),
+            'config_path': str(Path('/home/jetson/L2/src/perception/config/sam2_config.yaml')),
+            'models_dir': str(self._models_dir),
         }
         
         self._pointcloud_config = {
@@ -128,7 +143,7 @@ class PerceptionNode(Node):
         
         self._vectorizer_config = {
             'clip': {'model': 'openai/clip-vit-base-patch32', 'device': 'cuda'},
-            'dino': {'model_path': str(self._package_dir / 'models' / 'dinov2_vits14.pth'), 'device': 'cuda'},
+            'dino': {'model_path': str(self._models_dir / 'dinov3_vits16_pretrain_lvd1689m-08c60483.pth'), 'device': 'cuda'},
         }
         
         self._vector_config = {
@@ -136,8 +151,8 @@ class PerceptionNode(Node):
         }
         
         self._grasp_config = {
-            'model_path': str(self._package_dir / 'models' / 'contact_graspnet' / 'model.pt'),
-            'config_path': str(self._package_dir / 'models' / 'contact_graspnet' / 'config.yaml'),
+            'model_path': str(self._models_dir / 'contact_graspnet' / 'model.pt'),
+            'config_path': str(self._models_dir / 'contact_graspnet' / 'config.yaml'),
             'max_candidates': DEFAULT_MAX_CANDIDATES,
             'min_confidence': DEFAULT_MIN_GRASP_CONFIDENCE,
             'z_range': [Z_RANGE_MIN, Z_RANGE_MAX],
@@ -180,22 +195,39 @@ class PerceptionNode(Node):
     async def _initialize_modules(self):
         """异步初始化所有模块"""
         try:
+            init_start = time.time()
             self.get_logger().info("开始初始化模块...")
             
-            # 并行初始化独立模块
-            await asyncio.gather(
-                self._segmentation.initialize(),
-                self._pointcloud.initialize(),
-                self._vectorizer.initialize(),
-                self._vector_manager.initialize(),
-            )
+            # 第一阶段：SAM2（最先加载，优先级最高）
+            stage1_start = time.time()
+            self.get_logger().info("初始化 SAM2 分割模块...")
+            await self._segmentation.initialize()
+            stage1_time = time.time() - stage1_start
+            self.get_logger().info(f"SAM2 初始化完成 (耗时={stage1_time:.2f}s)")
             
-            # 串行初始化依赖模块
-            await self._storage.initialize()
-            
-            # 初始化抓取模块（单独初始化，因为加载时间较长）
-            self.get_logger().info("初始化抓取模块（Contact-GraspNet）...")
+            # 第二阶段：Contact-GraspNet（抓取模块）
+            stage2_start = time.time()
+            self.get_logger().info("初始化 Contact-GraspNet 抓取模块...")
             await self._grasp.initialize()
+            stage2_time = time.time() - stage2_start
+            self.get_logger().info(f"Contact-GraspNet 初始化完成 (耗时={stage2_time:.2f}s)")
+            
+            # 第三阶段：CLIP + DINOv3 向量化模块
+            stage3_start = time.time()
+            self.get_logger().info("初始化 CLIP + DINOv3 向量化模块...")
+            await self._vectorizer.initialize()
+            stage3_time = time.time() - stage3_start
+            self.get_logger().info(f"向量化模块初始化完成 (耗时={stage3_time:.2f}s)")
+            
+            # 第四阶段：轻量级模块（并行初始化）
+            stage4_start = time.time()
+            await asyncio.gather(
+                self._pointcloud.initialize(),
+                self._vector_manager.initialize(),
+                self._storage.initialize(),
+            )
+            stage4_time = time.time() - stage4_start
+            self.get_logger().info(f"轻量级模块初始化完成 (耗时={stage4_time:.2f}s)")
             
             # 检查所有模块就绪
             if not all([
@@ -212,8 +244,9 @@ class PerceptionNode(Node):
             self._register_actions()
             self._register_services()
             
+            total_time = time.time() - init_start
             self._ready = True
-            self.get_logger().info("✅ PerceptionNode 服务就绪")
+            self.get_logger().info(f"✅ PerceptionNode 服务就绪 (总初始化耗时={total_time:.2f}s)")
             
         except Exception as e:
             self.get_logger().error(f"模块初始化失败: {e}")

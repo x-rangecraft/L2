@@ -11,7 +11,7 @@ from robot_skill_core.constants import (
     SKILL_ACTION_TOPIC,
     SUPPORTED_STEP_TYPES,
 )
-from robot_skill_core.grasp_planner import GraspPlanner
+from robot_skill_core.grasp_executor import GraspExecutor
 from robot_skill_core.robot_skill import RobotSkill
 from robot_skill_core.skill_loader import SkillDefinition, SkillLibrary, SkillStep
 from robot_skill_core.step_executor import StepExecutor
@@ -19,9 +19,9 @@ from robot_skill_core.step_executor import StepExecutor
 __all__ = [
     # Main node
     'RobotSkill',
-    # Executors and planners
+    # Executors
     'StepExecutor',
-    'GraspPlanner',
+    'GraspExecutor',
     # Skill loader
     'SkillLibrary',
     'SkillDefinition',

@@ -82,13 +82,18 @@ start_node() {
         exit 1
     fi
     
-    # 启动节点（后台运行）
+    # 清空旧的运行日志，避免被旧日志干扰
+    > "$RUNTIME_LOG"
+    log_info "已清空旧日志: $RUNTIME_LOG"
+    
+    # 启动节点（后台运行，同时输出到控制台和日志文件）
     log_info "启动 ros2 run $PACKAGE_NAME $NODE_NAME"
-    nohup ros2 run "$PACKAGE_NAME" "$NODE_NAME" >> "$RUNTIME_LOG" 2>&1 &
+    ros2 run "$PACKAGE_NAME" "$NODE_NAME" 2>&1 | tee -a "$RUNTIME_LOG" &
+    local tee_pid=$!
     
     # 等待节点启动
     log_info "等待节点就绪..."
-    local max_wait=60
+    local max_wait=180  # 模型加载较慢，等待 3 分钟
     local wait_count=0
     
     while [ $wait_count -lt $max_wait ]; do
@@ -98,6 +103,16 @@ start_node() {
         # 检查进程是否存在
         if ! is_running; then
             log_error "节点启动失败，请查看日志: $RUNTIME_LOG"
+            exit 1
+        fi
+        
+        # 检查是否有模块初始化失败的错误
+        if grep -q "模块初始化失败" "$RUNTIME_LOG" 2>/dev/null; then
+            log_error "模块初始化失败"
+            # 显示错误详情
+            grep -A2 "模块初始化失败" "$RUNTIME_LOG" | tail -3
+            # 停止节点
+            stop_node
             exit 1
         fi
         
