@@ -436,28 +436,35 @@ class WebInteractiveGui(Node):
                 return
             self._state = State.GRASPING
 
-        # 检查是否有点云
+        # 检查是否有抓取候选（优先使用已转换到 base_link 的候选）
         with self._cache_lock:
-            if self._point_cloud is None:
+            if self._grasp_candidates_base:
+                grasp_candidates = list(self._grasp_candidates_base)
+                source_frame_id = "base_link"
+            elif self._grasp_candidates_camera:
+                grasp_candidates = list(self._grasp_candidates_camera)
+                source_frame_id = "camera_color_optical_frame"
+            else:
                 with self._state_lock:
                     self._state = State.HIGHLIGHTED
                 self._web_server.emit_grasp_result(
-                    success=False, error="点云数据缺失"
+                    success=False, error="没有抓取候选，请先执行姿态测算"
                 )
                 return
-            point_cloud = self._point_cloud
 
-        self.get_logger().info("[web_gui] 开始抓取动作...")
+        self.get_logger().info(
+            f"[web_gui] 开始抓取动作: {len(grasp_candidates)} 个候选, frame={source_frame_id}"
+        )
 
         # 在后台线程执行异步 Action
         thread = threading.Thread(
             target=self._run_grasp_async,
-            args=(point_cloud,),
+            args=(grasp_candidates, source_frame_id),
             daemon=True,
         )
         thread.start()
 
-    def _run_grasp_async(self, point_cloud: PointCloud2) -> None:
+    def _run_grasp_async(self, grasp_candidates: list, source_frame_id: str) -> None:
         """在后台线程中执行抓取 Action"""
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
@@ -474,7 +481,8 @@ class WebInteractiveGui(Node):
         try:
             result = loop.run_until_complete(
                 self._robot_skill.grasp(
-                    point_cloud=point_cloud,
+                    grasp_candidates=grasp_candidates,
+                    source_frame_id=source_frame_id,
                     context_id="web_grasp",
                     on_feedback=on_feedback,
                 )
@@ -488,10 +496,13 @@ class WebInteractiveGui(Node):
                     self._state = State.IDLE
 
                 self.get_logger().info(
-                    f"[web_gui] 抓取成功: steps_executed={result.steps_executed}"
+                    f"[web_gui] 抓取成功: steps_executed={result.steps_executed}, "
+                    f"candidate_used={result.candidate_used}"
                 )
                 self._web_server.emit_grasp_result(
-                    success=True, steps_executed=result.steps_executed
+                    success=True,
+                    steps_executed=result.steps_executed,
+                    candidate_used=result.candidate_used,
                 )
             else:
                 # 抓取失败，恢复到高亮状态

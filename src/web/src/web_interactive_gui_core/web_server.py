@@ -392,6 +392,7 @@ class WebServerManager:
         self,
         success: bool,
         steps_executed: int = 0,
+        candidate_used: int = -1,
         error: str = "",
     ) -> None:
         """
@@ -400,6 +401,7 @@ class WebServerManager:
         Args:
             success: 是否成功
             steps_executed: 执行的步骤数
+            candidate_used: 实际使用的候选索引
             error: 错误信息（失败时）
         """
         if not self._ready:
@@ -408,6 +410,7 @@ class WebServerManager:
         data = {"success": success}
         if success:
             data["steps_executed"] = steps_executed
+            data["candidate_used"] = candidate_used
         if not success and error:
             data["error"] = error
 

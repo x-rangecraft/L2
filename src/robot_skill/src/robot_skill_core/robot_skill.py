@@ -271,9 +271,11 @@ class RobotSkill(RclpyNode):
         req = goal_handle.request
         context_id = req.context_id
         candidates = list(req.grasp_candidates)
+        source_frame = req.source_frame_id if req.source_frame_id else 'camera_color_optical_frame'
 
         self.get_logger().info(
-            f"Executing grasp_record: {len(candidates)} candidates, context={context_id}"
+            f"Executing grasp_record: {len(candidates)} candidates, "
+            f"source_frame={source_frame}, context={context_id}"
         )
 
         # Phase 1: TF 转换 + IK 验证
@@ -295,7 +297,7 @@ class RobotSkill(RclpyNode):
         goal_handle.publish_feedback(ik_feedback)
 
         candidate_idx, grasp_pose, pre_grasp_pose, gripper_width = \
-            await self._grasp_executor.find_executable_candidate(candidates)
+            await self._grasp_executor.find_executable_candidate(candidates, source_frame)
 
         if candidate_idx < 0:
             self.get_logger().error(

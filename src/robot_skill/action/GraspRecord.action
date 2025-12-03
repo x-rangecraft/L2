@@ -1,5 +1,6 @@
 # Goal
-perception/GraspCandidate[] grasp_candidates  # 抓取候选数组（相机坐标系，按置信度降序）
+perception/GraspCandidate[] grasp_candidates  # 抓取候选数组（按置信度降序）
+string source_frame_id                        # 候选位姿的源坐标系（若为 base_link 则跳过 TF 转换）
 string context_id                             # 任务上下文标识
 ---
 # Result

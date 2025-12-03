@@ -81,19 +81,19 @@ class GraspExecutor:
     async def find_executable_candidate(
         self,
         candidates: List[GraspCandidate],
-        camera_frame: str = CAMERA_FRAME,
+        source_frame: str = CAMERA_FRAME,
     ) -> Tuple[int, Optional[PoseStamped], Optional[PoseStamped], float]:
         """
         Find the first candidate that passes IK validation.
 
         Process:
-        1. Batch transform all candidate poses from camera frame to base_link
+        1. If source_frame != base_link, batch transform all candidate poses to base_link
         2. For each transformed pose, verify IK for both pre-grasp and grasp poses
         3. Return the first candidate that passes both IK checks
 
         Args:
             candidates: List of GraspCandidate from Contact-GraspNet
-            camera_frame: Source coordinate frame (default: camera_color_optical_frame)
+            source_frame: Source coordinate frame (if already base_link, skip TF transform)
 
         Returns:
             Tuple of (candidate_index, grasp_pose, pre_grasp_pose, gripper_width)
@@ -103,13 +103,28 @@ class GraspExecutor:
             self._node.get_logger().warning('No grasp candidates provided')
             return (-1, None, None, 0.0)
 
-        # Phase 1: 批量 TF 转换
-        transformed_poses = await self._transform_candidates_to_base(
-            candidates, camera_frame
-        )
-        if transformed_poses is None:
-            self._node.get_logger().error('Failed to transform candidate poses')
-            return (-1, None, None, 0.0)
+        # Phase 1: TF 转换（若已是 base_link 则跳过）
+        if source_frame == ROBOT_BASE_FRAME:
+            self._node.get_logger().info(
+                f'Source frame is already {ROBOT_BASE_FRAME}, skipping TF transform'
+            )
+            # 直接构建 Pose 列表
+            transformed_poses = []
+            for candidate in candidates:
+                pose = Pose()
+                pose.position = candidate.position
+                pose.orientation = candidate.orientation
+                transformed_poses.append(pose)
+        else:
+            self._node.get_logger().info(
+                f'Transforming {len(candidates)} candidates from {source_frame} to {ROBOT_BASE_FRAME}'
+            )
+            transformed_poses = await self._transform_candidates_to_base(
+                candidates, source_frame
+            )
+            if transformed_poses is None:
+                self._node.get_logger().error('Failed to transform candidate poses')
+                return (-1, None, None, 0.0)
 
         # Phase 2: 逐个 IK 验证
         for i, (pose_base, candidate) in enumerate(zip(transformed_poses, candidates)):
