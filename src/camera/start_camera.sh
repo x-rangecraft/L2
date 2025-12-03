@@ -4,7 +4,6 @@ set -euo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}" )" && pwd)
 DEFAULT_CONFIG="$SCRIPT_DIR/config/cameras/realsense2_d435i.yaml"
-PID_FILE="$SCRIPT_DIR/.realsense_camera.pid"
 LOG_FILE="$SCRIPT_DIR/realsense2_camera.log"
 CAMERA_NODE_NAME="/camera/realsense2_camera"
 COLOR_TOPIC="/camera/color/image_raw"
@@ -57,16 +56,6 @@ topic_ready() {
   return 1
 }
 
-clean_stale_pid() {
-  if [[ -f "$PID_FILE" ]]; then
-    local pid
-    pid=$(<"$PID_FILE") || true
-    if [[ -n "${pid:-}" ]] && ! kill -0 "$pid" 2>/dev/null; then
-      rm -f "$PID_FILE"
-    fi
-  fi
-}
-
 print_banner() {
   local config="$1"
   cat <<INFO
@@ -92,28 +81,8 @@ wait_for_ready() {
 }
 
 stop_processes() {
-  local pid stopped=0
-  if [[ -f "$PID_FILE" ]]; then
-    pid=$(<"$PID_FILE") || true
-    if [[ -n "${pid:-}" ]] && kill -0 "$pid" 2>/dev/null; then
-      kill "$pid"
-      for attempt in {1..10}; do
-        if ! kill -0 "$pid" 2>/dev/null; then
-          break
-        fi
-        sleep 1
-      done
-    fi
-    rm -f "$PID_FILE"
-    stopped=1
-  fi
-
   if pgrep -u "$USER" -f "realsense2_camera_node" >/dev/null 2>&1; then
     pkill -u "$USER" -f "realsense2_camera_node" || true
-    stopped=1
-  fi
-
-  if [[ $stopped -eq 1 ]]; then
     echo "RealSense 节点已停止。"
   else
     echo "未发现运行中的 RealSense 节点。"
@@ -128,8 +97,6 @@ start_camera() {
     echo "未找到配置文件：$config" >&2
     exit 1
   fi
-
-  clean_stale_pid
 
   if node_running && topic_ready; then
     echo "检测到 RealSense 节点已运行且话题稳定，跳过启动。"
@@ -156,9 +123,7 @@ start_camera() {
     -r '~/depth/camera_info:=depth/camera_info' \
     >>"$LOG_FILE" 2>&1 &
 
-  local pid=$!
-  echo "$pid" > "$PID_FILE"
-  echo "RealSense 节点启动中 (PID $pid)..."
+  echo "RealSense 节点启动中..."
 
   if wait_for_ready; then
     echo "RealSense 节点已就绪，开始发布 $COLOR_TOPIC。"
