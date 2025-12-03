@@ -14,7 +14,7 @@ import numpy as np
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Image, PointCloud2
-from geometry_msgs.msg import Point, Pose
+from geometry_msgs.msg import Point, Pose, Quaternion
 from builtin_interfaces.msg import Time as TimeMsg
 
 from tf_tools.srv import TransformPoints, TransformPoses
@@ -88,7 +88,6 @@ class WebInteractiveGui(Node):
         # 3. 注入回调
         self._web_server.set_callbacks(
             on_segment=self._handle_segment,
-            on_record=self._handle_record,
             on_grasp=self._handle_grasp,
             on_grasp_pose=self._handle_grasp_pose,
             on_cancel=self._handle_cancel,
@@ -336,11 +335,11 @@ class WebInteractiveGui(Node):
             self.get_logger().warning(f"[web_gui] TF 转换异常: {e}")
             return None
 
-    def _handle_record(self, label: str) -> None:
+    def _handle_grasp(self) -> None:
         """
         处理记录请求（Flask 线程调用，同步）
 
-        在后台线程中异步执行 Action 调用
+        点击"记录"按钮触发，调用 grasp_record action 执行抓取观察动作
         """
         # 检查状态
         with self._state_lock:
@@ -348,101 +347,19 @@ class WebInteractiveGui(Node):
                 self.get_logger().warning(
                     f"[web_gui] 当前状态 {self._state.value}，无法记录"
                 )
-                self._web_server.emit_record_result(
+                self._web_server.emit_grasp_result(
                     success=False, error="没有可记录的分割结果"
                 )
                 return
             self._state = State.RECORDING
 
-        # 检查是否有裁剪图
-        with self._cache_lock:
-            if self._cropped_image is None:
-                with self._state_lock:
-                    self._state = State.HIGHLIGHTED
-                self._web_server.emit_record_result(
-                    success=False, error="裁剪图像缺失"
-                )
-                return
-            cropped_image = self._cropped_image
-
-        self.get_logger().info(f"[web_gui] 开始记录: label='{label}'")
-
-        # 在后台线程执行异步 Action
-        thread = threading.Thread(
-            target=self._run_record_async,
-            args=(cropped_image, label),
-            daemon=True,
-        )
-        thread.start()
-
-    def _run_record_async(self, cropped_image: Image, label: str) -> None:
-        """在后台线程中执行记录 Action"""
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-
-        try:
-            result = loop.run_until_complete(
-                self._perception.record(cropped_image=cropped_image, label=label)
-            )
-
-            if result.success:
-                # 记录成功，清除高亮
-                self._clear_cache()
-
-                with self._state_lock:
-                    self._state = State.IDLE
-
-                self.get_logger().info(
-                    f"[web_gui] 记录成功: object_id={result.object_id}"
-                )
-                self._web_server.emit_record_result(
-                    success=True, object_id=result.object_id
-                )
-            else:
-                # 记录失败，恢复到高亮状态
-                with self._state_lock:
-                    self._state = State.HIGHLIGHTED
-
-                self.get_logger().warning(f"[web_gui] 记录失败: {result.error_message}")
-                self._web_server.emit_record_result(
-                    success=False, error=result.error_message
-                )
-
-        except Exception as e:
-            with self._state_lock:
-                self._state = State.HIGHLIGHTED
-
-            self.get_logger().error(f"[web_gui] 记录异常: {e}")
-            self._web_server.emit_record_result(success=False, error=str(e))
-
-        finally:
-            loop.close()
-
-    def _handle_grasp(self) -> None:
-        """
-        处理抓取请求（Flask 线程调用，同步）
-
-        在后台线程中异步执行 Action 调用
-        """
-        # 检查状态
-        with self._state_lock:
-            if self._state != State.HIGHLIGHTED:
-                self.get_logger().warning(
-                    f"[web_gui] 当前状态 {self._state.value}，无法抓取"
-                )
-                self._web_server.emit_grasp_result(
-                    success=False, error="没有可抓取的分割结果"
-                )
-                return
-            self._state = State.GRASPING
-
         # 检查是否有抓取候选（优先使用已转换到 base_link 的候选）
         with self._cache_lock:
             if self._grasp_candidates_base:
-                grasp_candidates = list(self._grasp_candidates_base)
+                candidates_dict = list(self._grasp_candidates_base)
                 source_frame_id = "base_link"
             elif self._grasp_candidates_camera:
-                grasp_candidates = list(self._grasp_candidates_camera)
+                candidates_dict = list(self._grasp_candidates_camera)
                 source_frame_id = "camera_color_optical_frame"
             else:
                 with self._state_lock:
@@ -452,8 +369,27 @@ class WebInteractiveGui(Node):
                 )
                 return
 
+        # 将字典格式转换为 GraspCandidate ROS 消息
+        grasp_candidates = []
+        for c_dict in candidates_dict:
+            candidate = GraspCandidate()
+            candidate.position = Point(
+                x=c_dict["position"]["x"],
+                y=c_dict["position"]["y"],
+                z=c_dict["position"]["z"]
+            )
+            candidate.orientation = Quaternion(
+                x=c_dict["orientation"]["x"],
+                y=c_dict["orientation"]["y"],
+                z=c_dict["orientation"]["z"],
+                w=c_dict["orientation"]["w"]
+            )
+            candidate.width = c_dict["width"]
+            candidate.confidence = c_dict["confidence"]
+            grasp_candidates.append(candidate)
+
         self.get_logger().info(
-            f"[web_gui] 开始抓取动作: {len(grasp_candidates)} 个候选, frame={source_frame_id}"
+            f"[web_gui] 开始记录动作: {len(grasp_candidates)} 个候选, frame={source_frame_id}"
         )
 
         # 在后台线程执行异步 Action
@@ -464,13 +400,13 @@ class WebInteractiveGui(Node):
         )
         thread.start()
 
-    def _run_grasp_async(self, grasp_candidates: list, source_frame_id: str) -> None:
-        """在后台线程中执行抓取 Action"""
+    def _run_grasp_async(self, grasp_candidates: list[GraspCandidate], source_frame_id: str) -> None:
+        """在后台线程中执行记录 Action（调用 grasp_record）"""
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
 
         def on_feedback(phase: str, step_index: int, step_desc: str, progress: float):
-            """抓取进度回调"""
+            """记录进度回调"""
             self._web_server.emit_grasp_feedback(
                 phase=phase,
                 step_index=step_index,
@@ -483,20 +419,20 @@ class WebInteractiveGui(Node):
                 self._robot_skill.grasp(
                     grasp_candidates=grasp_candidates,
                     source_frame_id=source_frame_id,
-                    context_id="web_grasp",
+                    context_id="web_record",
                     on_feedback=on_feedback,
                 )
             )
 
             if result.success:
-                # 抓取成功，清除高亮
+                # 记录成功，清除高亮
                 self._clear_cache()
 
                 with self._state_lock:
                     self._state = State.IDLE
 
                 self.get_logger().info(
-                    f"[web_gui] 抓取成功: steps_executed={result.steps_executed}, "
+                    f"[web_gui] 记录成功: steps_executed={result.steps_executed}, "
                     f"candidate_used={result.candidate_used}"
                 )
                 self._web_server.emit_grasp_result(
@@ -505,11 +441,11 @@ class WebInteractiveGui(Node):
                     candidate_used=result.candidate_used,
                 )
             else:
-                # 抓取失败，恢复到高亮状态
+                # 记录失败，恢复到高亮状态
                 with self._state_lock:
                     self._state = State.HIGHLIGHTED
 
-                self.get_logger().warning(f"[web_gui] 抓取失败: {result.error_message}")
+                self.get_logger().warning(f"[web_gui] 记录失败: {result.error_message}")
                 self._web_server.emit_grasp_result(
                     success=False, error=result.error_message
                 )
@@ -518,7 +454,7 @@ class WebInteractiveGui(Node):
             with self._state_lock:
                 self._state = State.HIGHLIGHTED
 
-            self.get_logger().error(f"[web_gui] 抓取异常: {e}")
+            self.get_logger().error(f"[web_gui] 记录异常: {e}")
             self._web_server.emit_grasp_result(success=False, error=str(e))
 
         finally:

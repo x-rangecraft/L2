@@ -32,7 +32,6 @@ class WebServerManager:
 
         # 回调函数（由 set_callbacks 注入）
         self._on_segment: Optional[Callable[[float, float], None]] = None
-        self._on_record: Optional[Callable[[str], None]] = None
         self._on_grasp: Optional[Callable[[], None]] = None
         self._on_grasp_pose: Optional[Callable[[], None]] = None
         self._on_cancel: Optional[Callable[[], None]] = None
@@ -76,7 +75,6 @@ class WebServerManager:
     def set_callbacks(
         self,
         on_segment: Callable[[float, float], None],
-        on_record: Callable[[str], None],
         on_grasp: Callable[[], None],
         on_grasp_pose: Callable[[], None],
         on_cancel: Callable[[], None],
@@ -88,15 +86,13 @@ class WebServerManager:
 
         Args:
             on_segment: 分割请求回调 (x, y)
-            on_record: 记录请求回调 (label)
-            on_grasp: 抓取请求回调
+            on_grasp: 记录请求回调（调用 grasp_record action）
             on_grasp_pose: 姿态测算请求回调
             on_cancel: 取消请求回调
             get_status: 获取状态回调
             get_health: 获取健康状态回调
         """
         self._on_segment = on_segment
-        self._on_record = on_record
         self._on_grasp = on_grasp
         self._on_grasp_pose = on_grasp_pose
         self._on_cancel = on_cancel
@@ -146,21 +142,6 @@ class WebServerManager:
             try:
                 self._on_segment(float(x), float(y))
                 return jsonify({"status": "ok", "x": x, "y": y})
-            except Exception as e:
-                return jsonify({"status": "error", "error": str(e)}), 500
-
-        @self._app.route("/record", methods=["POST"])
-        def record():
-            """记录物体"""
-            if self._on_record is None:
-                return jsonify({"status": "error", "error": "回调未设置"}), 500
-
-            data = request.get_json() or {}
-            label = data.get("label", "")
-
-            try:
-                self._on_record(label)
-                return jsonify({"status": "ok"})
             except Exception as e:
                 return jsonify({"status": "error", "error": str(e)}), 500
 
@@ -334,31 +315,6 @@ class WebServerManager:
             data["confidence"] = round(info_3d.get("confidence", 0), 4)
 
         self._socketio.emit("segment_result", data)
-
-    def emit_record_result(
-        self,
-        success: bool,
-        object_id: str = "",
-        error: str = "",
-    ) -> None:
-        """
-        推送记录结果通知
-
-        Args:
-            success: 是否成功
-            object_id: 物体 ID（成功时）
-            error: 错误信息（失败时）
-        """
-        if not self._ready:
-            return
-
-        data = {"success": success}
-        if success and object_id:
-            data["object_id"] = object_id
-        if not success and error:
-            data["error"] = error
-
-        self._socketio.emit("record_result", data)
 
     def emit_grasp_feedback(
         self,

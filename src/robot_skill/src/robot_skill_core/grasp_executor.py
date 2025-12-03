@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import copy
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Callable
 
 import rclpy
 from geometry_msgs.msg import Pose, PoseStamped
@@ -31,7 +31,7 @@ IK_SOLVE_SERVICE = '/robot_driver/service/solve_ik'
 
 # 服务超时配置
 SERVICE_WAIT_TIMEOUT = 5.0  # 等待服务可用的超时时间（秒）
-SERVICE_CALL_TIMEOUT = 5.0  # 服务调用超时时间（秒）
+SERVICE_CALL_TIMEOUT = 2.0  # IK服务调用超时时间（秒）- 缩短以提高响应速度
 
 
 class GraspExecutor:
@@ -82,6 +82,7 @@ class GraspExecutor:
         self,
         candidates: List[GraspCandidate],
         source_frame: str = CAMERA_FRAME,
+        on_progress: Optional[Callable[[int, int, float], None]] = None,
     ) -> Tuple[int, Optional[PoseStamped], Optional[PoseStamped], float]:
         """
         Find the first candidate that passes IK validation.
@@ -94,6 +95,7 @@ class GraspExecutor:
         Args:
             candidates: List of GraspCandidate from Contact-GraspNet
             source_frame: Source coordinate frame (if already base_link, skip TF transform)
+            on_progress: Optional callback function(current_index, total, progress) to update progress
 
         Returns:
             Tuple of (candidate_index, grasp_pose, pre_grasp_pose, gripper_width)
@@ -127,24 +129,39 @@ class GraspExecutor:
                 return (-1, None, None, 0.0)
 
         # Phase 2: 逐个 IK 验证
+        total_candidates = len(transformed_poses)
         for i, (pose_base, candidate) in enumerate(zip(transformed_poses, candidates)):
             if pose_base is None:
                 continue
+
+            # 更新进度反馈
+            if on_progress:
+                progress = 0.1 + 0.1 * (float(i) / float(total_candidates))  # 10%-20% 进度范围
+                on_progress(i, total_candidates, progress)
 
             # 计算预抓取位姿
             pre_grasp_pose = self._compute_pre_grasp_pose(pose_base)
 
             # 验证预抓取位姿 IK
+            self._node.get_logger().info(
+                f'Testing candidate {i+1}/{total_candidates} '
+                f'(confidence={candidate.confidence:.3f}, '
+                f'pos=({pose_base.position.x:.3f}, {pose_base.position.y:.3f}, {pose_base.position.z:.3f})): '
+                f'pre-grasp IK...'
+            )
             if not await self._verify_ik(pre_grasp_pose.pose):
-                self._node.get_logger().debug(
-                    f'Candidate {i}: pre-grasp IK failed'
+                self._node.get_logger().info(
+                    f'Candidate {i+1}: pre-grasp IK failed'
                 )
                 continue
 
             # 验证抓取位姿 IK
+            self._node.get_logger().info(
+                f'Candidate {i+1}: pre-grasp IK passed, testing grasp IK...'
+            )
             if not await self._verify_ik(pose_base):
-                self._node.get_logger().debug(
-                    f'Candidate {i}: grasp IK failed'
+                self._node.get_logger().info(
+                    f'Candidate {i+1}: grasp IK failed'
                 )
                 continue
 
@@ -343,7 +360,7 @@ class GraspExecutor:
         request = SolveIK.Request()
         request.target_pose = pose
         request.xyz_only = False
-        request.max_iters = 500
+        request.max_iters = 100  # 减少迭代次数，如果100次还解不出来，可能位姿不合理
         # seed_joints 留空，使用当前硬件状态
 
         try:
@@ -353,10 +370,17 @@ class GraspExecutor:
             )
 
             if not future.done():
-                self._node.get_logger().error('IK solve service call timed out')
+                self._node.get_logger().warning(
+                    f'IK solve service call timed out after {SERVICE_CALL_TIMEOUT}s '
+                    f'(pose=({pose.position.x:.3f}, {pose.position.y:.3f}, {pose.position.z:.3f}))'
+                )
                 return False
 
             response = future.result()
+            if not response.success:
+                self._node.get_logger().debug(
+                    f'IK solve failed for pose=({pose.position.x:.3f}, {pose.position.y:.3f}, {pose.position.z:.3f})'
+                )
             return response.success
 
         except Exception as e:

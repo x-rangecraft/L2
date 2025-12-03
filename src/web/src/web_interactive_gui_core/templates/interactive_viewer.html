@@ -781,7 +781,6 @@ function initializeSocketIO() {
     
     socket.on('image_update', handleImageUpdate);
     socket.on('segment_result', handleSegmentResult);
-    socket.on('record_result', handleRecordResult);
     socket.on('grasp_feedback', handleGraspFeedback);
     socket.on('grasp_result', handleGraspResult);
     socket.on('grasp_pose_result', handleGraspPoseResult);
@@ -969,50 +968,6 @@ function handleRecord() {
     }
     
     setProcessing(true, '记录中...');
-    
-    fetch('/record', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ label: '' })
-    })
-    .then(res => res.json())
-    .then(data => {
-        if (data.status === 'error') {
-            setProcessing(false);
-            showToast(data.error || '记录请求失败', 'error');
-        }
-        // 成功时等待 record_result 事件
-    })
-    .catch(err => {
-        setProcessing(false);
-        showToast('网络错误: ' + err.message, 'error');
-    });
-}
-
-function handleRecordResult(data) {
-    setProcessing(false);
-    
-    if (data.success) {
-        AppState.hasHighlight = false;
-        updateActionBar();
-        updateStateDisplay('空闲');
-        clear3DInfo();
-        clearGraspCandidates();
-        showToast(`记录成功: ${data.object_id}`, 'success');
-    } else {
-        showToast(data.error || '记录失败', 'error');
-    }
-}
-
-function handleGrasp() {
-    if (AppState.processing) return;
-    
-    if (!AppState.hasHighlight) {
-        showToast('请先点击图像分割目标物体', 'info');
-        return;
-    }
-    
-    setProcessing(true, '抓取规划中...');
     startGraspTimeout();
     
     fetch('/grasp', {
@@ -1024,7 +979,7 @@ function handleGrasp() {
         if (data.status === 'error') {
             clearGraspTimeout();
             setProcessing(false);
-            showToast(data.error || '抓取请求失败', 'error');
+            showToast(data.error || '记录请求失败', 'error');
         }
         // 成功时等待 grasp_feedback 和 grasp_result 事件
     })

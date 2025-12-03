@@ -288,16 +288,20 @@ class RobotSkill(RclpyNode):
         goal_handle.publish_feedback(tf_feedback)
 
         # 使用 GraspExecutor 查找可执行的候选
-        ik_feedback = GraspRecord.Feedback()
-        ik_feedback.phase = 'ik_testing'
-        ik_feedback.step_index = 0
-        ik_feedback.step_desc = 'Validating IK solutions'
-        ik_feedback.progress = 0.1
-        ik_feedback.current_candidate_index = 0
-        goal_handle.publish_feedback(ik_feedback)
+        def on_ik_progress(current_index: int, total: int, progress: float) -> None:
+            """IK验证进度回调"""
+            ik_feedback = GraspRecord.Feedback()
+            ik_feedback.phase = 'ik_testing'
+            ik_feedback.step_index = 0
+            ik_feedback.step_desc = f'Validating IK solutions ({current_index+1}/{total})'
+            ik_feedback.progress = progress
+            ik_feedback.current_candidate_index = current_index
+            goal_handle.publish_feedback(ik_feedback)
 
         candidate_idx, grasp_pose, pre_grasp_pose, gripper_width = \
-            await self._grasp_executor.find_executable_candidate(candidates, source_frame)
+            await self._grasp_executor.find_executable_candidate(
+                candidates, source_frame, on_progress=on_ik_progress
+            )
 
         if candidate_idx < 0:
             self.get_logger().error(
