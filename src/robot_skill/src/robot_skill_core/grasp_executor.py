@@ -139,29 +139,29 @@ class GraspExecutor:
                 progress = 0.1 + 0.1 * (float(i) / float(total_candidates))  # 10%-20% 进度范围
                 on_progress(i, total_candidates, progress)
 
+            # 先验证抓取位姿 IK（因为抓取位姿更接近物体，更容易求解）
+            self._node.get_logger().info(
+                f'Testing candidate {i+1}/{total_candidates} '
+                f'(confidence={candidate.confidence:.3f}, '
+                f'pos=({pose_base.position.x:.3f}, {pose_base.position.y:.3f}, {pose_base.position.z:.3f})): '
+                f'grasp IK...'
+            )
+            if not await self._verify_ik(pose_base):
+                self._node.get_logger().info(
+                    f'Candidate {i+1}: grasp IK failed'
+                )
+                continue
+
             # 计算预抓取位姿
             pre_grasp_pose = self._compute_pre_grasp_pose(pose_base)
 
             # 验证预抓取位姿 IK
             self._node.get_logger().info(
-                f'Testing candidate {i+1}/{total_candidates} '
-                f'(confidence={candidate.confidence:.3f}, '
-                f'pos=({pose_base.position.x:.3f}, {pose_base.position.y:.3f}, {pose_base.position.z:.3f})): '
-                f'pre-grasp IK...'
+                f'Candidate {i+1}: grasp IK passed, testing pre-grasp IK (z={pre_grasp_pose.pose.position.z:.3f})...'
             )
             if not await self._verify_ik(pre_grasp_pose.pose):
                 self._node.get_logger().info(
-                    f'Candidate {i+1}: pre-grasp IK failed'
-                )
-                continue
-
-            # 验证抓取位姿 IK
-            self._node.get_logger().info(
-                f'Candidate {i+1}: pre-grasp IK passed, testing grasp IK...'
-            )
-            if not await self._verify_ik(pose_base):
-                self._node.get_logger().info(
-                    f'Candidate {i+1}: grasp IK failed'
+                    f'Candidate {i+1}: pre-grasp IK failed (z={pre_grasp_pose.pose.position.z:.3f})'
                 )
                 continue
 
@@ -378,8 +378,11 @@ class GraspExecutor:
 
             response = future.result()
             if not response.success:
-                self._node.get_logger().debug(
-                    f'IK solve failed for pose=({pose.position.x:.3f}, {pose.position.y:.3f}, {pose.position.z:.3f})'
+                error_msg = getattr(response, 'error_message', 'Unknown error')
+                self._node.get_logger().info(
+                    f'IK solve failed for pose=({pose.position.x:.3f}, {pose.position.y:.3f}, {pose.position.z:.3f}), '
+                    f'quat=({pose.orientation.x:.4f}, {pose.orientation.y:.4f}, {pose.orientation.z:.4f}, {pose.orientation.w:.4f}), '
+                    f'error: {error_msg}'
                 )
             return response.success
 
