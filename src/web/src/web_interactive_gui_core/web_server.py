@@ -80,10 +80,12 @@ class WebServerManager:
         on_cancel: Callable[[], None],
         get_status: Callable[[], dict],
         get_health: Callable[[], dict],
+        *,
+        on_grasp_easy: Optional[Callable[[], None]] = None,
     ) -> None:
         """
         设置业务回调函数
-
+        
         Args:
             on_segment: 分割请求回调 (x, y)
             on_grasp: 记录请求回调（调用 grasp_record action）
@@ -91,6 +93,7 @@ class WebServerManager:
             on_cancel: 取消请求回调
             get_status: 获取状态回调
             get_health: 获取健康状态回调
+            on_grasp_easy: “易夹取”请求回调（可选）
         """
         self._on_segment = on_segment
         self._on_grasp = on_grasp
@@ -98,6 +101,7 @@ class WebServerManager:
         self._on_cancel = on_cancel
         self._get_status = get_status
         self._get_health = get_health
+        self._on_grasp_easy = on_grasp_easy
 
     def _register_routes(self) -> None:
         """注册 HTTP 路由"""
@@ -155,6 +159,18 @@ class WebServerManager:
                 self._on_grasp()
                 return jsonify({"status": "ok"})
             except Exception as e:
+                return jsonify({"status": "error", "error": str(e)}), 500
+
+        @self._app.route("/grasp_easy", methods=["POST"])
+        def grasp_easy():
+            """执行简化抓取动作（几何抓取）"""
+            if self._on_grasp_easy is None:
+                return jsonify({"status": "error", "error": "回调未设置"}), 500
+
+            try:
+                self._on_grasp_easy()
+                return jsonify({"status": "ok"})
+            except Exception as e:  # pragma: no cover - defensive
                 return jsonify({"status": "error", "error": str(e)}), 500
 
         @self._app.route("/grasp_pose", methods=["POST"])

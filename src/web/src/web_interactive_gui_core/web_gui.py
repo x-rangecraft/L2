@@ -14,7 +14,7 @@ import numpy as np
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Image, PointCloud2
-from geometry_msgs.msg import Point, Pose, Quaternion
+from geometry_msgs.msg import Point, Pose
 from builtin_interfaces.msg import Time as TimeMsg
 
 from tf_tools.srv import TransformPoints, TransformPoses
@@ -64,7 +64,7 @@ class WebInteractiveGui(Node):
         self._visualization: Optional[np.ndarray] = None  # 高亮图（BGR numpy）
         self._cropped_image: Optional[Image] = None  # 裁剪图（ROS Image）
         self._point_cloud: Optional[PointCloud2] = None  # 点云（ROS PointCloud2）
-        self._segment_3d_info: Optional[dict] = None  # 3D 信息缓存
+        self._segment_3d_info: Optional[dict] = None  # 3D 信息缓存（camera + base_link）
         
         # 抓取候选缓存
         self._grasp_candidates_camera: list = []  # grasp 返回的原始数据（相机坐标系）
@@ -89,6 +89,7 @@ class WebInteractiveGui(Node):
         self._web_server.set_callbacks(
             on_segment=self._handle_segment,
             on_grasp=self._handle_grasp,
+            on_grasp_easy=self._handle_grasp_easy,
             on_grasp_pose=self._handle_grasp_pose,
             on_cancel=self._handle_cancel,
             get_status=self._get_status,
@@ -201,24 +202,41 @@ class WebInteractiveGui(Node):
                     "bbox_max": result.bbox_max,
                     "point_count": result.point_count,
                     "confidence": result.confidence,
-                    "center_3d_base": None,  # 转换后的 base_link 坐标
+                    # base_link 坐标系下的数据（通过 TF 转换）
+                    "center_3d_base": None,
+                    "bbox_min_base": None,
+                    "bbox_max_base": None,
                 }
-                
-                # 尝试进行坐标转换
-                if result.center_3d:
-                    center_base = loop.run_until_complete(
-                        self._transform_point_to_base(result.center_3d)
-                    )
-                    if center_base:
-                        info_3d["center_3d_base"] = center_base
-                        self.get_logger().info(
-                            f"[web_gui] 坐标转换成功: camera={result.center_3d} -> base={center_base}"
+
+                # ========== Step: 统一进行坐标转换（camera -> base_link） ==========
+                try:
+                    transformed = loop.run_until_complete(
+                        self._transform_pointcloud_to_base_link(
+                            point_cloud=result.point_cloud,
+                            center_camera=result.center_3d,
+                            bbox_min=result.bbox_min,
+                            bbox_max=result.bbox_max,
                         )
+                    )
+                except Exception as exc:  # 防御性兜底，避免打断主流程
+                    transformed = None
+                    self.get_logger().warning(
+                        f"[web_gui] 点云坐标转换异常（可忽略）: {exc}"
+                    )
+
+                if transformed:
+                    info_3d["center_3d_base"] = transformed.get("center_base")
+                    info_3d["bbox_min_base"] = transformed.get("bbox_min_base")
+                    info_3d["bbox_max_base"] = transformed.get("bbox_max_base")
+                    # 用转换后的点云替换缓存，确保后续 grasp_easy 使用 base_link 数据
+                    result_point_cloud = transformed.get("point_cloud_base") or result.point_cloud
+                else:
+                    result_point_cloud = result.point_cloud
                 
                 with self._cache_lock:
                     self._visualization = result.visualization
                     self._cropped_image = result.cropped_image
-                    self._point_cloud = result.point_cloud
+                    self._point_cloud = result_point_cloud
                     self._segment_3d_info = info_3d
 
                 with self._state_lock:
@@ -335,11 +353,134 @@ class WebInteractiveGui(Node):
             self.get_logger().warning(f"[web_gui] TF 转换异常: {e}")
             return None
 
+    @staticmethod
+    def _as_point_tuple(point_value) -> Optional[tuple[float, float, float]]:
+        """Normalize various point representations into a tuple."""
+        if point_value is None:
+            return None
+        if isinstance(point_value, Point):
+            return (float(point_value.x), float(point_value.y), float(point_value.z))
+        if isinstance(point_value, (list, tuple)) and len(point_value) >= 3:
+            return (
+                float(point_value[0]),
+                float(point_value[1]),
+                float(point_value[2]),
+            )
+        return None
+
+    async def _transform_pointcloud_to_base_link(
+        self,
+        point_cloud: PointCloud2,
+        center_camera: Optional[Point],
+        bbox_min: Optional[Point],
+        bbox_max: Optional[Point],
+    ) -> Optional[dict]:
+        """
+        将 object_target 的 3D 结果从相机坐标系转换到 base_link 坐标系。
+
+        Args:
+            point_cloud: camera_color_optical_frame 下的目标点云
+            center_camera: 质心（camera）
+            bbox_min: 边界框最小点（camera）
+            bbox_max: 边界框最大点（camera）
+
+        Returns:
+            dict 包含:
+                - point_cloud_base: 转换到 base_link 的点云（目前直接复用输入，占位以便未来扩展）
+                - center_base: (x, y, z) 元组
+                - bbox_min_base: (x, y, z) 元组
+                - bbox_max_base: (x, y, z) 元组
+            若转换失败则返回 None。
+        """
+        # 当前实现只对质心 / bbox 做点转换；点云整体暂不通过 TF 服务转换，
+        # 预留 point_cloud_base 字段便于未来扩展。
+        if center_camera is None and bbox_min is None and bbox_max is None:
+            return None
+
+        center_base = None
+        bbox_min_base = None
+        bbox_max_base = None
+
+        center_tuple = self._as_point_tuple(center_camera)
+        bbox_min_tuple = self._as_point_tuple(bbox_min)
+        bbox_max_tuple = self._as_point_tuple(bbox_max)
+
+        if center_tuple is not None:
+            center_base = await self._transform_point_to_base(center_tuple)
+
+        if bbox_min_tuple is not None:
+            bbox_min_base = await self._transform_point_to_base(bbox_min_tuple)
+
+        if bbox_max_tuple is not None:
+            bbox_max_base = await self._transform_point_to_base(bbox_max_tuple)
+
+        if center_base is None and bbox_min_base is None and bbox_max_base is None:
+            return None
+
+        return {
+            "point_cloud_base": point_cloud,  # 目前仍为 camera frame，占位字段
+            "center_base": center_base,
+            "bbox_min_base": bbox_min_base,
+            "bbox_max_base": bbox_max_base,
+        }
+
+    def _convert_segment_points_to_base(self, info_3d: dict) -> tuple[
+        Optional[tuple[float, float, float]],
+        Optional[tuple[float, float, float]],
+        Optional[tuple[float, float, float]],
+    ]:
+        """Convert cached camera-frame 3D info to base_link via TF service."""
+
+        center_camera = self._as_point_tuple(info_3d.get("center_3d"))
+        if center_camera is None:
+            return None, None, None
+
+        bbox_min_camera = self._as_point_tuple(info_3d.get("bbox_min"))
+        bbox_max_camera = self._as_point_tuple(info_3d.get("bbox_max"))
+
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            center_base = loop.run_until_complete(
+                self._transform_point_to_base(center_camera)
+            )
+            bbox_min_base = None
+            bbox_max_base = None
+
+            if bbox_min_camera is not None:
+                bbox_min_base = loop.run_until_complete(
+                    self._transform_point_to_base(bbox_min_camera)
+                )
+
+            if bbox_max_camera is not None:
+                bbox_max_base = loop.run_until_complete(
+                    self._transform_point_to_base(bbox_max_camera)
+                )
+
+            return center_base, bbox_min_base, bbox_max_base
+        finally:
+            asyncio.set_event_loop(None)
+            loop.close()
+
+    def _start_grasp_easy_thread(
+        self,
+        point_cloud: PointCloud2,
+        center_base,
+        bbox_min_base,
+        bbox_max_base,
+    ) -> None:
+        thread = threading.Thread(
+            target=self._run_grasp_easy_async,
+            args=(point_cloud, center_base, bbox_min_base, bbox_max_base),
+            daemon=True,
+        )
+        thread.start()
+
     def _handle_grasp(self) -> None:
         """
         处理记录请求（Flask 线程调用，同步）
 
-        点击"记录"按钮触发，调用 grasp_record action 执行抓取观察动作
+        点击"记录"按钮触发，整理分割得到的 3D 信息并调用 grasp_record_easy 动作。
         """
         # 检查状态
         with self._state_lock:
@@ -353,60 +494,117 @@ class WebInteractiveGui(Node):
                 return
             self._state = State.RECORDING
 
-        # 检查是否有抓取候选（优先使用已转换到 base_link 的候选）
         with self._cache_lock:
-            if self._grasp_candidates_base:
-                candidates_dict = list(self._grasp_candidates_base)
-                source_frame_id = "base_link"
-            elif self._grasp_candidates_camera:
-                candidates_dict = list(self._grasp_candidates_camera)
-                source_frame_id = "camera_color_optical_frame"
-            else:
-                with self._state_lock:
-                    self._state = State.HIGHLIGHTED
-                self._web_server.emit_grasp_result(
-                    success=False, error="没有抓取候选，请先执行姿态测算"
-                )
-                return
+            point_cloud = self._point_cloud
+            info_3d = self._segment_3d_info.copy() if self._segment_3d_info else {}
 
-        # 将字典格式转换为 GraspCandidate ROS 消息
-        grasp_candidates = []
-        for c_dict in candidates_dict:
-            candidate = GraspCandidate()
-            candidate.position = Point(
-                x=c_dict["position"]["x"],
-                y=c_dict["position"]["y"],
-                z=c_dict["position"]["z"]
+        if point_cloud is None or not info_3d:
+            with self._state_lock:
+                self._state = State.HIGHLIGHTED
+            self._web_server.emit_grasp_result(
+                success=False, error="点云或 3D 信息缺失，无法记录"
             )
-            candidate.orientation = Quaternion(
-                x=c_dict["orientation"]["x"],
-                y=c_dict["orientation"]["y"],
-                z=c_dict["orientation"]["z"],
-                w=c_dict["orientation"]["w"]
+            return
+
+        center_base, bbox_min_base, bbox_max_base = self._convert_segment_points_to_base(info_3d)
+        if center_base is None:
+            with self._state_lock:
+                self._state = State.HIGHLIGHTED
+            self._web_server.emit_grasp_result(
+                success=False, error="质心坐标转换失败，无法执行抓取"
             )
-            candidate.width = c_dict["width"]
-            candidate.confidence = c_dict["confidence"]
-            grasp_candidates.append(candidate)
+            return
 
         self.get_logger().info(
-            f"[web_gui] 开始记录动作: {len(grasp_candidates)} 个候选, frame={source_frame_id}"
+            "[web_gui] 记录按钮触发 grasp_record_easy: "
+            f"center_camera={info_3d.get('center_3d')}, center_base={center_base}"
         )
 
-        # 在后台线程执行异步 Action
-        thread = threading.Thread(
-            target=self._run_grasp_async,
-            args=(grasp_candidates, source_frame_id),
-            daemon=True,
+        self._start_grasp_easy_thread(
+            point_cloud=point_cloud,
+            center_base=center_base,
+            bbox_min_base=bbox_min_base,
+            bbox_max_base=bbox_max_base,
         )
-        thread.start()
 
-    def _run_grasp_async(self, grasp_candidates: list[GraspCandidate], source_frame_id: str) -> None:
-        """在后台线程中执行记录 Action（调用 grasp_record）"""
+    def _handle_grasp_easy(self) -> None:
+        """
+        处理“易夹取”请求：基于 object_target 结果的几何抓取。
+        """
+        with self._state_lock:
+            if self._state != State.HIGHLIGHTED:
+                self.get_logger().warning(
+                    f"[web_gui] 当前状态 {self._state.value}，无法执行易夹取"
+                )
+                self._web_server.emit_grasp_result(
+                    success=False, error="没有可抓取的 3D 目标，请先完成分割"
+                )
+                return
+            self._state = State.GRASPING
+
+        with self._cache_lock:
+            point_cloud = self._point_cloud
+            info_3d = self._segment_3d_info or {}
+
+        if point_cloud is None or not info_3d:
+            with self._state_lock:
+                self._state = State.HIGHLIGHTED
+            self._web_server.emit_grasp_result(
+                success=False, error="点云或 3D 信息缺失，无法执行易夹取"
+            )
+            return
+
+        center_base = info_3d.get("center_3d_base")
+        bbox_min_base = info_3d.get("bbox_min_base")
+        bbox_max_base = info_3d.get("bbox_max_base")
+
+        if not center_base:
+            with self._state_lock:
+                self._state = State.HIGHLIGHTED
+            self._web_server.emit_grasp_result(
+                success=False, error="缺少 base_link 下的质心信息"
+            )
+            return
+
+        self.get_logger().info(
+            "[web_gui] 开始易夹取: "
+            f"center_base={center_base}, "
+            f"bbox_min_base={bbox_min_base}, bbox_max_base={bbox_max_base}"
+        )
+
+        self._start_grasp_easy_thread(
+            point_cloud=point_cloud,
+            center_base=center_base,
+            bbox_min_base=bbox_min_base,
+            bbox_max_base=bbox_max_base,
+        )
+
+    def _run_grasp_easy_async(
+        self,
+        point_cloud: PointCloud2,
+        center_base,
+        bbox_min_base,
+        bbox_max_base,
+    ) -> None:
+        """后台线程中调用 grasp_record_easy。"""
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
 
+        from geometry_msgs.msg import Point, Vector3
+
+        center_msg = Point(x=center_base[0], y=center_base[1], z=center_base[2])
+        bbox_min_msg = None
+        bbox_max_msg = None
+        if bbox_min_base is not None:
+            bbox_min_msg = Vector3(
+                x=bbox_min_base[0], y=bbox_min_base[1], z=bbox_min_base[2]
+            )
+        if bbox_max_base is not None:
+            bbox_max_msg = Vector3(
+                x=bbox_max_base[0], y=bbox_max_base[1], z=bbox_max_base[2]
+            )
+
         def on_feedback(phase: str, step_index: int, step_desc: str, progress: float):
-            """记录进度回调"""
             self._web_server.emit_grasp_feedback(
                 phase=phase,
                 step_index=step_index,
@@ -416,47 +614,44 @@ class WebInteractiveGui(Node):
 
         try:
             result = loop.run_until_complete(
-                self._robot_skill.grasp(
-                    grasp_candidates=grasp_candidates,
-                    source_frame_id=source_frame_id,
-                    context_id="web_record",
+                self._robot_skill.grasp_easy(
+                    point_cloud=point_cloud,
+                    center_base=center_msg,
+                    bbox_min=bbox_min_msg,
+                    bbox_max=bbox_max_msg,
+                    context_id="web_grasp_easy",
                     on_feedback=on_feedback,
                 )
             )
 
             if result.success:
-                # 记录成功，清除高亮
                 self._clear_cache()
-
                 with self._state_lock:
                     self._state = State.IDLE
 
                 self.get_logger().info(
-                    f"[web_gui] 记录成功: steps_executed={result.steps_executed}, "
-                    f"candidate_used={result.candidate_used}"
+                    f"[web_gui] 易夹取成功: steps_executed={result.steps_executed}"
                 )
                 self._web_server.emit_grasp_result(
                     success=True,
                     steps_executed=result.steps_executed,
-                    candidate_used=result.candidate_used,
                 )
             else:
-                # 记录失败，恢复到高亮状态
                 with self._state_lock:
                     self._state = State.HIGHLIGHTED
 
-                self.get_logger().warning(f"[web_gui] 记录失败: {result.error_message}")
+                self.get_logger().warning(
+                    f"[web_gui] 易夹取失败: {result.error_message}"
+                )
                 self._web_server.emit_grasp_result(
                     success=False, error=result.error_message
                 )
-
-        except Exception as e:
+        except Exception as exc:  # pylint: disable=broad-except
             with self._state_lock:
                 self._state = State.HIGHLIGHTED
 
-            self.get_logger().error(f"[web_gui] 记录异常: {e}")
-            self._web_server.emit_grasp_result(success=False, error=str(e))
-
+            self.get_logger().error(f"[web_gui] 易夹取异常: {exc}")
+            self._web_server.emit_grasp_result(success=False, error=str(exc))
         finally:
             loop.close()
 

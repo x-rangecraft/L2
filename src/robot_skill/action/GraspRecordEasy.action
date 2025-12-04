@@ -1,0 +1,20 @@
+# Goal
+sensor_msgs/PointCloud2 point_cloud   # 目标区域点云（base_link 坐标系）
+geometry_msgs/Point center_base       # 点云质心（base_link）
+geometry_msgs/Vector3 bbox_min        # 3D 边界框最小点（base_link）
+geometry_msgs/Vector3 bbox_max        # 3D 边界框最大点（base_link）
+string context_id                     # 任务上下文标识
+---
+# Result
+bool success
+string error_code
+string message
+int32 steps_executed                  # 实际执行的步骤数量
+---
+# Feedback
+string phase                          # 当前阶段: planning / executing
+int32 step_index                      # 当前执行的步骤索引
+string step_desc                      # 当前步骤描述
+float32 progress                      # 总体进度 0.0-1.0
+
+

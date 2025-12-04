@@ -10,7 +10,7 @@ from rclpy.action import ActionServer, CancelResponse, GoalResponse
 from rclpy.action.server import ServerGoalHandle
 from rclpy.node import Node as RclpyNode
 
-from robot_skill.action import GraspRecord, SkillSequence
+from robot_skill.action import GraspRecord, GraspRecordEasy, SkillSequence
 from robot_skill_core.constants import (
     DEFAULT_APPROACH_DISTANCE,
     DEFAULT_GRIPPER_WIDTH_MARGIN,
@@ -21,6 +21,7 @@ from robot_skill_core.constants import (
     JOINT_NAME_ORDER,
 )
 from robot_skill_core.grasp_executor import GraspExecutor
+from robot_skill_core.simple_grasp_executor import SimpleGraspExecutor
 from robot_skill_core.skill_loader import SkillLibrary, SkillStep
 from robot_skill_core.step_executor import StepExecutor
 
@@ -62,6 +63,15 @@ class RobotSkill(RclpyNode):
             max_gripper_width=DEFAULT_MAX_GRIPPER_WIDTH,
         )
 
+        # Simple grasp executor (geometry-based, no CGN)
+        self._simple_grasp_executor = SimpleGraspExecutor(
+            node=self,
+            observe_step=observe_step,
+            approach_distance=DEFAULT_APPROACH_DISTANCE,
+            gripper_width_margin=DEFAULT_GRIPPER_WIDTH_MARGIN,
+            max_gripper_width=DEFAULT_MAX_GRIPPER_WIDTH,
+        )
+
         # Action Server 1: skill_sequence (YAML-defined skills)
         self._skill_server = ActionServer(
             self,
@@ -82,7 +92,20 @@ class RobotSkill(RclpyNode):
             execute_callback=self._execute_grasp_record,
         )
 
-        self.get_logger().info('robot_skill action servers ready')
+        # Action Server 3: grasp_record_easy (geometry-only grasp)
+        self._grasp_easy_server = ActionServer(
+            self,
+            GraspRecordEasy,
+            "/robot_skill/action/grasp_record_easy",
+            goal_callback=self._grasp_easy_goal_callback,
+            cancel_callback=self._grasp_easy_cancel_callback,
+            execute_callback=self._execute_grasp_record_easy,
+        )
+
+        self.get_logger().info(
+            "robot_skill action servers ready "
+            "(skill_sequence, grasp_record, grasp_record_easy)"
+        )
 
     # ------------------------------------------------------------------ #
     # Parameter handling
@@ -196,6 +219,109 @@ class RobotSkill(RclpyNode):
     def _skill_cancel_callback(self, goal_handle: ServerGoalHandle) -> CancelResponse:
         self.get_logger().info(f'Cancel requested for skill {goal_handle.request.skill_id}')
         return CancelResponse.ACCEPT
+
+    # ------------------------------------------------------------------ #
+    # GraspRecordEasy Action callbacks
+    # ------------------------------------------------------------------ #
+    def _grasp_easy_goal_callback(
+        self, goal_request: GraspRecordEasy.Goal
+    ) -> GoalResponse:
+        if goal_request.point_cloud is None:
+            self.get_logger().warning("Rejecting grasp_easy goal without point_cloud")
+            return GoalResponse.REJECT
+        return GoalResponse.ACCEPT
+
+    def _grasp_easy_cancel_callback(
+        self, goal_handle: ServerGoalHandle
+    ) -> CancelResponse:
+        self.get_logger().info(
+            f"Cancel requested for grasp_record_easy {goal_handle.request.context_id}"
+        )
+        return CancelResponse.ACCEPT
+
+    async def _execute_grasp_record_easy(
+        self, goal_handle: ServerGoalHandle
+    ) -> GraspRecordEasy.Result:
+        """Execute simplified grasp using geometric center in base_link frame."""
+        req = goal_handle.request
+        context_id = req.context_id
+
+        self.get_logger().info(
+            "Executing grasp_record_easy: "
+            f"point_cloud points (width={req.point_cloud.width}, height={req.point_cloud.height}), "
+            f"context={context_id}"
+        )
+
+        # Phase 1: planning feedback
+        planning_fb = GraspRecordEasy.Feedback()
+        planning_fb.phase = "planning"
+        planning_fb.step_index = 0
+        planning_fb.step_desc = "Computing simple grasp plan from center"
+        planning_fb.progress = 0.0
+        goal_handle.publish_feedback(planning_fb)
+
+        # Compute grasp plan
+        grasp_pose, pre_grasp_pose, gripper_width = await self._simple_grasp_executor.compute_grasp_plan(  # type: ignore[arg-type]
+            req.center_base
+        )
+
+        if grasp_pose is None or pre_grasp_pose is None or gripper_width <= 0.0:
+            self.get_logger().error(
+                "grasp_record_easy planning failed (IK or FK problem)"
+            )
+            result = GraspRecordEasy.Result()
+            result.success = False
+            result.error_code = "PLANNING_FAILED"
+            result.message = "几何抓取规划失败（FK/IK 不可用或目标不可达）"
+            result.steps_executed = 0
+            goal_handle.abort()
+            return result
+
+        self.get_logger().info(
+            "grasp_record_easy plan: "
+            f"center=({req.center_base.x:.3f}, {req.center_base.y:.3f}, {req.center_base.z:.3f}), "
+            f"gripper_width={gripper_width:.3f}m"
+        )
+
+        # Phase 2: build steps
+        steps = self._simple_grasp_executor.build_grasp_steps(
+            grasp_pose, pre_grasp_pose, gripper_width
+        )
+        total_steps = len(steps)
+        self.get_logger().info(
+            f"grasp_record_easy plan generated: {total_steps} steps"
+        )
+
+        # Phase 3: execute steps
+        def on_progress(index: int, step: SkillStep) -> None:
+            progress = 0.2 + 0.8 * float(index) / float(total_steps) if total_steps else 0.2
+            feedback = GraspRecordEasy.Feedback()
+            feedback.phase = "executing"
+            feedback.step_index = index
+            feedback.step_desc = step.desc
+            feedback.progress = progress
+            goal_handle.publish_feedback(feedback)
+
+        success, code, message, steps_executed = await self._step_executor.execute_steps(
+            steps,
+            on_progress=on_progress,
+            check_cancel=lambda: goal_handle.is_cancel_requested,
+        )
+
+        result = GraspRecordEasy.Result()
+        result.success = success
+        result.error_code = code
+        result.message = message
+        result.steps_executed = steps_executed
+
+        if success:
+            goal_handle.succeed()
+        elif code == "CANCELED":
+            goal_handle.canceled()
+        else:
+            goal_handle.abort()
+
+        return result
 
     async def _execute_skill_sequence(
         self, goal_handle: ServerGoalHandle
