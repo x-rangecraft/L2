@@ -6,6 +6,7 @@ from typing import List
 
 import rclpy
 from ament_index_python.packages import get_package_share_directory
+from geometry_msgs.msg import PoseStamped
 from rclpy.action import ActionServer, CancelResponse, GoalResponse
 from rclpy.action.server import ServerGoalHandle
 from rclpy.node import Node as RclpyNode
@@ -19,6 +20,7 @@ from robot_skill_core.constants import (
     SKILL_ACTION_TOPIC,
     SUPPORTED_STEP_TYPES,
     JOINT_NAME_ORDER,
+    MIN_CENTER_Z,
 )
 from robot_skill_core.grasp_executor import GraspExecutor
 from robot_skill_core.simple_grasp_executor import SimpleGraspExecutor
@@ -252,76 +254,216 @@ class RobotSkill(RclpyNode):
             f"context={context_id}"
         )
 
-        # Phase 1: planning feedback
-        planning_fb = GraspRecordEasy.Feedback()
-        planning_fb.phase = "planning"
-        planning_fb.step_index = 0
-        planning_fb.step_desc = "Computing simple grasp plan from center"
-        planning_fb.progress = 0.0
-        goal_handle.publish_feedback(planning_fb)
-
-        # Compute grasp plan
-        grasp_pose, pre_grasp_pose, gripper_width = await self._simple_grasp_executor.compute_grasp_plan(  # type: ignore[arg-type]
-            req.center_base
-        )
-
-        if grasp_pose is None or pre_grasp_pose is None or gripper_width <= 0.0:
-            self.get_logger().error(
-                "grasp_record_easy planning failed (IK or FK problem)"
-            )
+        # Execute steps one by one, computing next step after each execution
+        steps_executed = 0
+        
+        # Helper function to go to safety pose on error
+        async def go_to_safety_and_return(error_code: str, error_message: str) -> GraspRecordEasy.Result:
+            self.get_logger().error(f"Error: {error_message}, going to safety pose...")
+            try:
+                safety_step = SkillStep(
+                    id='safe_on_error',
+                    type='safety_pose',
+                    desc='回到安全位姿（错误恢复）',
+                    params={},
+                )
+                await self._step_executor.execute_step(safety_step)
+            except Exception as exc:
+                self.get_logger().error(f"Failed to go to safety pose: {exc}")
             result = GraspRecordEasy.Result()
             result.success = False
-            result.error_code = "PLANNING_FAILED"
-            result.message = "几何抓取规划失败（FK/IK 不可用或目标不可达）"
-            result.steps_executed = 0
+            result.error_code = error_code
+            result.message = error_message
+            result.steps_executed = steps_executed
             goal_handle.abort()
             return result
-
-        self.get_logger().info(
-            "grasp_record_easy plan: "
-            f"center=({req.center_base.x:.3f}, {req.center_base.y:.3f}, {req.center_base.z:.3f}), "
-            f"gripper_width={gripper_width:.3f}m"
-        )
-
-        # Phase 2: build steps
-        steps = self._simple_grasp_executor.build_grasp_steps(
-            grasp_pose, pre_grasp_pose, gripper_width
-        )
-        total_steps = len(steps)
-        self.get_logger().info(
-            f"grasp_record_easy plan generated: {total_steps} steps"
-        )
-
-        # Phase 3: execute steps
-        def on_progress(index: int, step: SkillStep) -> None:
-            progress = 0.2 + 0.8 * float(index) / float(total_steps) if total_steps else 0.2
+        
+        # Calibrate center_base.z: ensure minimum height
+        original_z = req.center_base.z
+        if req.center_base.z < MIN_CENTER_Z:
+            self.get_logger().info(
+                f"[robot_skill] Calibrating center_base.z: {req.center_base.z:.3f}m -> {MIN_CENTER_Z:.3f}m"
+            )
+            req.center_base.z = MIN_CENTER_Z
+        
+        # Wrap entire execution in try-except to catch any unexpected errors
+        try:
+            # Step 1: Go to safety pose
             feedback = GraspRecordEasy.Feedback()
             feedback.phase = "executing"
-            feedback.step_index = index
-            feedback.step_desc = step.desc
-            feedback.progress = progress
+            feedback.step_index = 0
+            feedback.step_desc = "回到安全位姿"
+            feedback.progress = 0.0
             goal_handle.publish_feedback(feedback)
+            
+            step1 = SkillStep(
+                id='safe_start',
+                type='safety_pose',
+                desc='回到安全位姿',
+                params={},
+            )
+            success, code, message = await self._step_executor.execute_step(step1)
+            if not success:
+                return await go_to_safety_and_return(code or 'STEP_FAILED', f"Step1 failed: {message}")
+            steps_executed += 1
+            
+            # Step 2: Move to prepare position
+            feedback.step_index = 1
+            feedback.step_desc = "移动到准备夹取位置"
+            feedback.progress = 0.1
+            goal_handle.publish_feedback(feedback)
+            
+            from robot_skill_core.simple_grasp_executor import PREPARE_JOINT_POSITIONS
+            step2 = SkillStep(
+                id='move_to_prepare',
+                type='joint_move',
+                desc='移动到准备夹取位置',
+                params={
+                    'all_positions': list(PREPARE_JOINT_POSITIONS),
+                    'speed_scale': 1.0,
+                },
+            )
+            success, code, message = await self._step_executor.execute_step(step2)
+            if not success:
+                return await go_to_safety_and_return(code or 'STEP_FAILED', f"Step2 failed: {message}")
+            steps_executed += 1
+            
+            # Step 3: Compute and execute joint adjustment
+            feedback.step_index = 2
+            feedback.step_desc = "计算并调整关节朝向质心"
+            feedback.progress = 0.2
+            goal_handle.publish_feedback(feedback)
+            
+            step3_joint_angles = self._simple_grasp_executor._compute_step3_joint_angles(req.center_base)
+            if step3_joint_angles is None or len(step3_joint_angles) < 6:
+                return await go_to_safety_and_return(
+                    'COMPUTATION_FAILED',
+                    "Step3关节角度计算失败，无法调整朝向质心"
+                )
+            
+            step3 = SkillStep(
+                id='adjust_joints_toward_target',
+                type='joint_move',
+                desc='调整Joint1和Joint4朝向质心',
+                params={
+                    'all_positions': step3_joint_angles,
+                    'speed_scale': 1.0,
+                },
+            )
+            success, code, message = await self._step_executor.execute_step(step3)
+            if not success:
+                return await go_to_safety_and_return(code or 'STEP_FAILED', f"Step3 failed: {message}")
+            steps_executed += 1
+            
+            # Step 4: Compute pre-grasp pose and execute
+            feedback.step_index = 3
+            feedback.step_desc = "计算并移动到预抓取位置"
+            feedback.progress = 0.3
+            goal_handle.publish_feedback(feedback)
+            
+            pre_grasp_pose = self._simple_grasp_executor._compute_pre_grasp_pose_from_step3(req.center_base)
+            if pre_grasp_pose is None:
+                return await go_to_safety_and_return(
+                    'COMPUTATION_FAILED',
+                    "预抓取位置计算失败"
+                )
+            
+            step4 = SkillStep(
+                id='pre_grasp',
+                type='cartesian_move',
+                desc='移到预抓取位',
+                params={'target_pose': pre_grasp_pose, 'speed_scale': 1.0},
+            )
+            success, code, message = await self._step_executor.execute_step(step4)
+            if not success:
+                return await go_to_safety_and_return(code or 'STEP_FAILED', f"Step4 failed: {message}")
+            steps_executed += 1
+            
+            # Step 5-12: Compute remaining steps and execute
+            # First compute grasp pose and gripper width
+            # Use the pose from step4 (pre_grasp), which already uses step3's orientation
+            current_pose = await self._simple_grasp_executor._get_current_end_effector_pose()
+            if current_pose is None:
+                return await go_to_safety_and_return(
+                    'COMPUTATION_FAILED',
+                    "无法获取当前末端位姿"
+                )
+            
+            # Use step3's orientation (from current_pose which is after step4, and step4 uses step3's orientation)
+            grasp_pose_obj = self._simple_grasp_executor._build_grasp_pose(
+                req.center_base, 
+                current_pose, 
+                use_current_orientation=True  # Use step3's orientation instead of computing new one
+            )
+            gripper_width = min(0.05 + self._simple_grasp_executor._gripper_width_margin, 
+                               self._simple_grasp_executor._max_gripper_width)
+            
+            # Log the final grasp pose that will be used for IK
+            self.get_logger().info(
+                f"[robot_skill] Final grasp pose for IK: "
+                f"pos=({grasp_pose_obj.position.x:.3f}, {grasp_pose_obj.position.y:.3f}, "
+                f"{grasp_pose_obj.position.z:.3f}), "
+                f"quat=({grasp_pose_obj.orientation.x:.4f}, {grasp_pose_obj.orientation.y:.4f}, "
+                f"{grasp_pose_obj.orientation.z:.4f}, {grasp_pose_obj.orientation.w:.4f})"
+            )
+            
+            grasp_stamped = PoseStamped()
+            grasp_stamped.header.frame_id = "base_link"
+            grasp_stamped.header.stamp = self.get_clock().now().to_msg()
+            grasp_stamped.pose = grasp_pose_obj
+            
+            # Build remaining steps using GraspExecutor
+            remaining_steps = self._simple_grasp_executor._delegate.build_grasp_steps(
+                grasp_pose=grasp_stamped,
+                pre_grasp_pose=pre_grasp_pose,
+                gripper_width=gripper_width,
+            )
+            # Skip the first step (safe_start) since we already executed it
+            remaining_steps = remaining_steps[1:]
+            
+            # Execute remaining steps
+            for idx, step in enumerate(remaining_steps):
+                if goal_handle.is_cancel_requested:
+                    return await go_to_safety_and_return('CANCELED', 'Execution canceled by user')
+                
+                feedback.step_index = 4 + idx
+                feedback.step_desc = step.desc
+                feedback.progress = 0.4 + 0.6 * float(idx) / float(len(remaining_steps)) if remaining_steps else 0.4
+                goal_handle.publish_feedback(feedback)
+                
+                success, code, message = await self._step_executor.execute_step(step)
+                if not success:
+                    return await go_to_safety_and_return(code or 'STEP_FAILED', f"Step{4+idx} ({step.id}) failed: {message}")
+                steps_executed += 1
+            
+            success = True
+            code = 'SUCCESS'
+            message = 'All steps completed successfully'
 
-        success, code, message, steps_executed = await self._step_executor.execute_steps(
-            steps,
-            on_progress=on_progress,
-            check_cancel=lambda: goal_handle.is_cancel_requested,
-        )
+            result = GraspRecordEasy.Result()
+            result.success = success
+            result.error_code = code
+            result.message = message
+            result.steps_executed = steps_executed
 
-        result = GraspRecordEasy.Result()
-        result.success = success
-        result.error_code = code
-        result.message = message
-        result.steps_executed = steps_executed
+            if success:
+                goal_handle.succeed()
+            elif code == "CANCELED":
+                goal_handle.canceled()
+            else:
+                goal_handle.abort()
 
-        if success:
-            goal_handle.succeed()
-        elif code == "CANCELED":
-            goal_handle.canceled()
-        else:
-            goal_handle.abort()
-
-        return result
+            return result
+        
+        except Exception as exc:
+            # Catch any unexpected exceptions and go to safety
+            import traceback
+            error_trace = traceback.format_exc()
+            self.get_logger().error(f"Unexpected error in grasp_record_easy: {exc}\n{error_trace}")
+            return await go_to_safety_and_return(
+                'UNEXPECTED_ERROR',
+                f"Unexpected error: {str(exc)}"
+            )
 
     async def _execute_skill_sequence(
         self, goal_handle: ServerGoalHandle

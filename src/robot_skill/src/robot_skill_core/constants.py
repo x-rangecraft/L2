@@ -20,6 +20,8 @@ DEFAULT_SPEED_SCALE = 1.0  # ratio applied when per-step speed not provided
 DEFAULT_APPROACH_DISTANCE = 0.08  # meters (8cm above grasp point)
 DEFAULT_GRIPPER_WIDTH_MARGIN = 0.02  # meters (2cm margin for gripper width)
 DEFAULT_MAX_GRIPPER_WIDTH = 0.094  # meters (94mm max opening)
+DEFAULT_MIN_GRASP_HEIGHT = 0.05  # meters (5cm minimum grasp height to avoid workspace limits)
+MIN_CENTER_Z = 0.04  # meters (4cm minimum z-coordinate for target center, calibrated at action entry)
 
 
 __all__ = [
@@ -32,4 +34,6 @@ __all__ = [
     'DEFAULT_APPROACH_DISTANCE',
     'DEFAULT_GRIPPER_WIDTH_MARGIN',
     'DEFAULT_MAX_GRIPPER_WIDTH',
+    'DEFAULT_MIN_GRASP_HEIGHT',
+    'MIN_CENTER_Z',
 ]

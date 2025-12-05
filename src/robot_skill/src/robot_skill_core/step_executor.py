@@ -137,6 +137,15 @@ class StepExecutor:
         else:
             raise ValueError(f"Step '{step.id}' has invalid target_pose type: {type(target_pose)}")
 
+        # Log the pose being sent to IK solver
+        self._node.get_logger().info(
+            f"[StepExecutor] Step {step.id} (cartesian_move) sending to IK: "
+            f"pos=({pose.pose.position.x:.3f}, {pose.pose.position.y:.3f}, "
+            f"{pose.pose.position.z:.3f}), "
+            f"quat=({pose.pose.orientation.x:.4f}, {pose.pose.orientation.y:.4f}, "
+            f"{pose.pose.orientation.z:.4f}, {pose.pose.orientation.w:.4f})"
+        )
+        
         goal = RobotCommand.Goal()
         goal.target = pose
         goal.speed_scale = float(step.params.get('speed_scale', DEFAULT_SPEED_SCALE))
